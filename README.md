@@ -1,119 +1,145 @@
-# 東方紅魔郷　～ the Embodiment of Scarlet Devil
+# 東方紅魔郷 SDL2 移植版 / th06-sdl2
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="resources/progress_dark.svg">
-  <img alt="Decomp Progress" src="resources/progress.svg">
-</picture>
+**[English](#english)** | **[中文](#中文)**
 
-[![Discord][discord-badge]][discord] <- click here to join discord server.
+---
 
-[discord]: https://discord.gg/VyGwAjrh9a
-[discord-badge]: https://img.shields.io/discord/1147558514840064030?color=%237289DA&logo=discord&logoColor=%23FFFFFF
+<a id="english"></a>
 
-This project aims to perfectly reconstruct the source code of [Touhou Koumakyou ~ the Embodiment of Scarlet Devil 1.02h](https://en.touhouwiki.net/wiki/Embodiment_of_Scarlet_Devil) by Team Shanghai Alice.
+## English
 
-## Installation
+### About
 
-### Executable
+This is an SDL2/OpenGL port of [Touhou Koumakyou ~ the Embodiment of Scarlet Devil (東方紅魔郷)](https://en.touhouwiki.net/wiki/Embodiment_of_Scarlet_Devil) v1.02h, based on the [re-engineered source code](https://github.com/happyhavoc/th06) by the community.
 
-This project requires the original `東方紅魔郷.exe` version 1.02h (SHA256 hashsum 9f76483c46256804792399296619c1274363c31cd8f1775fafb55106fb852245, you can check hashsum on windows with command `certutil -hashfile <path-to-your-file> SHA256`.)
+The original project reconstructs the game source code from the binary to achieve a byte-accurate match with the original executable. This fork replaces the Direct3D 8 / Win32 backend with **SDL2 + OpenGL**, aiming for cross-platform compatibility.
 
-Copy `東方紅魔郷.exe` to `resources/game.exe`.
+### Features
 
-### Dependencies
+- **SDL2 + OpenGL** rendering backend (replacing Direct3D 8)
+- **SDL2_mixer** for audio playback (replacing DirectSound)
+- **SDL2_image** for texture loading
+- **CMake** build system
+- Windows x86/x64 support (other platforms planned)
 
-The build system has the following package requirements:
+### Requirements
 
-- `python3` >= 3.4
-- `msiextract` (On linux/macos only)
-- `wine` (on linux/macos only, prefer CrossOver on macOS to avoid possible CL.EXE heap issues)
-- `aria2c` (optional, allows for torrent downloads, will automatically install on Windows if selected.)
+- CMake >= 3.20
+- MSVC (Visual Studio 2019+) or compatible C++17 compiler
+- Python 3 (for `i18n.hpp` generation)
+- Original game data files (`東方紅魔郷.exe` v1.02h)
 
-The rest of the build system is constructed out of Visual Studio 2002 and DirectX 8.0 from the Web Archive.
+### Building
 
-#### Configure devenv
-
-This will download and install compiler, libraries, and other tools.
-
-If you are on windows, and for some reason want to download dependencies manually,
-run this command to get the list of files to download:
-
-```
-python scripts/create_devenv.py scripts/dls scripts/prefix --no-download
-```
-
-But if you want everything to be downloaded automatically, run it like this instead:
-
-```
-python scripts/create_devenv.py scripts/dls scripts/prefix
-```
-
-And if you want to use torrent to download those dependencies, use this:
-
-```
-python scripts/create_devenv.py scripts/dls scripts/prefix --torrent
-```
-
-On linux and mac, run the following script:
 ```bash
-# NOTE: On macOS if you use CrossOver.
-# export WINE=<CrossOverPath>/wine
-./scripts/create_th06_prefix
+# Configure (Win32)
+cmake -B build_sdl2 -A Win32
+
+# Build
+cmake --build build_sdl2 --config Release --target th06
 ```
 
-#### Building
+SDL2 libraries are bundled in `3rdparty/` and linked automatically.
 
-Run the following script:
+### Running
+
+The executable needs access to the original game data. Place the game data files (or `build/` directory from the original game) alongside the executable, or run from the game data directory:
+
+```bash
+cd <path-to-game-data>
+<path-to>/build_sdl2/Release/th06.exe
+```
+
+### Project Structure
 
 ```
-python3 ./scripts/build.py
+CMakeLists.txt              # SDL2 build system
+3rdparty/
+  SDL2/                     # SDL2 development libraries
+  SDL2_image/               # SDL2_image development libraries
+  SDL2_mixer/               # SDL2_mixer development libraries
+  imgui/                    # Dear ImGui (debug overlay)
+src/
+  sdl2_renderer.cpp/.hpp    # OpenGL rendering backend
+  sdl2_compat.hpp           # SDL2/D3D8 compatibility layer
+  *.cpp / *.hpp             # Game source (ported from D3D8)
+scripts/                    # Original build & tooling scripts
+config/                     # Decompilation mapping data
 ```
 
-This will automatically generate a ninja build script `build.ninja`, and run
-ninja on it.
+### Credits
 
-## Contributing
+- [happyhavoc/th06](https://github.com/happyhavoc/th06) — Original reverse-engineered source code
+- [Team Shanghai Alice](https://www16.big.or.jp/~zun/) — Original game by ZUN
+- [SDL2](https://www.libsdl.org/) / [OpenGL](https://www.opengl.org/)
 
-### Reverse Engineering
+---
 
-You can find an XML export of our Ghidra RE in the companion repository
-[th06-re], in the `xml` branch. This repo is updated nightly through
-[`scripts/export_ghidra_database.py`], and its history matches the checkin
-history from our team's Ghidra Server.
+<a id="中文"></a>
 
-If you wish to help us in our Reverse Engineering effort, please contact
-@roblabla on discord so we can give you an account on the Ghidra Server.
+## 中文
 
-### Reimplementation
+### 项目简介
 
-The easiest way to work on the reimplementation is through the use of
-[`objdiff`](https://github.com/encounter/objdiff). Here's how to get started:
+本仓库是 [東方紅魔郷 ～ the Embodiment of Scarlet Devil](https://en.touhouwiki.net/wiki/Embodiment_of_Scarlet_Devil) v1.02h 的 **SDL2/OpenGL 移植版**，基于社区 [逆向重建的源代码](https://github.com/happyhavoc/th06)。
 
-1. First, follow the instruction above to get a devenv setup.
-1. Copy the original `東方紅魔郷.exe` file (version 1.02h) to the
-   `resources/` folder, and rename it into `game.exe`. This will be used as the source to compare the
-   reimplementations against.
-1. Download the latest version of objdiff.
-1. Run `python3 scripts/export_ghidra_objs.py --import-csv`. This will extract
-   from `resources/game.exe` the object files that objdiff can compare against.
-1. Finally, run objdiff and open the th06 project.
+原项目通过逆向工程从二进制文件重建游戏源代码，目标是与原版可执行文件逐字节一致。本仓库将 Direct3D 8 / Win32 后端替换为 **SDL2 + OpenGL**，以实现跨平台兼容。
 
-#### Choosing a function to decompile
+### 特性
 
-The easiest is to look at the `config/stubbed.csv` files. Those are all
-functions that are automatically stubbed out. You should pick one of them, open
-the associated object file in objdiff, and click on the function of interest.
+- **SDL2 + OpenGL** 渲染后端（替代 Direct3D 8）
+- **SDL2_mixer** 音频播放（替代 DirectSound）
+- **SDL2_image** 纹理加载
+- **CMake** 构建系统
+- 已支持 Windows x86/x64（其他平台计划中）
 
-Then, open the correct `cpp` file, copy/paste the declaration, and start
-hacking! It may be useful to take the ghidra decompiler output as a base. You
-can find this output in the [th06-re] repository.
+### 环境要求
 
-# Credits
+- CMake >= 3.20
+- MSVC（Visual Studio 2019+）或兼容的 C++17 编译器
+- Python 3（用于生成 `i18n.hpp`）
+- 原版游戏数据文件（`東方紅魔郷.exe` v1.02h）
 
-We would like to extend our thanks to the following individuals for their
-invaluable contributions:
+### 构建
 
-- @EstexNT for porting the [`var_order` pragma](scripts/pragma_var_order.cpp) to
-  MSVC7.
+```bash
+# 配置（Win32）
+cmake -B build_sdl2 -A Win32
 
-[th06-re]: https://github.com/happyhavoc/th06-re
+# 编译
+cmake --build build_sdl2 --config Release --target th06
+```
+
+SDL2 库已内置于 `3rdparty/` 目录，自动链接。
+
+### 运行
+
+可执行文件需要访问原版游戏数据。将游戏数据文件（或原版游戏的 `build/` 目录）放在可执行文件旁，或从游戏数据目录运行：
+
+```bash
+cd <游戏数据路径>
+<路径>/build_sdl2/Release/th06.exe
+```
+
+### 项目结构
+
+```
+CMakeLists.txt              # SDL2 构建系统
+3rdparty/
+  SDL2/                     # SDL2 开发库
+  SDL2_image/               # SDL2_image 开发库
+  SDL2_mixer/               # SDL2_mixer 开发库
+  imgui/                    # Dear ImGui（调试覆盖层）
+src/
+  sdl2_renderer.cpp/.hpp    # OpenGL 渲染后端
+  sdl2_compat.hpp           # SDL2/D3D8 兼容层
+  *.cpp / *.hpp             # 游戏源码（从 D3D8 移植）
+scripts/                    # 原始构建和工具脚本
+config/                     # 反编译映射数据
+```
+
+### 致谢
+
+- [happyhavoc/th06](https://github.com/happyhavoc/th06) — 原始逆向重建源码
+- [上海爱丽丝幻乐团](https://www16.big.or.jp/~zun/) — ZUN 制作的原版游戏
+- [SDL2](https://www.libsdl.org/) / [OpenGL](https://www.opengl.org/)
