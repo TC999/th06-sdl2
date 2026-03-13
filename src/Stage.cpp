@@ -10,7 +10,8 @@
 #include "Supervisor.hpp"
 #include "ZunColor.hpp"
 #include "utils.hpp"
-#include <d3d8.h>
+#include "sdl2_compat.hpp"
+#include "sdl2_renderer.hpp"
 
 namespace th06
 {
@@ -98,9 +99,8 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
                 stage->skyFog.farPlane = ((f32 *)curInsn->args)[2];
                 if (stage->skyFogInterpDuration == 0)
                 {
-                    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGCOLOR, stage->skyFog.color);
-                    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&stage->skyFog.nearPlane);
-                    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&stage->skyFog.farPlane);
+                    g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane,
+                                      stage->skyFog.farPlane);
                 }
                 stage->instructionIndex++;
                 stage->skyFogInterpFinal = stage->skyFog;
@@ -194,9 +194,7 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
             stage->skyFog.farPlane =
                 (stage->skyFogInterpFinal.farPlane - stage->skyFogInterpInitial.farPlane) * skyFogInterpRatio +
                 stage->skyFogInterpInitial.farPlane;
-            g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGCOLOR, stage->skyFog.color);
-            g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&stage->skyFog.nearPlane);
-            g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&stage->skyFog.farPlane);
+            g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
             if ((ZunBool)(stage->skyFogInterpTimer.current >= stage->skyFogInterpDuration))
             {
                 stage->skyFogInterpDuration = 0;
@@ -225,10 +223,8 @@ ChainCallbackResult Stage::OnDrawHighPrio(Stage *stage)
     if (stage->skyFogNeedsSetup)
     {
         stage->skyFogNeedsSetup = 0;
-        g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGCOLOR, stage->skyFog.color);
     }
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&stage->skyFog.nearPlane);
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&stage->skyFog.farPlane);
+    g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
     if (stage->spellcardState <= RUNNING)
     {
         if (!g_Gui.IsStageFinished())
@@ -240,10 +236,9 @@ ChainCallbackResult Stage::OnDrawHighPrio(Stage *stage)
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
-#pragma var_order(val, stageToSpellcardBackgroundAlpha, gameRegion)
+#pragma var_order(stageToSpellcardBackgroundAlpha, gameRegion)
 ChainCallbackResult Stage::OnDrawLowPrio(Stage *stage)
 {
-    f32 val;
     i32 stageToSpellcardBackgroundAlpha;
     ZunRect gameRegion;
 
@@ -275,11 +270,9 @@ ChainCallbackResult Stage::OnDrawLowPrio(Stage *stage)
     g_Supervisor.viewport.MinZ = 0.0;
     g_Supervisor.viewport.MaxZ = 0.5;
     GameManager::SetupCameraStageBackground(0);
-    g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
-    val = 1000.0f;
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(u32 *)&val);
-    val = 2000.0f;
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(u32 *)&val);
+    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
+                           g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
+    g_Renderer.SetFog(1, stage->skyFog.color, 1000.0f, 2000.0f);
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -325,9 +318,7 @@ ZunResult Stage::AddedCallback(Stage *stage)
     facingDirTimer->InitializeForPopup();
     stage->unpauseFlag = 0;
 
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGCOLOR, stage->skyFog.color);
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGSTART, *(DWORD *)&stage->skyFog.nearPlane);
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_FOGEND, *(DWORD *)&stage->skyFog.farPlane);
+    g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
     return ZUN_SUCCESS;
 }
 

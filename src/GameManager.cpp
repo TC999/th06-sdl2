@@ -16,8 +16,8 @@
 #include "Supervisor.hpp"
 #include "utils.hpp"
 
-#include <d3d8types.h>
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
+#include "sdl2_renderer.hpp"
 
 namespace th06
 {
@@ -166,8 +166,9 @@ ChainCallbackResult GameManager::OnUpdate(GameManager *gameManager)
 
     SetupCamera(0);
 
-    g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
-    g_Supervisor.d3dDevice->Clear(0, NULL, D3DCLEAR_ZBUFFER, g_Stage.skyFog.color, 1.0, 0);
+    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
+                           g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
+    g_Renderer.Clear(g_Stage.skyFog.color, 0, 1);
 
     // Seems like gameManager->isInGameMenu was supposed to have 3 states, but all the times it ends up checking both
     if (gameManager->isInGameMenu == 1 || gameManager->isInGameMenu == 2 || gameManager->isInRetryMenu)
@@ -278,7 +279,6 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
     i32 padding[3];
 
     failedToLoadReplay = false;
-    g_Supervisor.d3dDevice->ResourceManagerDiscardBytes(0);
     if (g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER_REINIT)
     {
         g_Supervisor.defaultConfig.bombCount = g_GameManager.bombsRemaining;
@@ -473,7 +473,6 @@ ZunResult GameManager::DeletedCallback(GameManager *mgr)
 {
     i32 padding1, padding2, padding3;
 
-    g_Supervisor.d3dDevice->ResourceManagerDiscardBytes(0);
     if (!g_GameManager.demoMode)
     {
         g_Supervisor.StopAudio();
@@ -527,8 +526,8 @@ void GameManager::SetupCameraStageBackground(f32 extraRenderDistance)
     g_GameManager.cameraDistance = fabsf(cameraDistance);
     D3DXMatrixPerspectiveFovLH(&g_Supervisor.projectionMatrix, fov, aspectRatio, 100.0f,
                                10000.0f + extraRenderDistance);
-    g_Supervisor.d3dDevice->SetTransform(D3DTS_VIEW, &g_Supervisor.viewMatrix);
-    g_Supervisor.d3dDevice->SetTransform(D3DTS_PROJECTION, &g_Supervisor.projectionMatrix);
+    g_Renderer.SetViewTransform(&g_Supervisor.viewMatrix);
+    g_Renderer.SetProjectionTransform(&g_Supervisor.projectionMatrix);
     return;
 }
 
@@ -570,8 +569,8 @@ void GameManager::SetupCamera(f32 extraRenderDistance)
     g_GameManager.cameraDistance = fabsf(cameraDistance);
     D3DXMatrixPerspectiveFovLH(&g_Supervisor.projectionMatrix, fov, aspectRatio, 100.0f,
                                10000.0f + extraRenderDistance);
-    g_Supervisor.d3dDevice->SetTransform(D3DTS_VIEW, &g_Supervisor.viewMatrix);
-    g_Supervisor.d3dDevice->SetTransform(D3DTS_PROJECTION, &g_Supervisor.projectionMatrix);
+    g_Renderer.SetViewTransform(&g_Supervisor.viewMatrix);
+    g_Renderer.SetProjectionTransform(&g_Supervisor.projectionMatrix);
     return;
 }
 

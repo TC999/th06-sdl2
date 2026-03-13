@@ -1,7 +1,9 @@
 #include "TextHelper.hpp"
 #include "GameWindow.hpp"
 #include "Supervisor.hpp"
+#include "sdl2_renderer.hpp"
 #include "i18n.hpp"
+#include <cstring>
 
 namespace th06
 {
@@ -36,9 +38,16 @@ bool TextHelper::ReleaseBuffer()
 {
     if (this->hdc)
     {
-        SelectObject(this->hdc, this->gdiObj);
-        DeleteDC(this->hdc);
-        DeleteObject(this->gdiObj2);
+#ifdef _WIN32
+        SelectObject((HDC)this->hdc, (HGDIOBJ)this->gdiObj);
+        DeleteDC((HDC)this->hdc);
+        DeleteObject((HGDIOBJ)this->gdiObj2);
+#else
+        if (this->buffer)
+        {
+            free(this->buffer);
+        }
+#endif
         this->format = (D3DFORMAT)-1;
         this->width = 0;
         this->height = 0;
@@ -57,8 +66,13 @@ bool TextHelper::ReleaseBuffer()
 #define TEXT_BUFFER_HEIGHT 64
 void TextHelper::CreateTextBuffer()
 {
-    g_Supervisor.d3dDevice->CreateImageSurface(GAME_WINDOW_WIDTH, TEXT_BUFFER_HEIGHT, D3DFMT_A1R5G5B5,
-                                               &g_TextBufferSurface);
+    SoftSurface *surf = new SoftSurface();
+    surf->width = GAME_WINDOW_WIDTH;
+    surf->height = TEXT_BUFFER_HEIGHT;
+    surf->format = D3DFMT_A8R8G8B8;
+    surf->pitch = GAME_WINDOW_WIDTH * 4;
+    surf->pixels = (u8 *)calloc(surf->pitch * surf->height, 1);
+    g_TextBufferSurface = surf;
 }
 
 bool TextHelper::AllocateBufferWithFallback(i32 width, i32 height, D3DFORMAT format)
@@ -79,34 +93,36 @@ bool TextHelper::AllocateBufferWithFallback(i32 width, i32 height, D3DFORMAT for
     return false;
 }
 
+#ifdef _WIN32
 struct THBITMAPINFO
 {
     BITMAPINFOHEADER bmiHeader;
     RGBQUAD bmiColors[17];
 };
+#endif
 
 #pragma function(memset)
-#pragma var_order(imageWidthInBytes, deviceContext, originalBitmapObj, padding, bitmapInfo, formatInfo, bitmapObj,     \
-                  bitmapData)
 bool TextHelper::TryAllocateBuffer(i32 width, i32 height, D3DFORMAT format)
 {
-    HGDIOBJ originalBitmapObj;
-    u8 *bitmapData;
-    HBITMAP bitmapObj;
     FormatInfo *formatInfo;
-    THBITMAPINFO bitmapInfo;
-    u32 padding;
-    HDC deviceContext;
     i32 imageWidthInBytes;
 
     this->ReleaseBuffer();
-    memset(&bitmapInfo, 0, sizeof(THBITMAPINFO));
     formatInfo = this->GetFormatInfo(format);
     if (formatInfo == NULL)
     {
         return false;
     }
     imageWidthInBytes = ((((width * formatInfo->bitCount) / 8) + 3) / 4) * 4;
+
+#ifdef _WIN32
+    THBITMAPINFO bitmapInfo;
+    u8 *bitmapData;
+    HBITMAP bitmapObj;
+    HDC deviceContext;
+    HGDIOBJ originalBitmapObj;
+
+    memset(&bitmapInfo, 0, sizeof(THBITMAPINFO));
     bitmapInfo.bmiHeader.biSize = sizeof(THBITMAPINFO);
     bitmapInfo.bmiHeader.biWidth = width;
     bitmapInfo.bmiHeader.biHeight = -(height + 1);
@@ -134,6 +150,19 @@ bool TextHelper::TryAllocateBuffer(i32 width, i32 height, D3DFORMAT format)
     this->buffer = bitmapData;
     this->imageSizeInBytes = bitmapInfo.bmiHeader.biSizeImage;
     this->gdiObj = originalBitmapObj;
+#else
+    u32 bufSize = height * imageWidthInBytes;
+    u8 *buf = (u8 *)calloc(bufSize, 1);
+    if (buf == NULL)
+    {
+        return false;
+    }
+    this->hdc = (void *)1;
+    this->gdiObj2 = (void *)1;
+    this->buffer = buf;
+    this->imageSizeInBytes = bufSize;
+    this->gdiObj = NULL;
+#endif
     this->width = width;
     this->height = height;
     this->format = format;
@@ -178,11 +207,16 @@ bool TextHelper::InvertAlpha(i32 x, i32 y, i32 spriteWidth, i32 fontHeight)
     switch (this->format)
     {
     case D3DFMT_A8R8G8B8:
-        for (idx = 3; idx < doubleArea; idx += 4)
+    {
+        // doubleArea is byte count for 16-bit (2 bytes/pixel) formats.
+        // For 32-bit A8R8G8B8, we need twice the byte range.
+        i32 byteCount = spriteWidth * fontHeight * 4;
+        for (idx = 3; idx < byteCount; idx += 4)
         {
             bufferRegion[idx] = bufferRegion[idx] ^ 0xff;
         }
         break;
+    }
     case D3DFMT_A1R5G5B5:
         for (bufferCursor = (A1R5G5B5 *)bufferRegion, idx = 0; idx < doubleArea; idx += 2, bufferCursor += 1)
         {
@@ -214,42 +248,28 @@ bool TextHelper::InvertAlpha(i32 x, i32 y, i32 spriteWidth, i32 fontHeight)
 }
 
 #pragma function(memcpy)
-#pragma var_order(dstBuf, dstWidthBytes, rectToLock, curHeight, srcWidthBytes, outSurfaceDesc, srcBuf, lockedRect,     \
-                  width, height, thisFormat, thisHeight)
-bool TextHelper::CopyTextToSurface(IDirect3DSurface8 *outSurface)
+bool TextHelper::CopyTextToSurface(SoftSurface *outSurface)
 {
-    D3DLOCKED_RECT lockedRect;
     u8 *srcBuf;
-    D3DSURFACE_DESC outSurfaceDesc;
     size_t srcWidthBytes;
     int curHeight;
-    RECT rectToLock;
     int dstWidthBytes;
     u8 *dstBuf;
-    i32 width;
-    i32 height;
-    D3DFORMAT thisFormat;
     i32 thisHeight;
 
-    if (!(bool)(u32)(this->gdiObj2 != NULL))
+    if (this->gdiObj2 == NULL)
     {
         return false;
     }
-    outSurface->GetDesc(&outSurfaceDesc);
-    rectToLock.left = 0;
-    rectToLock.top = 0;
-    rectToLock.right = width = this->width;
-    rectToLock.bottom = height = this->height;
-    if (outSurface->LockRect(&lockedRect, &rectToLock, 0))
+    if (outSurface == NULL || outSurface->pixels == NULL)
     {
         return false;
     }
-    dstWidthBytes = lockedRect.Pitch;
+    dstWidthBytes = outSurface->pitch;
     srcWidthBytes = this->imageWidthInBytes;
     srcBuf = this->buffer;
-    dstBuf = (u8 *)lockedRect.pBits;
-    thisFormat = this->format;
-    if (outSurfaceDesc.Format == thisFormat)
+    dstBuf = outSurface->pixels;
+    if (outSurface->format == this->format)
     {
         for (curHeight = 0; thisHeight = this->height, curHeight < thisHeight; curHeight++)
         {
@@ -258,41 +278,89 @@ bool TextHelper::CopyTextToSurface(IDirect3DSurface8 *outSurface)
             dstBuf += dstWidthBytes;
         }
     }
-    outSurface->UnlockRect();
     return true;
 }
 
+static void ConvertSurfaceToRGBA(SoftSurface *surf, u8 *rgbaOut, i32 srcX, i32 srcY, i32 srcW, i32 srcH)
+{
+    for (i32 row = 0; row < srcH; row++)
+    {
+        i32 sy = srcY + row;
+        if (sy < 0 || sy >= surf->height) continue;
+        u8 *srcRow = surf->pixels + sy * surf->pitch;
+        u8 *dstRow = rgbaOut + row * srcW * 4;
+        for (i32 col = 0; col < srcW; col++)
+        {
+            i32 sx = srcX + col;
+            if (sx < 0 || sx >= surf->width)
+            {
+                dstRow[col * 4 + 0] = 0;
+                dstRow[col * 4 + 1] = 0;
+                dstRow[col * 4 + 2] = 0;
+                dstRow[col * 4 + 3] = 0;
+                continue;
+            }
+            if (surf->format == D3DFMT_A8R8G8B8)
+            {
+                u32 pixel = ((u32 *)srcRow)[sx];
+                dstRow[col * 4 + 0] = (pixel >> 16) & 0xFF;
+                dstRow[col * 4 + 1] = (pixel >> 8) & 0xFF;
+                dstRow[col * 4 + 2] = pixel & 0xFF;
+                dstRow[col * 4 + 3] = (pixel >> 24) & 0xFF;
+            }
+            else if (surf->format == D3DFMT_A1R5G5B5)
+            {
+                u16 pixel = ((u16 *)srcRow)[sx];
+                u8 r = (pixel >> 10) & 0x1F;
+                u8 g = (pixel >> 5) & 0x1F;
+                u8 b = pixel & 0x1F;
+                u8 a = (pixel >> 15) & 1;
+                dstRow[col * 4 + 0] = (r << 3) | (r >> 2);
+                dstRow[col * 4 + 1] = (g << 3) | (g >> 2);
+                dstRow[col * 4 + 2] = (b << 3) | (b >> 2);
+                dstRow[col * 4 + 3] = a ? 255 : 0;
+            }
+            else
+            {
+                dstRow[col * 4 + 0] = 0;
+                dstRow[col * 4 + 1] = 0;
+                dstRow[col * 4 + 2] = 0;
+                dstRow[col * 4 + 3] = 0;
+            }
+        }
+    }
+}
+
 #pragma function(strlen)
-#pragma var_order(hdc, font, textSurfaceDesc, h, textHelper, hdc, srcRect, destRect, destSurface)
 void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 spriteHeight, i32 fontHeight,
                                      i32 fontWidth, ZunColor textColor, ZunColor shadowColor, char *string,
-                                     IDirect3DTexture8 *outTexture)
+                                     u32 outTexture)
 {
-    HGDIOBJ h;
-    LPDIRECT3DSURFACE8 destSurface;
     RECT destRect;
     RECT srcRect;
-    D3DSURFACE_DESC textSurfaceDesc;
-    HFONT font;
-    HDC hdc;
 
-    font = CreateFontA(fontHeight * 2, 0, 0, 0, FW_BOLD, false, false, false, SHIFTJIS_CHARSET, OUT_DEFAULT_PRECIS,
-                       CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN | FIXED_PITCH, TH_FONT_NAME);
+#ifdef _WIN32
+    memset(g_TextBufferSurface->pixels, 0, g_TextBufferSurface->pitch * g_TextBufferSurface->height);
+
+    HFONT font = CreateFontA(fontHeight * 2, 0, 0, 0, FW_BOLD, false, false, false, SHIFTJIS_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                             FF_ROMAN | FIXED_PITCH, TH_FONT_NAME);
     TextHelper textHelper;
-    g_TextBufferSurface->GetDesc(&textSurfaceDesc);
+    D3DSURFACE_DESC textSurfaceDesc;
+    textSurfaceDesc.Width = g_TextBufferSurface->width;
+    textSurfaceDesc.Height = g_TextBufferSurface->height;
+    textSurfaceDesc.Format = g_TextBufferSurface->format;
     textHelper.AllocateBufferWithFallback(textSurfaceDesc.Width, textSurfaceDesc.Height, textSurfaceDesc.Format);
-    hdc = textHelper.hdc;
-    h = SelectObject(hdc, font);
+    HDC hdc = (HDC)textHelper.hdc;
+    HGDIOBJ h = SelectObject(hdc, font);
     textHelper.InvertAlpha(0, 0, spriteWidth * 2, fontHeight * 2 + 6);
     SetBkMode(hdc, TRANSPARENT);
 
     if (shadowColor != COLOR_WHITE)
     {
-        // Render shadow.
         SetTextColor(hdc, shadowColor);
         TextOutA(hdc, xPos * 2 + 3, 2, string, strlen(string));
     }
-    // Render main text.
     SetTextColor(hdc, textColor);
     TextOutA(hdc, xPos * 2, 0, string, strlen(string));
 
@@ -301,21 +369,62 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
     textHelper.CopyTextToSurface(g_TextBufferSurface);
     SelectObject(hdc, h);
     DeleteObject(font);
-    destRect.left = 0;
-    destRect.top = yPos;
-    destRect.right = spriteWidth;
-    destRect.bottom = yPos + 16;
+#endif
+
+    i32 textLen = (i32)strlen(string);
+    if (textLen <= 0)
+    {
+        return;
+    }
+
+    // Original D3D8 rects:
+    //   destRect = {0, yPos, spriteWidth, yPos+16}
+    //   srcRect  = {0, 0, spriteWidth*2-2, fontHeight*2-2}
+    // D3DXLoadSurfaceFromSurface does a point-sampled blit/scale from src to dest.
+    // We replicate this while clamping to the staging buffer dimensions.
     srcRect.left = 0;
     srcRect.top = 0;
     srcRect.right = spriteWidth * 2 - 2;
     srcRect.bottom = fontHeight * 2 - 2;
-    outTexture->GetSurfaceLevel(0, &destSurface);
-    D3DXLoadSurfaceFromSurface(destSurface, NULL, &destRect, g_TextBufferSurface, NULL, &srcRect, 4, 0);
-    if (destSurface != NULL)
+
+    // Clamp source to staging buffer bounds
+    if (srcRect.right > (LONG)g_TextBufferSurface->width)
+        srcRect.right = (LONG)g_TextBufferSurface->width;
+    if (srcRect.bottom > (LONG)g_TextBufferSurface->height)
+        srcRect.bottom = (LONG)g_TextBufferSurface->height;
+
+    destRect.left = 0;
+    destRect.top = yPos;
+    destRect.right = spriteWidth;
+    destRect.bottom = yPos + 16;
+
+    i32 srcW = srcRect.right - srcRect.left;
+    i32 srcH = srcRect.bottom - srcRect.top;
+    if (srcW <= 0 || srcH <= 0) return;
+
+    i32 dstW = destRect.right - destRect.left;
+    i32 dstH = destRect.bottom - destRect.top;
+    if (dstW <= 0 || dstH <= 0) return;
+
+    u8 *srcRGBA = (u8 *)calloc(srcW * srcH * 4, 1);
+    ConvertSurfaceToRGBA(g_TextBufferSurface, srcRGBA, srcRect.left, srcRect.top, srcW, srcH);
+
+    u8 *dstRGBA = (u8 *)calloc(dstW * dstH * 4, 1);
+    for (i32 row = 0; row < dstH; row++)
     {
-        destSurface->Release();
-        destSurface = NULL;
+        i32 sy = row * srcH / dstH;
+        for (i32 col = 0; col < dstW; col++)
+        {
+            i32 sx = col * srcW / dstW;
+            u8 *sp = srcRGBA + (sy * srcW + sx) * 4;
+            u8 *dp = dstRGBA + (row * dstW + col) * 4;
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+        }
     }
+
+    g_Renderer.UpdateTextureSubImage(outTexture, destRect.left, destRect.top, dstW, dstH, dstRGBA);
+    free(dstRGBA);
+    free(srcRGBA);
     return;
 }
 

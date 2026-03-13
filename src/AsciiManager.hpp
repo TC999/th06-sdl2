@@ -1,6 +1,6 @@
 #pragma once
 
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
 
 #include "AnmManager.hpp"
 #include "Chain.hpp"

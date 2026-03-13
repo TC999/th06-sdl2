@@ -19,6 +19,18 @@ i32 Pbg3Parser::OpenArchive(char *path)
     return TRUE;
 }
 
+i32 Pbg3Parser::OpenArchiveW(const wchar_t *path)
+{
+    this->Close();
+    this->Reset();
+    if (FileAbstraction::OpenW(path, "r") == FALSE)
+    {
+        return FALSE;
+    }
+    this->fileSize = GetFileSize(this->handle, NULL);
+    return TRUE;
+}
+
 void Pbg3Parser::Close()
 {
     FileAbstraction::Close();

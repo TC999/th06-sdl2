@@ -2,7 +2,7 @@
 
 #include "diffbuild.hpp"
 #include "inttypes.hpp"
-#include <Windows.h>
+#include "sdl2_compat.hpp"
 
 namespace th06
 {
@@ -28,6 +28,7 @@ class FileAbstraction : public IFileAbstraction
     ~FileAbstraction();
 
     virtual i32 Open(char *filename, char *mode);
+    i32 OpenW(const wchar_t *filename, char *mode);
     virtual void Close();
     virtual i32 Read(u8 *data, u32 dataLen, u32 *numBytesRead);
     virtual i32 Write(u8 *data, u32 dataLen, u32 *outWritten);

@@ -14,7 +14,11 @@
 #include "Stage.hpp"
 #include "i18n.hpp"
 #include "utils.hpp"
+#include "sdl2_renderer.hpp"
+#include <sys/stat.h>
+#ifdef _WIN32
 #include <direct.h>
+#endif
 #include <stdio.h>
 #include <time.h>
 
@@ -865,7 +869,11 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
 
         if (this->frameTimer == 0)
         {
+#ifdef _WIN32
             _mkdir("replay");
+#else
+            mkdir("replay", 0755);
+#endif
             for (idx = 0; idx < ARRAY_SIZE_SIGNED(this->replays); idx++)
             {
                 sprintf(replayToReadPath, "./replay/th6_%.2d.rpy", idx + 1);
@@ -1747,7 +1755,7 @@ ChainCallbackResult th06::ResultScreen::OnDraw(ResultScreen *resultScreen)
     g_Supervisor.viewport.Width = 640;
     g_Supervisor.viewport.Height = 480;
 
-    g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
     g_AnmManager->CopySurfaceToBackBuffer(0, 0, 0, 0, 0);
 
     for (row = 0; row < ARRAY_SIZE_SIGNED(resultScreen->unk_40); row++, sprite++)

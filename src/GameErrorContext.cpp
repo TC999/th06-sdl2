@@ -1,4 +1,4 @@
-#include <windows.h>
+#include "sdl2_compat.hpp"
 
 #include "CMyFont.hpp"
 #include "GameErrorContext.hpp"

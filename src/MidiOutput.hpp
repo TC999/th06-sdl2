@@ -3,7 +3,10 @@
 #include "ZunBool.hpp"
 #include "ZunResult.hpp"
 #include "inttypes.hpp"
-#include <Windows.h>
+#include "sdl2_compat.hpp"
+
+struct _Mix_Music;
+typedef struct _Mix_Music Mix_Music;
 
 namespace th06
 {
@@ -15,12 +18,13 @@ struct MidiTimer
     virtual void OnTimerElapsed() = 0;
 
     i32 StopTimer();
-    u32 StartTimer(u32 delay, LPTIMECALLBACK cb, DWORD_PTR data);
+    u32 StartTimer(u32 delay, void *cb, u32 data);
 
-    static void CALLBACK DefaultTimerCallback(u32 uTimerID, u32 uMsg, DWORD_PTR dwUser, DWORD_PTR dw1, DWORD_PTR dw2);
+    static u32 DefaultTimerCallback(u32 interval, void *param);
 
     u32 timerId;
-    TIMECAPS timeCaps;
+    u32 timerMin;
+    u32 timerMax;
 };
 ZUN_ASSERT_SIZE(MidiTimer, 0x10);
 
@@ -87,9 +91,9 @@ struct MidiDevice
     ZunResult Close();
     ZunBool OpenDevice(u32 uDeviceId);
     ZunBool SendShortMsg(u8 midiStatus, u8 firstByte, u8 secondByte);
-    ZunBool SendLongMsg(LPMIDIHDR pmh);
+    ZunBool SendLongMsg(void *pmh);
 
-    HMIDIOUT handle;
+    u32 handle;
     u32 deviceId;
 };
 ZUN_ASSERT_SIZE(MidiDevice, 0x8);
@@ -113,7 +117,7 @@ struct MidiOutput : MidiTimer
 
     void OnTimerElapsed();
 
-    ZunResult UnprepareHeader(LPMIDIHDR pmh);
+    ZunResult UnprepareHeader(void *pmh);
 
     ZunResult StopPlayback();
     void LoadTracks();
@@ -145,7 +149,7 @@ struct MidiOutput : MidiTimer
         return *(const u32 *)tmp;
     }
 
-    MIDIHDR *midiHeaders[32];
+    void *midiHeaders[32];
     i32 midiHeadersCursor;
     u8 *midiFileData[32];
     i32 numTracks;
@@ -153,8 +157,8 @@ struct MidiOutput : MidiTimer
     i32 divisions;
     i32 tempo;
     u32 unk124;
-    unsigned __int64 volume;
-    __int64 unk130;
+    u64 volume;
+    i64 unk130;
     MidiTrack *tracks;
     MidiDevice midiOutDev;
     u8 unk144[16];
@@ -170,8 +174,8 @@ struct MidiOutput : MidiTimer
     i32 fadeOutInterval;
     i32 fadeOutElapsedMS;
     u32 unk2ec;
-    ULONGLONG unk2f0;
-    ULONGLONG unk2f8;
+    u64 unk2f0;
+    u64 unk2f8;
 };
 ZUN_ASSERT_SIZE(MidiOutput, 0x300);
 }; // namespace th06

@@ -8,7 +8,7 @@
 #include "SoundPlayer.hpp"
 #include "utils.hpp"
 
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
 
 namespace th06
 {

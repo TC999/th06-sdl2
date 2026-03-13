@@ -6,8 +6,7 @@
 #include "diffbuild.hpp"
 #include "inttypes.hpp"
 #include "zwave.hpp"
-#include <d3d8.h>
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
 
 namespace th06
 {

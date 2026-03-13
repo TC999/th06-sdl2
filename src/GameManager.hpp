@@ -1,8 +1,6 @@
 #pragma once
 
-#include <Windows.h>
-#include <d3d8.h>
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
 
 #include "Chain.hpp"
 #include "ResultScreen.hpp"

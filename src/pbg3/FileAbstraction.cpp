@@ -57,6 +57,55 @@ i32 FileAbstraction::Open(char *filename, char *mode)
     return 1;
 }
 
+i32 FileAbstraction::OpenW(const wchar_t *filename, char *mode)
+{
+    int creationDisposition;
+    i32 goToEnd = FALSE;
+
+    this->Close();
+
+    char *curMode;
+    for (curMode = mode; *curMode != '\0'; curMode += 1)
+    {
+        if (*curMode == 'r')
+        {
+            this->access = GENERIC_READ;
+            creationDisposition = OPEN_EXISTING;
+            break;
+        }
+        else if (*curMode == 'w')
+        {
+            DeleteFileW(filename);
+            this->access = GENERIC_WRITE;
+            creationDisposition = OPEN_ALWAYS;
+            break;
+        }
+        else if (*curMode == 'a')
+        {
+            goToEnd = true;
+            this->access = GENERIC_WRITE;
+            creationDisposition = OPEN_ALWAYS;
+            break;
+        }
+    }
+
+    if (*curMode == '\0')
+    {
+        return 0;
+    }
+    this->handle = CreateFileW(filename, this->access, FILE_SHARE_READ, NULL, creationDisposition,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+
+    if (this->handle == INVALID_HANDLE_VALUE)
+        return 0;
+
+    if (goToEnd)
+    {
+        SetFilePointer(this->handle, 0, NULL, FILE_END);
+    }
+    return 1;
+}
+
 void FileAbstraction::Close()
 {
     if (this->handle != INVALID_HANDLE_VALUE)

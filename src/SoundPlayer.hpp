@@ -1,11 +1,12 @@
 #pragma once
 
-#include <Windows.h>
-
+#include "sdl2_compat.hpp"
 #include "ZunResult.hpp"
 #include "diffbuild.hpp"
 #include "inttypes.hpp"
 #include "zwave.hpp"
+
+struct Mix_Chunk;
 
 namespace th06
 {
@@ -67,7 +68,7 @@ struct SoundPlayer
                                           u32 fileSizeExcludingFormat);
     void PlaySounds();
     void PlaySoundByIdx(SoundIdx idx, i32 unused);
-    ZunResult PlayBGM(BOOL isLooping);
+    ZunResult PlayBGM(i32 isLooping);
     void StopBGM();
     void FadeOut(f32 seconds)
     {
@@ -82,26 +83,26 @@ struct SoundPlayer
         }
     }
 
-    static DWORD __stdcall BackgroundMusicPlayerThread(LPVOID lpThreadParameter);
+    static void BackgroundMusicPlayerThread(void *lpThreadParameter);
 
     ZunResult LoadWav(char *path);
     ZunResult LoadPos(char *path);
 
-    LPDIRECTSOUND dsoundHdl;
+    i32 dsoundHdl;
     i32 unk4;
-    LPDIRECTSOUNDBUFFER soundBuffers[128];
-    LPDIRECTSOUNDBUFFER duplicateSoundBuffers[128];
+    Mix_Chunk *soundBuffers[128];
+    i32 soundChannels[128];
     i32 unk408[128];
-    LPDIRECTSOUNDBUFFER initSoundBuffer;
+    i32 initSoundBuffer;
     HWND gameWindow;
     CSoundManager *manager;
-    DWORD backgroundMusicThreadId;
-    HANDLE backgroundMusicThreadHandle;
+    u32 backgroundMusicThreadId;
+    void *backgroundMusicThreadHandle;
     i32 unk61c;
     i32 soundBuffersToPlay[3];
     CStreamingSound *backgroundMusic;
-    HANDLE backgroundMusicUpdateEvent;
-    BOOL isLooping;
+    void *backgroundMusicUpdateEvent;
+    i32 isLooping;
 };
 ZUN_ASSERT_SIZE(SoundPlayer, 0x638);
 

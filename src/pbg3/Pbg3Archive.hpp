@@ -26,6 +26,7 @@ class Pbg3Archive
     i32 Release();
 
     i32 Load(char *path);
+    i32 LoadW(const wchar_t *path);
     i32 ParseHeader();
     i32 FindEntry(char *path);
     u32 GetEntrySize(u32 entryIdx);

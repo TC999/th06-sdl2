@@ -1,7 +1,6 @@
 #pragma once
 
-#include <Windows.h>
-#include <d3d8types.h>
+#include "sdl2_compat.hpp"
 #include <string.h>
 
 #include "Chain.hpp"

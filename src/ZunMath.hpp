@@ -1,8 +1,8 @@
 #pragma once
 #include "diffbuild.hpp"
 #include "inttypes.hpp"
-#include <Windows.h>
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
+#include <cmath>
 
 struct ZunVec2
 {
@@ -11,7 +11,7 @@ struct ZunVec2
 
     f32 VectorLength()
     {
-        return sqrt(this->x * this->x + this->y * this->y);
+        return sqrtf(this->x * this->x + this->y * this->y);
     }
 
     f64 VectorLengthF64()
@@ -56,49 +56,28 @@ ZUN_ASSERT_SIZE(ZunVec3, 0xC);
 
 #define sincos(in, out_sine, out_cosine)                                                                               \
     {                                                                                                                  \
-        __asm { \
-        __asm fld in \
-        __asm fsincos \
-        __asm fstp out_cosine \
-        __asm fstp out_sine }                                            \
+        (out_cosine) = cosf(in);                                                                                       \
+        (out_sine) = sinf(in);                                                                                         \
     }
 
-void __inline fsincos_wrapper(f32 *out_sine, f32 *out_cosine, f32 angle)
+inline void fsincos_wrapper(f32 *out_sine, f32 *out_cosine, f32 angle)
 {
-    __asm {
-        fld [angle]
-        fsincos
-        mov eax, [out_cosine]
-        fstp [eax]
-        mov eax, [out_sine]
-        fstp [eax]
-    }
+    *out_cosine = cosf(angle);
+    *out_sine = sinf(angle);
 }
 
-void __inline sincosmul(D3DXVECTOR3 *out_vel, f32 input, f32 multiplier)
+inline void sincosmul(D3DXVECTOR3 *out_vel, f32 input, f32 multiplier)
 {
-    __asm {
-        mov eax, out_vel
-        fld input
-        fsincos
-        fmul [multiplier]
-        fstp [eax]
-        fmul [multiplier]
-        fstp [eax+4]
-    }
+    out_vel->x = cosf(input) * multiplier;
+    out_vel->y = sinf(input) * multiplier;
 }
 
-f32 __inline invertf(f32 x)
+inline f32 invertf(f32 x)
 {
     return 1.f / x;
 }
 
-f32 __inline rintf(f32 float_in)
+inline f32 rintf(f32 float_in)
 {
-    __asm {
-        fld float_in
-        frndint
-        fstp float_in
-    }
-    return float_in;
+    return roundf(float_in);
 }

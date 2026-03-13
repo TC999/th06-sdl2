@@ -1,6 +1,6 @@
 #pragma once
 
-#include <windows.h>
+#include "sdl2_compat.hpp"
 
 #include "diffbuild.hpp"
 #include "i18n.hpp"

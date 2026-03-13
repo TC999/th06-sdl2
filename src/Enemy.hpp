@@ -10,9 +10,7 @@
 #include "ZunResult.hpp"
 #include "ZunTimer.hpp"
 #include "inttypes.hpp"
-#include <Windows.h>
-#include <d3d8.h>
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
 #include <string.h>
 
 namespace th06

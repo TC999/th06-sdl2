@@ -1,6 +1,7 @@
 #pragma once
 
 #include "inttypes.hpp"
+#include <SDL.h>
 
 namespace th06
 {
@@ -38,13 +39,11 @@ namespace Controller
 u16 GetJoystickCaps(void);
 u32 SetButtonFromControllerInputs(u16 *outButtons, i16 controllerButtonToTest, enum TouhouButton touhouButton,
                                   u32 inputButtons);
-
-unsigned int SetButtonFromDirectInputJoystate(u16 *outButtons, i16 controllerButtonToTest,
-                                              enum TouhouButton touhouButton, u8 *inputButtons);
-
 u16 GetControllerInput(u16 buttons);
 u8 *GetControllerState();
 u16 GetInput(void);
 void ResetKeyboard(void);
+void InitSDLController(void);
+void CloseSDLController(void);
 }; // namespace Controller
 }; // namespace th06

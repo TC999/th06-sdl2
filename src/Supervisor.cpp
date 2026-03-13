@@ -3,6 +3,7 @@
 #include "AsciiManager.hpp"
 #include "Chain.hpp"
 #include "ChainPriorities.hpp"
+#include "Controller.hpp"
 #include "Ending.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
@@ -18,15 +19,15 @@
 #include "i18n.hpp"
 #include "inttypes.hpp"
 #include "utils.hpp"
-
 #include <stdio.h>
 #include <string.h>
+#include <SDL.h>
 
 namespace th06
 {
 DIFFABLE_STATIC(Supervisor, g_Supervisor)
 DIFFABLE_STATIC(ControllerMapping, g_ControllerMapping)
-DIFFABLE_STATIC(IDirect3DSurface8 *, g_TextBufferSurface)
+DIFFABLE_STATIC(SoftSurface *, g_TextBufferSurface)
 DIFFABLE_STATIC(u16, g_LastFrameInput);
 DIFFABLE_STATIC(u16, g_CurFrameInput);
 DIFFABLE_STATIC(u16, g_IsEigthFrameOfHeldInput);
@@ -70,7 +71,6 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
         case SUPERVISOR_STATE_INIT:
         REINIT_MAINMENU:
             s->curState = SUPERVISOR_STATE_MAINMENU;
-            g_Supervisor.d3dDevice->ResourceManagerDiscardBytes(0);
             if (MainMenu::RegisterChain(0) != ZUN_SUCCESS)
             {
                 return CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS;
@@ -158,7 +158,6 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
                 s->curState = SUPERVISOR_STATE_INIT;
                 ReplayManager::SaveReplay(NULL, NULL);
                 s->curState = SUPERVISOR_STATE_MAINMENU;
-                g_Supervisor.d3dDevice->ResourceManagerDiscardBytes(0);
                 if (MainMenu::RegisterChain(1) != ZUN_SUCCESS)
                 {
                     return CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS;
@@ -246,30 +245,6 @@ ChainCallbackResult Supervisor::OnDraw(Supervisor *s)
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
-#pragma var_order(diprange, pvRefBackup)
-BOOL CALLBACK Supervisor::ControllerCallback(LPCDIDEVICEOBJECTINSTANCEA lpddoi, LPVOID pvRef)
-{
-    LPVOID pvRefBackup;
-    DIPROPRANGE diprange;
-    pvRefBackup = pvRef;
-
-    if (lpddoi->dwType & DIDFT_AXIS)
-    {
-        diprange.diph.dwSize = sizeof(diprange);
-        diprange.diph.dwHeaderSize = sizeof(diprange.diph);
-        diprange.diph.dwHow = DIPH_BYID;
-        diprange.diph.dwObj = lpddoi->dwType;
-        diprange.lMin = -1000;
-        diprange.lMax = 1000;
-
-        if (g_Supervisor.controller->SetProperty(DIPROP_RANGE, &diprange.diph) < 0)
-        {
-            return FALSE;
-        }
-    }
-    return TRUE;
-}
-
 #pragma var_order(chain, supervisor)
 ZunResult Supervisor::RegisterChain()
 {
@@ -313,12 +288,10 @@ ZunResult Supervisor::AddedCallback(Supervisor *s)
     }
     g_AnmManager->LoadSurface(0, "data/title/th06logo.jpg");
     g_AnmManager->CopySurfaceToBackBuffer(0, 0, 0, 0, 0);
-    if (g_Supervisor.d3dDevice->Present(0, 0, 0, 0) < 0)
-        g_Supervisor.d3dDevice->Reset(&g_Supervisor.presentParameters);
+    SDL_GL_SwapWindow((SDL_Window *)g_Supervisor.hwndGameWindow);
 
     g_AnmManager->CopySurfaceToBackBuffer(0, 0, 0, 0, 0);
-    if (g_Supervisor.d3dDevice->Present(0, 0, 0, 0) < 0)
-        g_Supervisor.d3dDevice->Reset(&g_Supervisor.presentParameters);
+    SDL_GL_SwapWindow((SDL_Window *)g_Supervisor.hwndGameWindow);
 
     g_AnmManager->ReleaseSurface(0);
 
@@ -353,103 +326,16 @@ ZunResult Supervisor::AddedCallback(Supervisor *s)
 
 ZunResult Supervisor::SetupDInput(Supervisor *supervisor)
 {
-    HINSTANCE hInst;
-
-    hInst = (HINSTANCE)GetWindowLongA(supervisor->hwndGameWindow, GWL_HINSTANCE);
     if (supervisor->cfg.opts >> GCOS_NO_DIRECTINPUT_PAD & 1)
     {
         return ZUN_ERROR;
     }
 
-    if (DirectInput8Create(hInst, DIRECTINPUT_VERSION, IID_IDirectInput8A, (LPVOID *)&supervisor->dinputIface, NULL) <
-        0)
-    {
-        supervisor->dinputIface = NULL;
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_DIRECTINPUT_NOT_AVAILABLE);
-        return ZUN_ERROR;
-    }
-
-    if (supervisor->dinputIface->CreateDevice(GUID_SysKeyboard, &supervisor->keyboard, NULL) < 0)
-    {
-        if (supervisor->dinputIface)
-        {
-            supervisor->dinputIface->Release();
-            supervisor->dinputIface = NULL;
-        }
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_DIRECTINPUT_NOT_AVAILABLE);
-        return ZUN_ERROR;
-    }
-
-    if (supervisor->keyboard->SetDataFormat(&c_dfDIKeyboard) < 0)
-    {
-        if (supervisor->keyboard)
-        {
-            supervisor->keyboard->Release();
-            supervisor->keyboard = NULL;
-        }
-
-        if (supervisor->dinputIface)
-        {
-            supervisor->dinputIface->Release();
-            supervisor->dinputIface = NULL;
-        }
-
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_DIRECTINPUT_SETDATAFORMAT_NOT_AVAILABLE);
-        return ZUN_ERROR;
-    }
-
-    if (supervisor->keyboard->SetCooperativeLevel(supervisor->hwndGameWindow,
-                                                  DISCL_NONEXCLUSIVE | DISCL_FOREGROUND | DISCL_NOWINKEY) < 0)
-    {
-        if (supervisor->keyboard)
-        {
-            supervisor->keyboard->Release();
-            supervisor->keyboard = NULL;
-        }
-
-        if (supervisor->dinputIface)
-        {
-            supervisor->dinputIface->Release();
-            supervisor->dinputIface = NULL;
-        }
-
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_DIRECTINPUT_SETCOOPERATIVELEVEL_NOT_AVAILABLE);
-        return ZUN_ERROR;
-    }
-
-    supervisor->keyboard->Acquire();
+    Controller::InitSDLController();
     GameErrorContext::Log(&g_GameErrorContext, TH_ERR_DIRECTINPUT_INITIALIZED);
+    GameErrorContext::Log(&g_GameErrorContext, TH_ERR_PAD_FOUND);
 
-    supervisor->dinputIface->EnumDevices(DI8DEVCLASS_GAMECTRL, Supervisor::EnumGameControllersCb, NULL,
-                                         DIEDFL_ATTACHEDONLY);
-    if (supervisor->controller)
-    {
-        supervisor->controller->SetDataFormat(&c_dfDIJoystick2);
-        supervisor->controller->SetCooperativeLevel(supervisor->hwndGameWindow, DISCL_EXCLUSIVE | DISCL_FOREGROUND);
-
-        g_Supervisor.controllerCaps.dwSize = sizeof(g_Supervisor.controllerCaps);
-
-        supervisor->controller->GetCapabilities(&g_Supervisor.controllerCaps);
-        supervisor->controller->EnumObjects(Supervisor::ControllerCallback, NULL, DIDFT_ALL);
-
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_PAD_FOUND);
-    }
     return ZUN_SUCCESS;
-}
-
-BOOL CALLBACK Supervisor::EnumGameControllersCb(LPCDIDEVICEINSTANCEA pdidInstance, LPVOID pContext)
-{
-    HRESULT result;
-
-    if (!g_Supervisor.controller)
-    {
-        result = g_Supervisor.dinputIface->CreateDevice(pdidInstance->guidInstance, &g_Supervisor.controller, NULL);
-        if (result < 0)
-        {
-            return TRUE;
-        }
-    }
-    return FALSE;
 }
 
 ZunResult Supervisor::DeletedCallback(Supervisor *s)
@@ -472,29 +358,7 @@ ZunResult Supervisor::DeletedCallback(Supervisor *s)
     }
     ReplayManager::SaveReplay(NULL, NULL);
     TextHelper::ReleaseTextBuffer();
-    if (s->keyboard != NULL)
-    {
-        s->keyboard->Unacquire();
-    }
-    if (s->keyboard != NULL)
-    {
-        s->keyboard->Release();
-        s->keyboard = NULL;
-    }
-    if (s->controller != NULL)
-    {
-        s->controller->Unacquire();
-    }
-    if (s->controller != NULL)
-    {
-        s->controller->Release();
-        s->controller = NULL;
-    }
-    if (s->dinputIface != NULL)
-    {
-        s->dinputIface->Release();
-        s->dinputIface = NULL;
-    }
+    Controller::CloseSDLController();
     return ZUN_SUCCESS;
 }
 
@@ -583,6 +447,50 @@ void Supervisor::ReleasePbg3(i32 pbg3FileIdx)
     this->pbg3Archives[pbg3FileIdx] = NULL;
 }
 
+static const wchar_t *FindDatBySuffixW(const char *filename, wchar_t *outBuf, size_t outBufLen)
+{
+    const char *suffix = NULL;
+    static const char *kSuffixes[] = {"CM.dat", "ED.DAT", "ED.dat", "IN.dat", "MD.dat", "ST.dat", "TL.dat"};
+    for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++)
+    {
+        size_t fnLen = strlen(filename);
+        size_t sfxLen = strlen(kSuffixes[i]);
+        if (fnLen > sfxLen)
+        {
+            const char *tail = filename + fnLen - sfxLen;
+            if (_stricmp(tail, kSuffixes[i]) == 0)
+            {
+                suffix = kSuffixes[i];
+                break;
+            }
+        }
+    }
+    if (suffix == NULL)
+        return NULL;
+
+    wchar_t pattern[32];
+    size_t sfxLen = strlen(suffix);
+    pattern[0] = L'*';
+    for (size_t i = 0; i < sfxLen && i < 30; i++)
+        pattern[1 + i] = (wchar_t)(unsigned char)suffix[i];
+    pattern[1 + sfxLen] = L'\0';
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return NULL;
+
+    size_t nameLen = wcslen(fd.cFileName);
+    if (nameLen >= outBufLen)
+    {
+        FindClose(hFind);
+        return NULL;
+    }
+    wcscpy(outBuf, fd.cFileName);
+    FindClose(hFind);
+    return outBuf;
+}
+
 i32 Supervisor::LoadPbg3(i32 pbg3FileIdx, char *filename)
 {
     if (this->pbg3Archives[pbg3FileIdx] == NULL || strcmp(filename, this->pbg3ArchiveNames[pbg3FileIdx]) != 0)
@@ -590,7 +498,19 @@ i32 Supervisor::LoadPbg3(i32 pbg3FileIdx, char *filename)
         this->ReleasePbg3(pbg3FileIdx);
         this->pbg3Archives[pbg3FileIdx] = new Pbg3Archive();
         utils::DebugPrint("%s open ...\n", filename);
-        if (this->pbg3Archives[pbg3FileIdx]->Load(filename) != 0)
+        i32 loadResult = this->pbg3Archives[pbg3FileIdx]->Load(filename);
+
+        if (loadResult == 0)
+        {
+            wchar_t wFoundName[256];
+            if (FindDatBySuffixW(filename, wFoundName, 256) != NULL)
+            {
+                utils::DebugPrint("primary name not found, trying fallback ...\n");
+                loadResult = this->pbg3Archives[pbg3FileIdx]->LoadW(wFoundName);
+            }
+        }
+
+        if (loadResult != 0)
         {
             strcpy(this->pbg3ArchiveNames[pbg3FileIdx], filename);
 

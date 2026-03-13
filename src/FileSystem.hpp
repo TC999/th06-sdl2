@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Windows.h>
+#include "sdl2_compat.hpp"
 
 #include "ZunResult.hpp"
 #include "diffbuild.hpp"

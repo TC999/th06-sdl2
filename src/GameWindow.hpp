@@ -2,7 +2,8 @@
 
 #include "diffbuild.hpp"
 #include "inttypes.hpp"
-#include <windows.h>
+#include "sdl2_compat.hpp"
+#include <SDL.h>
 
 #define GAME_WINDOW_WIDTH 640
 #define GAME_WINDOW_HEIGHT 480
@@ -22,12 +23,11 @@ struct GameWindow
     static void Present();
 
     static i32 InitD3dInterface();
-    static void CreateGameWindow(HINSTANCE hInstance);
+    static void CreateGameWindow(void *unused);
     static i32 InitD3dRendering();
     static void InitD3dDevice();
-    static LRESULT __stdcall WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-    HWND window;
+    SDL_Window *sdlWindow;
     i32 isAppClosing;
     i32 lastActiveAppValue;
     i32 isAppActive;
@@ -35,7 +35,11 @@ struct GameWindow
     i32 screenSaveActive;
     i32 lowPowerActive;
     i32 powerOffActive;
+    i32 screenWidth;
+    i32 screenHeight;
 };
+
+void GameWindow_ProcessEvents();
 
 DIFFABLE_EXTERN(GameWindow, g_GameWindow)
 DIFFABLE_EXTERN(i32, g_TickCountToEffectiveFramerate)

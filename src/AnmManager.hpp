@@ -1,7 +1,7 @@
 #pragma once
 
-#include <d3d8.h>
-#include <d3dx8math.h>
+#include "sdl2_compat.hpp"
+#include "sdl2_renderer.hpp"
 
 #include "AnmIdx.hpp"
 #include "AnmVm.hpp"
@@ -13,35 +13,6 @@
 
 namespace th06
 {
-// structure of a vertex with SetVertexShade FVF set to D3DFVF_DIFFUSE | D3DFVF_XYZRHW
-struct VertexDiffuseXyzrwh
-{
-    D3DXVECTOR4 position;
-    D3DCOLOR diffuse;
-};
-
-// Structure of a vertex with SetVertexShade FVF set to D3DFVF_TEX1 | D3DFVF_XYZRHW
-struct VertexTex1Xyzrwh
-{
-    D3DXVECTOR4 position;
-    D3DXVECTOR2 textureUV;
-};
-
-// Structure of a vertex with SetVertexShade FVF set to D3DFVF_TEX1 | D3DFVF_DIFFUSE | D3DFVF_XYZRHW
-struct VertexTex1DiffuseXyzrwh
-{
-    D3DXVECTOR4 position;
-    D3DCOLOR diffuse;
-    D3DXVECTOR2 textureUV;
-};
-
-// Structure of a vertex with SetVertexShade FVF set to D3DFVF_TEX1 | D3DFVF_DIFFUSE | D3DFVF_XYZ
-struct VertexTex1DiffuseXyz
-{
-    D3DXVECTOR3 position;
-    D3DCOLOR diffuse;
-    D3DXVECTOR2 textureUV;
-};
 
 struct AnmRawSprite
 {
@@ -95,11 +66,7 @@ struct AnmManager
 
     void ReleaseVertexBuffer()
     {
-        if (this->vertexBuffer != NULL)
-        {
-            this->vertexBuffer->Release();
-            this->vertexBuffer = NULL;
-        }
+        this->vertexBuffer = 0;
     }
     void SetupVertexBuffer();
 
@@ -139,7 +106,7 @@ struct AnmManager
     {
         this->currentZWriteDisable = zwriteDisable;
     }
-    void SetCurrentTexture(IDirect3DTexture8 *texture)
+    void SetCurrentTexture(u32 texture)
     {
         this->currentTexture = texture;
     }
@@ -199,24 +166,24 @@ struct AnmManager
 
     AnmLoadedSprite sprites[2048];
     AnmVm virtualMachine;
-    IDirect3DTexture8 *textures[264];
+    u32 textures[264];
     void *imageDataArray[256];
     i32 maybeLoadedSpriteCount;
     AnmRawInstr *scripts[2048];
     i32 spriteIndices[2048];
     AnmRawEntry *anmFiles[128];
     u32 anmFilesSpriteIndexOffsets[128];
-    IDirect3DSurface8 *surfaces[32];
-    IDirect3DSurface8 *surfacesBis[32];
+    u32 surfaces[32];
+    u32 surfacesBis[32];
     D3DXIMAGE_INFO surfaceSourceInfo[32];
     D3DCOLOR currentTextureFactor;
-    IDirect3DTexture8 *currentTexture;
+    u32 currentTexture;
     u8 currentBlendMode;
     u8 currentColorOp;
     u8 currentVertexShader;
     u8 currentZWriteDisable;
     AnmLoadedSprite *currentSprite;
-    IDirect3DVertexBuffer8 *vertexBuffer;
+    u32 vertexBuffer;
     RenderVertexInfo vertexBufferContents[4];
     i32 screenshotTextureId;
     i32 screenshotLeft;
@@ -224,8 +191,7 @@ struct AnmManager
     i32 screenshotWidth;
     i32 screenshotHeight;
 };
-ZUN_ASSERT_SIZE(AnmManager, 0x2112c);
 
 DIFFABLE_EXTERN(AnmManager *, g_AnmManager);
-DIFFABLE_EXTERN(D3DFORMAT, g_TextureFormatD3D8Mapping[6]);
+DIFFABLE_EXTERN(u32, g_TextureFormatD3D8Mapping[6]);
 }; // namespace th06

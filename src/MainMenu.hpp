@@ -1,6 +1,6 @@
 #pragma once
 
-#include <D3D8.h>
+#include "sdl2_compat.hpp"
 
 #include "AnmVm.hpp"
 #include "Chain.hpp"

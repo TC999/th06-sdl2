@@ -2,8 +2,11 @@
 
 #include "ZunColor.hpp"
 #include "inttypes.hpp"
+#include "sdl2_compat.hpp"
 
-#include <d3d8.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace th06
 {
@@ -22,7 +25,7 @@ struct TextHelper
     static void ReleaseTextBuffer();
     static void RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 spriteHeight, i32 fontHeight,
                                     i32 fontWidth, ZunColor textColor, ZunColor shadowColor, char *string,
-                                    IDirect3DTexture8 *outTexture);
+                                    u32 outTexture);
 
     TextHelper();
     ~TextHelper();
@@ -31,16 +34,22 @@ struct TextHelper
     FormatInfo *GetFormatInfo(D3DFORMAT format);
     bool ReleaseBuffer();
     bool InvertAlpha(i32 x, i32 y, i32 spriteWidth, i32 fontHeight);
-    bool CopyTextToSurface(IDirect3DSurface8 *outSurface);
+    bool CopyTextToSurface(SoftSurface *outSurface);
 
     D3DFORMAT format;
     i32 width;
     i32 height;
     u32 imageSizeInBytes;
     i32 imageWidthInBytes;
+#ifdef _WIN32
     HDC hdc;
     HGDIOBJ gdiObj;
     HGDIOBJ gdiObj2;
+#else
+    void *hdc;
+    void *gdiObj;
+    void *gdiObj2;
+#endif
     u8 *buffer;
 };
 }; // namespace th06

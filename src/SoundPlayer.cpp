@@ -5,6 +5,10 @@
 #include "i18n.hpp"
 #include "utils.hpp"
 
+#include <SDL.h>
+#include <SDL_mixer.h>
+#include <cstring>
+
 namespace th06
 {
 
@@ -44,13 +48,6 @@ SoundPlayer::SoundPlayer()
 #pragma var_order(bufDesc, audioBuffer2Start, audioBuffer2Len, audioBuffer1Len, audioBuffer1Start, wavFormat)
 ZunResult SoundPlayer::InitializeDSound(HWND gameWindow)
 {
-    DSBUFFERDESC bufDesc;
-    tWAVEFORMATEX wavFormat;
-    LPVOID audioBuffer1Start;
-    DWORD audioBuffer1Len;
-    LPVOID audioBuffer2Start;
-    DWORD audioBuffer2Len;
-
     this->manager = new CSoundManager();
     if (this->manager->Initialize(gameWindow, 2, 2, 44100, 16) < ZUN_SUCCESS)
     {
@@ -63,36 +60,9 @@ ZunResult SoundPlayer::InitializeDSound(HWND gameWindow)
         return ZUN_ERROR;
     }
 
-    this->dsoundHdl = this->manager->GetDirectSound();
+    this->dsoundHdl = 1;
     this->backgroundMusicThreadHandle = NULL;
-    memset(&bufDesc, 0, sizeof(DSBUFFERDESC));
-    bufDesc.dwSize = sizeof(DSBUFFERDESC);
-    bufDesc.dwFlags = DSBCAPS_GLOBALFOCUS | DSBCAPS_LOCSOFTWARE;
-    bufDesc.dwBufferBytes = BACKGROUND_MUSIC_BUFFER_SIZE;
-    memset(&wavFormat, 0, sizeof(tWAVEFORMATEX));
-    wavFormat.cbSize = 0;
-    wavFormat.wFormatTag = WAVE_FORMAT_PCM;
-    wavFormat.nChannels = BACKGROUND_MUSIC_WAV_NUM_CHANNELS;
-    wavFormat.nSamplesPerSec = 44100;
-    wavFormat.nAvgBytesPerSec = 176400;
-    wavFormat.nBlockAlign = BACKGROUND_MUSIC_WAV_BLOCK_ALIGN;
-    wavFormat.wBitsPerSample = BACKGROUND_MUSIC_WAV_BITS_PER_SAMPLE;
-    bufDesc.lpwfxFormat = &wavFormat;
-    if (this->dsoundHdl->CreateSoundBuffer(&bufDesc, &this->initSoundBuffer, NULL) < ZUN_SUCCESS)
-    {
-        return ZUN_ERROR;
-    }
-    if (this->initSoundBuffer->Lock(0, BACKGROUND_MUSIC_BUFFER_SIZE, &audioBuffer1Start, &audioBuffer1Len,
-                                    &audioBuffer2Start, &audioBuffer2Len, 0) < ZUN_SUCCESS)
-    {
-        return ZUN_ERROR;
-    }
-
-    memset(audioBuffer1Start, 0, BACKGROUND_MUSIC_BUFFER_SIZE);
-    this->initSoundBuffer->Unlock(audioBuffer1Start, audioBuffer1Len, audioBuffer2Start, audioBuffer2Len);
-    this->initSoundBuffer->Play(0, 0, 1);
-    /* 4 times per second */
-    SetTimer(gameWindow, 0, 250, NULL);
+    this->initSoundBuffer = 1;
     this->gameWindow = gameWindow;
     GameErrorContext::Log(&g_GameErrorContext, TH_DBG_SOUNDPLAYER_INIT_SUCCESS);
     return ZUN_SUCCESS;
@@ -108,26 +78,16 @@ ZunResult SoundPlayer::Release(void)
     }
     for (i = 0; i < 0x80; i++)
     {
-        if (this->duplicateSoundBuffers[i] != NULL)
-        {
-            this->duplicateSoundBuffers[i]->Release();
-            this->duplicateSoundBuffers[i] = NULL;
-        }
+        this->soundChannels[i] = -1;
         if (this->soundBuffers[i] != NULL)
         {
-            this->soundBuffers[i]->Release();
+            Mix_FreeChunk(this->soundBuffers[i]);
             this->soundBuffers[i] = NULL;
         }
     }
-    KillTimer(this->gameWindow, 1);
     StopBGM();
-    this->dsoundHdl = NULL;
-    this->initSoundBuffer->Stop();
-    if (this->initSoundBuffer != NULL)
-    {
-        this->initSoundBuffer->Release();
-        this->initSoundBuffer = NULL;
-    }
+    this->dsoundHdl = 0;
+    this->initSoundBuffer = 0;
     if (this->backgroundMusic != NULL)
     {
         delete this->backgroundMusic;
@@ -146,22 +106,12 @@ void SoundPlayer::StopBGM()
     if (this->backgroundMusic != NULL)
     {
         this->backgroundMusic->Stop();
-        if (this->backgroundMusicThreadHandle != NULL)
-        {
-            PostThreadMessageA(this->backgroundMusicThreadId, WM_QUIT, 0, 0);
-            utils::DebugPrint2("stop m_dwNotifyThreadID\n");
-            WaitForSingleObject(this->backgroundMusicThreadHandle, INFINITE);
-            utils::DebugPrint2("comp\n");
-            CloseHandle(this->backgroundMusicThreadHandle);
-            CloseHandle(this->backgroundMusicUpdateEvent);
-            this->backgroundMusicThreadHandle = NULL;
-        }
+        utils::DebugPrint2("stop BGM\n");
         if (this->backgroundMusic != NULL)
         {
             delete this->backgroundMusic;
             this->backgroundMusic = NULL;
         }
-        utils::DebugPrint2("stop BGM\n");
     }
     return;
 }
@@ -172,14 +122,14 @@ ZunResult SoundPlayer::LoadWav(char *path)
 {
     HRESULT res;
     CWaveFile waveFile;
-    DWORD startTime;
-    DWORD curTime;
+    u32 startTime;
+    u32 curTime;
     u32 waitTime;
     u32 blockAlign;
     u32 numSamplesPerSec;
     u32 notifySize;
-    DWORD startTime2;
-    DWORD curTime2;
+    u32 startTime2;
+    u32 curTime2;
     u32 waitTime2;
 
     if (this->manager == NULL)
@@ -190,14 +140,14 @@ ZunResult SoundPlayer::LoadWav(char *path)
     {
         return ZUN_ERROR;
     }
-    if (this->dsoundHdl == NULL)
+    if (this->dsoundHdl == 0)
     {
         return ZUN_ERROR;
     }
     this->StopBGM();
     utils::DebugPrint2("load BGM\n");
     res = waveFile.Open(path, NULL, WAVEFILE_READ);
-    if (FAILED(res))
+    if (res < 0)
     {
         utils::DebugPrint2("error : wav file load error %s\n", path);
         waveFile.Close();
@@ -208,37 +158,27 @@ ZunResult SoundPlayer::LoadWav(char *path)
         waveFile.Close();
         return ZUN_ERROR;
     }
-    // Sleep 100ms?
-    startTime = timeGetTime();
+    startTime = SDL_GetTicks();
     curTime = startTime;
     waitTime = 100;
     while (curTime < startTime + waitTime && curTime >= startTime)
     {
-        curTime = timeGetTime();
+        curTime = SDL_GetTicks();
     }
     waveFile.Close();
-    blockAlign = waveFile.m_pwfx->nBlockAlign;
-    numSamplesPerSec = waveFile.m_pwfx->nSamplesPerSec;
-    notifySize = numSamplesPerSec * 2 * blockAlign >> 2;
-    notifySize -= (notifySize % blockAlign);
-    this->backgroundMusicUpdateEvent = CreateEventA(NULL, 0, 0, NULL);
-    this->backgroundMusicThreadHandle = CreateThread(NULL, 0, SoundPlayer::BackgroundMusicPlayerThread,
-                                                     g_Supervisor.hwndGameWindow, 0, &this->backgroundMusicThreadId);
-    res = this->manager->CreateStreaming(&this->backgroundMusic, path,
-                                         DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_CTRLPOSITIONNOTIFY, GUID_NULL, 4,
-                                         notifySize, this->backgroundMusicUpdateEvent);
-    if (FAILED(res))
+    res = this->manager->CreateStreaming(&this->backgroundMusic, path, 0, GUID(), 4, 0, NULL);
+    if (res < 0)
     {
         utils::DebugPrint2(TH_ERR_SOUNDPLAYER_FAILED_TO_CREATE_BGM_SOUND_BUFFER);
         return ZUN_ERROR;
     }
     utils::DebugPrint2("comp\n");
-    startTime2 = timeGetTime();
+    startTime2 = SDL_GetTicks();
     curTime2 = startTime2;
     waitTime2 = 100;
     while (curTime2 < startTime2 + waitTime2 && curTime2 >= startTime2)
     {
-        curTime2 = timeGetTime();
+        curTime2 = SDL_GetTicks();
     }
     return ZUN_SUCCESS;
 }
@@ -255,7 +195,7 @@ ZunResult SoundPlayer::LoadPos(char *path)
     {
         return ZUN_ERROR;
     }
-    if (g_Supervisor.cfg.playSounds == NULL)
+    if (g_Supervisor.cfg.playSounds == 0)
     {
         return ZUN_ERROR;
     }
@@ -285,7 +225,7 @@ ZunResult SoundPlayer::InitSoundBuffers()
     {
         return ZUN_ERROR;
     }
-    else if (this->dsoundHdl == NULL)
+    else if (this->dsoundHdl == 0)
     {
         return ZUN_SUCCESS;
     }
@@ -306,10 +246,18 @@ ZunResult SoundPlayer::InitSoundBuffers()
         }
         for (idx = 0; idx < ARRAY_SIZE(g_SoundBufferIdxVol); idx++)
         {
-            this->dsoundHdl->DuplicateSoundBuffer(this->soundBuffers[g_SoundBufferIdxVol[idx].bufferIdx],
-                                                  &this->duplicateSoundBuffers[idx]);
-            this->duplicateSoundBuffers[idx]->SetCurrentPosition(0);
-            this->duplicateSoundBuffers[idx]->SetVolume(g_SoundBufferIdxVol[idx].volume);
+            i32 bufIdx = g_SoundBufferIdxVol[idx].bufferIdx;
+            this->soundChannels[idx] = idx;
+            if (this->soundBuffers[bufIdx] != NULL)
+            {
+                i32 dsVol = g_SoundBufferIdxVol[idx].volume;
+                i32 sdlVol = (i32)((1.0f - ((f32)(-dsVol)) / 3000.0f) * MIX_MAX_VOLUME);
+                if (sdlVol < 0)
+                    sdlVol = 0;
+                if (sdlVol > MIX_MAX_VOLUME)
+                    sdlVol = MIX_MAX_VOLUME;
+                Mix_VolumeChunk(this->soundBuffers[bufIdx], sdlVol);
+            }
         }
     }
     return ZUN_SUCCESS;
@@ -336,16 +284,7 @@ WAVEFORMATEX *SoundPlayer::GetWavFormatData(u8 *soundData, char *formatString, i
 ZunResult SoundPlayer::LoadSound(i32 idx, char *path)
 {
     u8 *soundFileData;
-    u8 *sFDCursor;
     i32 fileSize;
-    WAVEFORMATEX *wavDataPtr;
-    WAVEFORMATEX *audioPtr1;
-    WAVEFORMATEX *audioPtr2;
-    DWORD audioSize1;
-    DWORD audioSize2;
-    WAVEFORMATEX wavData;
-    i32 formatSize;
-    DSBUFFERDESC dsBuffer;
 
     if (this->manager == NULL)
     {
@@ -353,79 +292,40 @@ ZunResult SoundPlayer::LoadSound(i32 idx, char *path)
     }
     if (this->soundBuffers[idx] != NULL)
     {
-        this->soundBuffers[idx]->Release();
+        Mix_FreeChunk(this->soundBuffers[idx]);
         this->soundBuffers[idx] = NULL;
     }
     soundFileData = (u8 *)FileSystem::OpenPath(path, 0);
-    sFDCursor = soundFileData;
-    if (sFDCursor == NULL)
+    if (soundFileData == NULL)
     {
         return ZUN_ERROR;
     }
-    if (strncmp((char *)sFDCursor, "RIFF", 4))
+    if (strncmp((char *)soundFileData, "RIFF", 4))
     {
         GameErrorContext::Log(&g_GameErrorContext, TH_ERR_NOT_A_WAV_FILE, path);
         free(soundFileData);
         return ZUN_ERROR;
     }
-    sFDCursor += 4;
-
-    fileSize = *(i32 *)sFDCursor;
-    sFDCursor += 4;
-
-    if (strncmp((char *)sFDCursor, "WAVE", 4))
-    {
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_NOT_A_WAV_FILE, path);
-        free(soundFileData);
-        return ZUN_ERROR;
-    }
-    sFDCursor += 4;
-    wavDataPtr = GetWavFormatData(sFDCursor, "fmt ", &formatSize, fileSize - 12);
-    if (wavDataPtr == NULL)
-    {
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_NOT_A_WAV_FILE, path);
-        free(soundFileData);
-        return ZUN_ERROR;
-    }
-    wavData = *wavDataPtr;
-
-    wavDataPtr = GetWavFormatData(sFDCursor, "data", &formatSize, fileSize - 12);
-    if (wavDataPtr == NULL)
-    {
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_NOT_A_WAV_FILE, path);
-        free(soundFileData);
-        return ZUN_ERROR;
-    }
-    memset(&dsBuffer, 0, sizeof(dsBuffer));
-    dsBuffer.dwSize = sizeof(dsBuffer);
-    dsBuffer.dwFlags = DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME | DSBCAPS_LOCSOFTWARE;
-    dsBuffer.dwBufferBytes = formatSize;
-    dsBuffer.lpwfxFormat = &wavData;
-    if (FAILED(this->dsoundHdl->CreateSoundBuffer(&dsBuffer, &this->soundBuffers[idx], NULL)))
+    fileSize = *(i32 *)(soundFileData + 4) + 8;
+    SDL_RWops *rw = SDL_RWFromMem(soundFileData, fileSize);
+    if (rw == NULL)
     {
         free(soundFileData);
         return ZUN_ERROR;
     }
-    if (FAILED(soundBuffers[idx]->Lock(0, formatSize, (LPVOID *)&audioPtr1, (LPDWORD)&audioSize1, (LPVOID *)&audioPtr2,
-                                       (LPDWORD)&audioSize2, NULL)))
-    {
-        free(soundFileData);
-        return ZUN_ERROR;
-    }
-    memcpy(audioPtr1, wavDataPtr, audioSize1);
-    if (audioSize2 != 0)
-    {
-        memcpy(audioPtr2, (i8 *)wavDataPtr + audioSize1, audioSize2);
-    }
-    soundBuffers[idx]->Unlock((LPVOID *)audioPtr1, audioSize1, (LPVOID *)audioPtr2, audioSize2);
+    this->soundBuffers[idx] = Mix_LoadWAV_RW(rw, 1);
     free(soundFileData);
+    if (this->soundBuffers[idx] == NULL)
+    {
+        utils::DebugPrint2("Mix_LoadWAV_RW failed: %s for %s\n", Mix_GetError(), path);
+        return ZUN_ERROR;
+    }
     return ZUN_SUCCESS;
 }
 
 #pragma var_order(buffer, res)
-ZunResult SoundPlayer::PlayBGM(BOOL isLooping)
+ZunResult SoundPlayer::PlayBGM(i32 isLooping)
 {
-    LPDIRECTSOUNDBUFFER buffer;
     HRESULT res;
 
     utils::DebugPrint2("play BGM\n");
@@ -434,19 +334,12 @@ ZunResult SoundPlayer::PlayBGM(BOOL isLooping)
         return ZUN_ERROR;
     }
     res = this->backgroundMusic->Reset();
-    if (FAILED(res))
+    if (res < 0)
     {
         return ZUN_ERROR;
     }
-
-    buffer = this->backgroundMusic->GetBuffer(0);
-    res = this->backgroundMusic->FillBufferWithSound(buffer, isLooping);
-    if (FAILED(res))
-    {
-        return ZUN_ERROR;
-    }
-    res = this->backgroundMusic->Play(0, DSBPLAY_LOOPING);
-    if (FAILED(res))
+    res = this->backgroundMusic->Play(0, 0);
+    if (res < 0)
     {
         return ZUN_ERROR;
     }
@@ -477,13 +370,19 @@ void SoundPlayer::PlaySounds()
         }
         sndBufIdx = this->soundBuffersToPlay[idx];
         this->soundBuffersToPlay[idx] = -1;
-        if (this->duplicateSoundBuffers[sndBufIdx] == NULL)
+        i32 bufIdx = g_SoundBufferIdxVol[sndBufIdx].bufferIdx;
+        if (this->soundBuffers[bufIdx] == NULL)
         {
             continue;
         }
-        this->duplicateSoundBuffers[sndBufIdx]->Stop();
-        this->duplicateSoundBuffers[sndBufIdx]->SetCurrentPosition(0);
-        this->duplicateSoundBuffers[sndBufIdx]->Play(0, 0, 0);
+        i32 dsVol = g_SoundBufferIdxVol[sndBufIdx].volume;
+        i32 sdlVol = (i32)((1.0f - ((f32)(-dsVol)) / 3000.0f) * MIX_MAX_VOLUME);
+        if (sdlVol < 0)
+            sdlVol = 0;
+        if (sdlVol > MIX_MAX_VOLUME)
+            sdlVol = MIX_MAX_VOLUME;
+        Mix_VolumeChunk(this->soundBuffers[bufIdx], sdlVol);
+        Mix_PlayChannel(-1, this->soundBuffers[bufIdx], 0);
     }
     return;
 }
@@ -515,46 +414,8 @@ void SoundPlayer::PlaySoundByIdx(SoundIdx idx, i32 unused)
     return;
 }
 
-#pragma var_order(msg, looped, lpThreadParameterCopy, waitObj, res, stopped)
-DWORD __stdcall SoundPlayer::BackgroundMusicPlayerThread(LPVOID lpThreadParameter)
+void SoundPlayer::BackgroundMusicPlayerThread(void *lpThreadParameter)
 {
-    DWORD waitObj;
-    MSG msg;
-    u32 stopped;
-    u32 looped;
-    LPVOID lpThreadParameterCopy;
-    HRESULT res;
-
-    lpThreadParameterCopy = lpThreadParameter;
-    stopped = false;
-    looped = true;
-    while (!stopped)
-    {
-        waitObj =
-            MsgWaitForMultipleObjects(1, &g_SoundPlayer.backgroundMusicUpdateEvent, FALSE, INFINITE, QS_ALLEVENTS);
-        if (g_SoundPlayer.backgroundMusic == NULL)
-        {
-            stopped = true;
-        }
-        switch (waitObj)
-        {
-        case 0:
-            if (g_SoundPlayer.backgroundMusic != NULL)
-            {
-                res = g_SoundPlayer.backgroundMusic->HandleWaveStreamNotification(looped);
-            }
-            break;
-        case 1:
-            while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE) != 0)
-            {
-                if (msg.message == WM_QUIT)
-                {
-                    stopped = true;
-                }
-            }
-            break;
-        }
-    }
-    return 0;
+    (void)lpThreadParameter;
 }
 }; // namespace th06

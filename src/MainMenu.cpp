@@ -1,7 +1,14 @@
-#include <D3DX8.h>
+#include "sdl2_compat.hpp"
+#include "sdl2_renderer.hpp"
 #include <cstdio>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <io.h>
 #include <direct.h>
-#include <windows.h>
+#else
+#include <dirent.h>
+#endif
+#include <cstring>
 
 #include "MainMenu.hpp"
 
@@ -66,13 +73,11 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
 
     if (menu->timeRelatedArrSize < ARRAY_SIZE_SIGNED(menu->timeRelatedArr))
     {
-        timeBeginPeriod(1);
         if (menu->lastFrameTime == 0)
         {
-            menu->lastFrameTime = timeGetTime();
+            menu->lastFrameTime = SDL_GetTicks();
         }
-        time = timeGetTime();
-        timeEndPeriod(1);
+        time = SDL_GetTicks();
         menu->frameCountForRefreshRateCalc = menu->frameCountForRefreshRateCalc + 1;
         deltaTime = time - menu->lastFrameTime;
         if (deltaTime >= 700)
@@ -1018,11 +1023,11 @@ ZunResult MainMenu::BeginStartup()
     }
     if (g_Supervisor.startupTimeBeforeMenuMusic > 0)
     {
-        time = timeGetTime();
+        time = SDL_GetTicks();
         while ((time - g_Supervisor.startupTimeBeforeMenuMusic >= 0) &&
                (3000 > time - g_Supervisor.startupTimeBeforeMenuMusic))
         {
-            time = timeGetTime();
+            time = SDL_GetTicks();
         }
         g_Supervisor.startupTimeBeforeMenuMusic = 0;
         g_Supervisor.PlayAudio("bgm/th06_01.mid");
@@ -1264,11 +1269,9 @@ i32 MainMenu::ReplayHandling()
 {
     AnmVm *anmVm;
     i32 cur;
-    HANDLE replayFileHandle;
     u32 replayFileIdx;
     ReplayData *replayData;
     char replayFilePath[32];
-    WIN32_FIND_DATA replayFileInfo;
     u8 padding[0x20]; // idk
 
     switch (this->gameState)
@@ -1302,32 +1305,61 @@ i32 MainMenu::ReplayHandling()
                     }
                     free(replayData);
                 }
+#ifdef _WIN32
                 _mkdir("./replay");
-                _chdir("./replay");
-                replayFileHandle = FindFirstFileA("th6_ud????.rpy", &replayFileInfo);
-                if (replayFileHandle != INVALID_HANDLE_VALUE)
+#else
+                mkdir("./replay", 0755);
+#endif
                 {
-                    for (cur = 0; cur < 0x2d; cur++)
+#ifdef _WIN32
+                    struct _finddata_t fd;
+                    intptr_t hFind = _findfirst("./replay/th6_ud*.rpy", &fd);
+                    cur = 0;
+                    if (hFind != -1)
                     {
-                        replayData = (ReplayData *)FileSystem::OpenPath(replayFilePath, 1);
-                        if (replayData == NULL)
+                        do
                         {
-                            continue;
-                        }
-                        if (!ReplayManager::ValidateReplayData(replayData, g_LastFileSize))
+                            if (cur >= 0x2d) break;
+                            const char *name = fd.name;
+#else
+                    DIR *replayFileHandle = opendir("./replay");
+                    struct dirent *replayFileInfo;
+                    cur = 0;
+                    if (replayFileHandle != NULL)
+                    {
+                        while ((replayFileInfo = readdir(replayFileHandle)) != NULL && cur < 0x2d)
                         {
-                            this->replayFileData[replayFileIdx] = *replayData;
-                            sprintf(this->replayFilePaths[replayFileIdx], "./replay/%s", replayFileInfo.cFileName);
-                            sprintf(this->replayFileName[replayFileIdx], "User ");
-                            replayFileIdx++;
+                            const char *name = replayFileInfo->d_name;
+#endif
+                            size_t len = strlen(name);
+                            if (len == 14 && strncmp(name, "th6_ud", 6) == 0 &&
+                                strcmp(name + 10, ".rpy") == 0)
+                            {
+                                sprintf(replayFilePath, "./replay/%s", name);
+                                replayData = (ReplayData *)FileSystem::OpenPath(replayFilePath, 1);
+                                if (replayData == NULL)
+                                {
+                                    continue;
+                                }
+                                if (!ReplayManager::ValidateReplayData(replayData, g_LastFileSize))
+                                {
+                                    this->replayFileData[replayFileIdx] = *replayData;
+                                    sprintf(this->replayFilePaths[replayFileIdx], "./replay/%s", name);
+                                    sprintf(this->replayFileName[replayFileIdx], "User ");
+                                    replayFileIdx++;
+                                }
+                                free(replayData);
+                                cur++;
+                            }
+#ifdef _WIN32
+                        } while (_findnext(hFind, &fd) == 0);
+                        _findclose(hFind);
+#else
                         }
-                        free(replayData);
-                        if (!FindNextFileA(replayFileHandle, &replayFileInfo))
-                            break;
+                        closedir(replayFileHandle);
+#endif
                     }
                 }
-                FindClose(replayFileHandle);
-                _chdir("../");
                 this->replayFilesNum = replayFileIdx;
                 this->minimumOpacity = 0;
                 this->framesInactive = this->framesActive;
@@ -2192,7 +2224,7 @@ ZunResult MainMenu::RegisterChain(u32 isDemo)
 
     memset(menu, 0, sizeof(MainMenu));
     g_GameManager.isInGameMenu = 0;
-    utils::DebugPrint(TH_DBG_MAINMENU_VRAM, g_Supervisor.d3dDevice->GetAvailableTextureMem());
+    utils::DebugPrint(TH_DBG_MAINMENU_VRAM, 128 * 1024 * 1024);
     menu->gameState = isDemo ? STATE_REPLAY_LOAD : STATE_STARTUP;
     g_Supervisor.framerateMultiplier = 0.0;
     menu->chainCalc = g_Chain.CreateElem((ChainCallback)MainMenu::OnUpdate);
@@ -2303,7 +2335,7 @@ ZunResult MainMenu::DeletedCallback(MainMenu *menu)
     void *replay;
     i32 i1, i2;
 
-    g_Supervisor.d3dDevice->ResourceManagerDiscardBytes(0);
+    (void)0;
     MainMenu::ReleaseTitleAnm();
     for (i1 = ANM_FILE_SELECT01; i1 <= ANM_FILE_REPLAY; i1++)
     {

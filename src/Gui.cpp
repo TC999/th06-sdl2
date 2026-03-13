@@ -12,6 +12,7 @@
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "ZunColor.hpp"
+#include "sdl2_renderer.hpp"
 #include "utils.hpp"
 
 namespace th06
@@ -84,7 +85,7 @@ ChainCallbackResult Gui::OnDraw(Gui *gui)
     char spellCardBonusStr[32];
     D3DXVECTOR3 stringPos;
 
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+    g_Renderer.SetDepthFunc(1);
     if (gui->impl->finishedStage)
     {
         stringPos.x = GAME_REGION_LEFT + 42.0f;
@@ -212,7 +213,7 @@ ChainCallbackResult Gui::OnDraw(Gui *gui)
         g_AsciiManager.color = COLOR_WHITE;
     }
     g_AsciiManager.isGui = 0;
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+    g_Renderer.SetDepthFunc(0);
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -756,28 +757,23 @@ ZunResult GuiImpl::DrawDialogue()
     g_AnmManager->DrawNoRotation(&this->msg.portraits[1]);
     if (((g_Supervisor.cfg.opts >> GCOS_NO_COLOR_COMP) & 1) == 0)
     {
-        g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
-        g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        g_Renderer.SetTextureStageSelectDiffuse();
     }
-    g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
-    g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    g_Renderer.SetTextureStageSelectDiffuse();
     if (((g_Supervisor.cfg.opts >> GCOS_TURN_OFF_DEPTH_TEST) & 1) == 0)
     {
-        g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, 0);
+        g_Renderer.SetZWriteDisable(1);
     }
-    g_Supervisor.d3dDevice->SetVertexShader(D3DFVF_DIFFUSE | D3DFVF_XYZRHW);
-    g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(vertices[0]));
+    g_Renderer.DrawTriangleStrip(vertices, 4);
     g_AnmManager->SetCurrentVertexShader(0xff);
     g_AnmManager->SetCurrentColorOp(0xff);
     g_AnmManager->SetCurrentBlendMode(0xff);
     g_AnmManager->SetCurrentZWriteDisable(0xff);
     if (((g_Supervisor.cfg.opts >> GCOS_NO_COLOR_COMP) & 1) == 0)
     {
-        g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAOP, 4);
-        g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLOROP, 4);
+        g_Renderer.SetTextureStageModulateTexture();
     }
-    g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAARG1, 2);
-    g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLORARG1, 2);
+    g_Renderer.SetTextureStageModulateTexture();
     g_AnmManager->DrawNoRotation(&this->msg.dialogueLines[0]);
     g_AnmManager->DrawNoRotation(&this->msg.dialogueLines[1]);
     g_AnmManager->DrawNoRotation(&this->msg.introLines[0]);
@@ -1045,7 +1041,7 @@ void Gui::DrawGameScene()
     g_Supervisor.viewport.Y = 0;
     g_Supervisor.viewport.Width = 640;
     g_Supervisor.viewport.Height = 480;
-    g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
     vm = &this->impl->vms[6];
     if (((g_Supervisor.cfg.opts >> GCOS_DISPLAY_MINIMUM_GRAPHICS) & 1) == 0 &&
         (vm->currentInstruction != NULL || g_Supervisor.unk198 != 0 || g_Supervisor.IsUnknown()))
@@ -1169,29 +1165,24 @@ void Gui::DrawGameScene()
 
             if ((g_Supervisor.cfg.opts >> 8 & 1) == 0)
             {
-                g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
-                g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+                g_Renderer.SetTextureStageSelectDiffuse();
             }
-            g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
-            g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            g_Renderer.SetTextureStageSelectDiffuse();
             if ((g_Supervisor.cfg.opts >> GCOS_TURN_OFF_DEPTH_TEST & 1) == 0)
             {
-                g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
-                g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                g_Renderer.SetDepthFunc(1);
+                g_Renderer.SetZWriteDisable(1);
             }
-            g_Supervisor.d3dDevice->SetVertexShader(D3DFVF_DIFFUSE | D3DFVF_XYZRHW);
-            g_Supervisor.d3dDevice->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(VertexDiffuseXyzrwh));
+            g_Renderer.DrawTriangleStrip(vertices, 4);
             g_AnmManager->SetCurrentVertexShader(0xff);
             g_AnmManager->SetCurrentColorOp(0xff);
             g_AnmManager->SetCurrentBlendMode(0xff);
             g_AnmManager->SetCurrentZWriteDisable(0xff);
             if ((g_Supervisor.cfg.opts >> GCOS_NO_COLOR_COMP & 1) == 0)
             {
-                g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-                g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+                g_Renderer.SetTextureStageModulateTexture();
             }
-            g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-            g_Supervisor.d3dDevice->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            g_Renderer.SetTextureStageModulateTexture();
             if (128 <= g_GameManager.currentPower)
             {
                 vm = &this->impl->vms[18];
@@ -1331,7 +1322,7 @@ void Gui::DrawStageElements()
         g_Supervisor.viewport.Width = g_GameManager.arcadeRegionSize.x;
         g_Supervisor.viewport.Height = g_GameManager.arcadeRegionSize.y;
 
-        g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+        g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
         g_AnmManager->DrawNoRotation(&this->impl->loadingScreenSprite);
     }
 }

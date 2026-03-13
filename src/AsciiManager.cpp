@@ -7,6 +7,7 @@
 #include "GameManager.hpp"
 #include "Gui.hpp"
 #include "Supervisor.hpp"
+#include "sdl2_renderer.hpp"
 #include "utils.hpp"
 #include <stdio.h>
 
@@ -240,7 +241,7 @@ void AsciiManager::DrawStrings(void)
                 g_Supervisor.viewport.Y = g_GameManager.arcadeRegionTopLeftPos.y;
                 g_Supervisor.viewport.Width = g_GameManager.arcadeRegionSize.x;
                 g_Supervisor.viewport.Height = g_GameManager.arcadeRegionSize.y;
-                g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+                g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
             }
             else
             {
@@ -248,7 +249,7 @@ void AsciiManager::DrawStrings(void)
                 g_Supervisor.viewport.Y = 0;
                 g_Supervisor.viewport.Width = 640;
                 g_Supervisor.viewport.Height = 480;
-                g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+                g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
             }
         }
         while (*text != NULL)
@@ -598,7 +599,7 @@ void StageMenu::OnDrawGameMenu()
         g_Supervisor.viewport.Y = g_GameManager.arcadeRegionTopLeftPos.y;
         g_Supervisor.viewport.Width = g_GameManager.arcadeRegionSize.x;
         g_Supervisor.viewport.Height = g_GameManager.arcadeRegionSize.y;
-        g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+        g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
         if (g_Supervisor.lockableBackbuffer && this->curState != GAME_MENU_PAUSE_OPENING)
         {
             AnmVm menuBackground = this->menuBackground;
@@ -809,7 +810,7 @@ void StageMenu::OnDrawRetryMenu()
         g_Supervisor.viewport.Y = g_GameManager.arcadeRegionTopLeftPos.y;
         g_Supervisor.viewport.Width = g_GameManager.arcadeRegionSize.x;
         g_Supervisor.viewport.Height = g_GameManager.arcadeRegionSize.y;
-        g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+        g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
         if (g_Supervisor.lockableBackbuffer && (this->curState != RETRY_MENU_OPENING || this->numFrames > 2))
         {
             g_AnmManager->DrawNoRotation(&this->menuBackground);
@@ -848,7 +849,7 @@ void AsciiManager::DrawPopupsWithHwVertexProcessing()
     g_Supervisor.viewport.Y = g_GameManager.arcadeRegionTopLeftPos.y;
     g_Supervisor.viewport.Width = g_GameManager.arcadeRegionSize.x;
     g_Supervisor.viewport.Height = g_GameManager.arcadeRegionSize.y;
-    g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
 
     for (i = 0; i < ARRAY_SIZE_SIGNED(this->popups); i++, currentPopup++)
     {
@@ -900,7 +901,7 @@ void AsciiManager::DrawPopupsWithoutHwVertexProcessing()
     g_Supervisor.viewport.Y = g_GameManager.arcadeRegionTopLeftPos.y;
     g_Supervisor.viewport.Width = g_GameManager.arcadeRegionSize.x;
     g_Supervisor.viewport.Height = g_GameManager.arcadeRegionSize.y;
-    g_Supervisor.d3dDevice->SetViewport(&g_Supervisor.viewport);
+    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height);
 
     for (i = 0; i < ARRAY_SIZE_SIGNED(this->popups); i++, currentPopup++)
     {

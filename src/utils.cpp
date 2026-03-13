@@ -3,7 +3,7 @@
 #include <stdio.h>
 #endif
 
-#include <windows.h>
+#include "sdl2_compat.hpp"
 
 #include "ZunMath.hpp"
 #include "i18n.hpp"

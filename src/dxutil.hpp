@@ -1,16 +1,9 @@
 //-----------------------------------------------------------------------------
-// File: DXUtil.h
-//
-// Desc: Helper functions and typing shortcuts for DirectX programming.
-//
-// Copyright (c) 1997-2000 Microsoft Corporation. All rights reserved
+// File: DXUtil.h - SDL2 version (no COM Release)
 //-----------------------------------------------------------------------------
 #ifndef DXUTIL_H
 #define DXUTIL_H
 
-//-----------------------------------------------------------------------------
-// Miscellaneous helper functions
-//-----------------------------------------------------------------------------
 #define SAFE_DELETE(p)                                                                                                 \
     {                                                                                                                  \
         if (p)                                                                                                         \
@@ -31,7 +24,6 @@
     {                                                                                                                  \
         if (p)                                                                                                         \
         {                                                                                                              \
-            (p)->Release();                                                                                            \
             (p) = NULL;                                                                                                \
         }                                                                                                              \
     }

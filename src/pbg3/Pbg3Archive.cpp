@@ -92,6 +92,7 @@ i32 Pbg3Archive::Release()
         this->entries = NULL;
     }
     delete this->unk;
+    this->unk = NULL;
     return TRUE;
 }
 
@@ -182,6 +183,32 @@ i32 Pbg3Archive::Load(char *path)
     }
 
     if (this->parser->OpenArchive(path) == FALSE)
+    {
+        if (this->parser != NULL)
+        {
+            delete this->parser;
+            this->parser = NULL;
+        }
+        return FALSE;
+    }
+
+    return this->ParseHeader();
+}
+
+i32 Pbg3Archive::LoadW(const wchar_t *path)
+{
+    if (this->Release() == FALSE)
+    {
+        return FALSE;
+    }
+
+    this->parser = new Pbg3Parser();
+    if (this->parser == NULL)
+    {
+        return FALSE;
+    }
+
+    if (this->parser->OpenArchiveW(path) == FALSE)
     {
         if (this->parser != NULL)
         {

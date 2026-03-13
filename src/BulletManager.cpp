@@ -11,6 +11,7 @@
 #include "Rng.hpp"
 #include "ZunColor.hpp"
 #include "ZunMath.hpp"
+#include "sdl2_renderer.hpp"
 #include "utils.hpp"
 
 namespace th06
@@ -1114,7 +1115,7 @@ ChainCallbackResult BulletManager::OnDraw(BulletManager *mgr)
     Bullet *curBullet1;
     Bullet *curBullet2;
 
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+    g_Renderer.SetDepthFunc(1);
 
     for (curLaser = &mgr->lasers[0], idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->lasers); idx++, curLaser++)
     {
@@ -1270,7 +1271,7 @@ ChainCallbackResult BulletManager::OnDraw(BulletManager *mgr)
         }
     }
 
-    g_Supervisor.d3dDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+    g_Renderer.SetDepthFunc(0);
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

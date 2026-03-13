@@ -1,8 +1,6 @@
 #pragma once
 
-#include <d3d8.h>
-#include <d3dx8math.h>
-#include <dinput.h>
+#include "sdl2_compat.hpp"
 
 #include "Chain.hpp"
 #include "Controller.hpp"
@@ -119,8 +117,6 @@ struct Supervisor
     ZunResult FadeOutMusic(f32 fadeOutSeconds);
 
     static ZunResult SetupDInput(Supervisor *s);
-    static BOOL CALLBACK ControllerCallback(LPCDIDEVICEOBJECTINSTANCEA lpddoi, LPVOID pvRef);
-    static BOOL CALLBACK EnumGameControllersCb(LPCDIDEVICEINSTANCEA pdidInstance, LPVOID pContext);
 
     i32 LoadPbg3(i32 pbg3FileIdx, char *filename);
     void ReleasePbg3(i32 pbg3FileIdx);
@@ -145,13 +141,6 @@ struct Supervisor
         return (this->cfg.opts >> GCOS_FORCE_60FPS & 1) && this->vsyncEnabled;
     }
 
-    HINSTANCE hInstance;
-    PDIRECT3D8 d3dIface;
-    PDIRECT3DDEVICE8 d3dDevice;
-    LPDIRECTINPUT8 dinputIface;
-    LPDIRECTINPUTDEVICE8A keyboard;
-    LPDIRECTINPUTDEVICE8A controller;
-    DIDEVCAPS controllerCaps;
     HWND hwndGameWindow;
     D3DXMATRIX viewMatrix;
     D3DXMATRIX projectionMatrix;
@@ -188,13 +177,12 @@ struct Supervisor
     u32 startupTimeBeforeMenuMusic;
     D3DCAPS8 d3dCaps;
 };
-ZUN_ASSERT_SIZE(Supervisor, 0x4d8);
 
 DIFFABLE_EXTERN(ControllerMapping, g_ControllerMapping)
 DIFFABLE_EXTERN(Supervisor, g_Supervisor)
 DIFFABLE_EXTERN(u16, g_LastFrameInput)
 DIFFABLE_EXTERN(u16, g_CurFrameInput)
 DIFFABLE_EXTERN(u16, g_IsEigthFrameOfHeldInput)
-DIFFABLE_EXTERN(IDirect3DSurface8 *, g_TextBufferSurface)
+DIFFABLE_EXTERN(SoftSurface *, g_TextBufferSurface)
 DIFFABLE_EXTERN(u16, g_NumOfFramesInputsWereHeld);
 }; // namespace th06
