@@ -342,9 +342,36 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
 #ifdef _WIN32
     memset(g_TextBufferSurface->pixels, 0, g_TextBufferSurface->pitch * g_TextBufferSurface->height);
 
-    HFONT font = CreateFontA(fontHeight * 2, 0, 0, 0, FW_BOLD, false, false, false, SHIFTJIS_CHARSET,
+    // Runtime charset detection based on system ANSI code page.
+    // This allows a single binary to work with both Chinese (GBK) and Japanese (Shift-JIS) DAT files.
+    UINT acp = GetACP();
+    BYTE charset;
+    const wchar_t *fontNameW;
+    UINT mbCodePage;
+    switch (acp)
+    {
+    case 936:
+        charset = GB2312_CHARSET;
+        fontNameW = L"SimSun";
+        // Use GB18030 (CP 54936) which is a superset of GBK; correctly handles both
+        // GBK text from Chinese DATs and GB18030-encoded compiled-in strings (e.g. ♪).
+        mbCodePage = 54936;
+        break;
+    case 950:
+        charset = CHINESEBIG5_CHARSET;
+        fontNameW = L"MingLiU";
+        mbCodePage = 950;
+        break;
+    default:
+        charset = SHIFTJIS_CHARSET;
+        fontNameW = L"\xFF2D\xFF33 \x30B4\x30B7\x30C3\x30AF"; // ＭＳ ゴシック
+        mbCodePage = 932;
+        break;
+    }
+
+    HFONT font = CreateFontW(fontHeight * 2, 0, 0, 0, FW_BOLD, false, false, false, charset,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                             FF_ROMAN | FIXED_PITCH, TH_FONT_NAME);
+                             FF_ROMAN | FIXED_PITCH, fontNameW);
     TextHelper textHelper;
     D3DSURFACE_DESC textSurfaceDesc;
     textSurfaceDesc.Width = g_TextBufferSurface->width;
@@ -356,13 +383,23 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
     textHelper.InvertAlpha(0, 0, spriteWidth * 2, fontHeight * 2 + 6);
     SetBkMode(hdc, TRANSPARENT);
 
+    // Convert multi-byte string to wide chars using the system code page,
+    // so GBK text from Chinese DATs or Shift-JIS from Japanese DATs is handled correctly.
+    int slen = (int)strlen(string);
+    int wlen = MultiByteToWideChar(mbCodePage, 0, string, slen, NULL, 0);
+    wchar_t wbuf[1024];
+    if (wlen >= 1024)
+        wlen = 1023;
+    MultiByteToWideChar(mbCodePage, 0, string, slen, wbuf, wlen);
+    wbuf[wlen] = L'\0';
+
     if (shadowColor != COLOR_WHITE)
     {
         SetTextColor(hdc, shadowColor);
-        TextOutA(hdc, xPos * 2 + 3, 2, string, strlen(string));
+        TextOutW(hdc, xPos * 2 + 3, 2, wbuf, wlen);
     }
     SetTextColor(hdc, textColor);
-    TextOutA(hdc, xPos * 2, 0, string, strlen(string));
+    TextOutW(hdc, xPos * 2, 0, wbuf, wlen);
 
     SelectObject(hdc, h);
     textHelper.InvertAlpha(0, 0, spriteWidth * 2, fontHeight * 2 + 6);
