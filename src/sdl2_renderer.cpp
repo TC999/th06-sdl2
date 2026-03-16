@@ -38,6 +38,7 @@ static PFNGLCHECKFRAMEBUFFERSTATUSEXTPROC glCheckFramebufferStatusEXT_ = NULL;
 #define GL_DEPTH_ATTACHMENT_EXT        0x8D00
 #define GL_DEPTH_COMPONENT16           0x81A5
 #define GL_FRAMEBUFFER_COMPLETE_EXT    0x8CD5
+#define GL_FRAMEBUFFER_BINDING_EXT     0x8CA6
 
 static bool LoadFBOExtensions()
 {
@@ -762,6 +763,19 @@ void SDL2Renderer::TakeScreenshot(GLuint dstTex, i32 left, i32 top, i32 width, i
 {
     if (dstTex == 0) return;
 
+    // When using FBO, read from the FBO (640×480 game resolution) instead of
+    // the default framebuffer (real screen resolution with letterbox).  The
+    // FBO content persists after EndFrame/SwapWindow, so coordinates in game
+    // space are correct.  Without this, glReadPixels would read from the
+    // wrong position on the real-resolution default framebuffer, producing
+    // corrupted pause-menu backgrounds with a blue color shift.
+    GLint prevFbo = 0;
+    if (this->fbo != 0)
+    {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &prevFbo);
+        glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, this->fbo);
+    }
+
     u8 *pixels = new u8[width * height * 4];
     glReadPixels(left, this->screenHeight - top - height, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
@@ -777,6 +791,10 @@ void SDL2Renderer::TakeScreenshot(GLuint dstTex, i32 left, i32 top, i32 width, i
 
     if (this->currentTexture != 0)
         glBindTexture(GL_TEXTURE_2D, this->currentTexture);
+
+    // Restore previous framebuffer binding
+    if (this->fbo != 0)
+        glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, prevFbo);
 
     delete[] pixels;
     delete[] flipped;
