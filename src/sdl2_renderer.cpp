@@ -9,21 +9,6 @@
 #include <cstring>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-// DwmFlush - dynamically loaded to fix screen capture on Windows
-typedef HRESULT (WINAPI *PFN_DwmFlush)(void);
-static PFN_DwmFlush s_DwmFlush = nullptr;
-static bool s_dwmLoaded = false;
-static void EnsureDwmFlush() {
-    if (!s_dwmLoaded) {
-        s_dwmLoaded = true;
-        HMODULE hDwm = LoadLibraryA("dwmapi.dll");
-        if (hDwm) s_DwmFlush = (PFN_DwmFlush)GetProcAddress(hDwm, "DwmFlush");
-    }
-}
-#endif
-
 // FBO extension function pointers (loaded at runtime)
 typedef void (APIENTRY *PFNGLGENFRAMEBUFFERSEXTPROC)(GLsizei, GLuint*);
 typedef void (APIENTRY *PFNGLDELETEFRAMEBUFFERSEXTPROC)(GLsizei, const GLuint*);
@@ -938,6 +923,85 @@ void SDL2Renderer::BeginFrame()
     }
 }
 
+// Blit the FBO color texture to the default framebuffer (screen) with
+// letterbox/pillarbox scaling.  Called twice per frame: once before swap
+// (for the front buffer) and once after swap (so the back buffer also
+// holds the current frame — this is the root cause fix for screen capture
+// tools reading stale data from the post-swap back buffer).
+void SDL2Renderer::BlitFBOToScreen()
+{
+    glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
+
+    i32 rw = this->realScreenWidth;
+    i32 rh = this->realScreenHeight;
+
+    // Clear to black with alpha=1 so DWM composites as fully opaque.
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glViewport(0, 0, rw, rh);
+    glScissor(0, 0, rw, rh);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Compute centered 4:3 letterbox/pillarbox
+    i32 scaledW, scaledH;
+    if (rw * this->screenHeight > rh * this->screenWidth)
+    {
+        scaledH = rh;
+        scaledW = rh * this->screenWidth / this->screenHeight;
+    }
+    else
+    {
+        scaledW = rw;
+        scaledH = rw * this->screenHeight / this->screenWidth;
+    }
+    i32 offsetX = (rw - scaledW) / 2;
+    i32 offsetY = (rh - scaledH) / 2;
+
+    glViewport(offsetX, offsetY, scaledW, scaledH);
+    glScissor(offsetX, offsetY, scaledW, scaledH);
+
+    // Block alpha writes so the default framebuffer keeps alpha=1 from the
+    // clear above — prevents DWM from compositing the window as transparent
+    // when the FBO has alpha=0 areas (fog/sky clear).
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_FOG);
+    glDisable(GL_SCISSOR_TEST);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, 1, 0, 1, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glMatrixMode(GL_TEXTURE);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, this->fboColorTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glColor4f(1, 1, 1, 1);
+    glBegin(GL_TRIANGLE_STRIP);
+    glTexCoord2f(0, 0); glVertex2f(0, 0);
+    glTexCoord2f(1, 0); glVertex2f(1, 0);
+    glTexCoord2f(0, 1); glVertex2f(0, 1);
+    glTexCoord2f(1, 1); glVertex2f(1, 1);
+    glEnd();
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glMatrixMode(GL_TEXTURE);
+    glPopMatrix();
+}
+
 void SDL2Renderer::EndFrame()
 {
     if (this->fbo != 0)
@@ -957,78 +1021,17 @@ void SDL2Renderer::EndFrame()
         glDisable(GL_FOG);
         THPrac::THPracGuiRender();
 
-        // Unbind FBO — draw to the real screen
-        glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
-
-        i32 rw = this->realScreenWidth;
-        i32 rh = this->realScreenHeight;
-
-        // Clear actual screen to black (alpha=1 so DWM composites as fully opaque)
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glViewport(0, 0, rw, rh);
-        glScissor(0, 0, rw, rh);
-        glClearColor(0, 0, 0, 1);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        // Compute centered 4:3 letterbox/pillarbox
-        i32 scaledW, scaledH;
-        if (rw * this->screenHeight > rh * this->screenWidth)
-        {
-            scaledH = rh;
-            scaledW = rh * this->screenWidth / this->screenHeight;
-        }
-        else
-        {
-            scaledW = rw;
-            scaledH = rw * this->screenHeight / this->screenWidth;
-        }
-        i32 offsetX = (rw - scaledW) / 2;
-        i32 offsetY = (rh - scaledH) / 2;
-
-        glViewport(offsetX, offsetY, scaledW, scaledH);
-        glScissor(offsetX, offsetY, scaledW, scaledH);
-
-        // Draw FBO texture as fullscreen quad
-        // Block alpha writes so the default framebuffer keeps alpha=1 from the
-        // clear above — prevents DWM from compositing the window as transparent
-        // when the FBO has alpha=0 areas (fog/sky clear).
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
-        glDisable(GL_ALPHA_TEST);
-        glDisable(GL_BLEND);
-        glDisable(GL_FOG);
-        glDisable(GL_SCISSOR_TEST);
-
-        glMatrixMode(GL_PROJECTION);
-        glPushMatrix();
-        glLoadIdentity();
-        glOrtho(0, 1, 0, 1, -1, 1);
-        glMatrixMode(GL_MODELVIEW);
-        glPushMatrix();
-        glLoadIdentity();
-        glMatrixMode(GL_TEXTURE);
-        glPushMatrix();
-        glLoadIdentity();
-
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, this->fboColorTex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glColor4f(1, 1, 1, 1);
-        glBegin(GL_TRIANGLE_STRIP);
-        glTexCoord2f(0, 0); glVertex2f(0, 0);
-        glTexCoord2f(1, 0); glVertex2f(1, 0);
-        glTexCoord2f(0, 1); glVertex2f(0, 1);
-        glTexCoord2f(1, 1); glVertex2f(1, 1);
-        glEnd();
-
-        glMatrixMode(GL_PROJECTION);
-        glPopMatrix();
-        glMatrixMode(GL_MODELVIEW);
-        glPopMatrix();
-        glMatrixMode(GL_TEXTURE);
-        glPopMatrix();
+        // Blit FBO → front buffer (via swap), then re-blit → back buffer.
+        // Root cause fix: after SwapWindow the back buffer holds stale frame
+        // N-1 data. Screen capture tools that read the back buffer (e.g. OBS
+        // Game Capture hooking SwapBuffers post-swap, or Desktop Duplication)
+        // would see an old frame. By immediately re-blitting the FBO texture
+        // to the new back buffer, both front and back buffers hold the current
+        // frame, eliminating stale-frame capture regardless of when the tool
+        // samples the buffer.
+        BlitFBOToScreen();
+        SDL_GL_SwapWindow(this->window);
+        BlitFBOToScreen();
 
         // Restore the game's GL state saved at the top of EndFrame.
         // FBO binding is NOT part of the attrib stack, so BeginFrame will
@@ -1042,18 +1045,8 @@ void SDL2Renderer::EndFrame()
         glDisable(GL_ALPHA_TEST);
         glDisable(GL_FOG);
         THPrac::THPracGuiRender();
+        SDL_GL_SwapWindow(this->window);
     }
-
-    // Force GPU to finish rendering before swap - fixes screen capture tools
-    // seeing stale frames (they hook SwapBuffers and read the buffer content).
-    glFinish();
-    SDL_GL_SwapWindow(this->window);
-#ifdef _WIN32
-    // Force DWM to composite updated frame immediately, so DWM-based capture
-    // tools (OBS window capture, Windows Game Bar, etc.) see the current frame.
-    EnsureDwmFlush();
-    if (s_DwmFlush) s_DwmFlush();
-#endif
 }
 
 } // namespace th06

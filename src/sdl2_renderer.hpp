@@ -131,6 +131,7 @@ struct SDL2Renderer
 
     void BeginFrame();
     void EndFrame();
+    void BlitFBOToScreen();
 };
 
 extern SDL2Renderer g_Renderer;
