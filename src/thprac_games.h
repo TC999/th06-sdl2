@@ -2,6 +2,11 @@
 // thprac_games.h - Adapter for th06 source build
 // Provides the main game framework interface that thprac_th06.cpp depends on
 
+// __stdcall is a Windows calling convention; no-op on other platforms
+#if !defined(_MSC_VER) && !defined(__stdcall)
+#define __stdcall
+#endif
+
 #include "thprac_gui_components.h"
 #include "thprac_hook.h"
 #include "thprac_utils.h"

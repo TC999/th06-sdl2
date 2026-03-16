@@ -1,6 +1,17 @@
 ﻿#include "thprac_games.h"
 #include "thprac_games_dx8.h"
 
+// __declspec(noinline) is MSVC-only; map to GCC attribute on other compilers
+#if !defined(_MSC_VER) && !defined(__declspec)
+#define __declspec(x) __attribute__((x))
+#endif
+
+// MSVC-only safe functions; map to standard equivalents on other compilers
+#ifndef _MSC_VER
+#define sscanf_s sscanf
+#define sprintf_s sprintf
+#endif
+
 #include "thprac_utils.h"
 #include <fstream>
 #include <random>
@@ -53,7 +64,7 @@ typedef const char* LPCSTR;
 #ifndef byte
 typedef unsigned char byte;
 #endif
-#ifndef VK_ESCAPE
+#ifndef VK_F1
 #define VK_ESCAPE 0x1B
 #define VK_RETURN 0x0D
 #define VK_F1     0x70
@@ -77,11 +88,30 @@ typedef unsigned char byte;
 
 // timeGetTime and SDL provided by sdl2_compat.hpp via thprac_bridge.h
 
-// Utility implementations for SDL2 build (ported from thprac_utils.cpp)
+// Platform-specific high-resolution timer
+#ifdef _WIN32
 static double g_performance_freq = []() -> double {
     LARGE_INTEGER f; QueryPerformanceFrequency(&f);
     return static_cast<double>(f.QuadPart);
 }();
+#else
+#include <time.h>
+#include <sys/stat.h>
+#include <unistd.h>
+static double g_performance_freq = 1000000000.0; // nanoseconds
+struct LARGE_INTEGER { int64_t QuadPart; };
+static inline void QueryPerformanceCounter(LARGE_INTEGER* li) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    li->QuadPart = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+static inline void QueryPerformanceFrequency(LARGE_INTEGER* li) {
+    li->QuadPart = 1000000000LL;
+}
+#ifndef MAX_PATH
+#define MAX_PATH 260
+#endif
+#endif
 static std::vector<int64_t> g_clocks_start;
 
 inline int SetUpClock() {
@@ -102,8 +132,10 @@ inline double ResetClock(int id) {
     return 0;
 }
 
-static std::vector<std::wstring> g_directory;
 static int g_count_directory = 0;
+
+#ifdef _WIN32
+static std::vector<std::wstring> g_directory;
 
 inline void PushCurrentDirectory(const wchar_t* new_dir) {
     WCHAR buffer[MAX_PATH] = { 0 };
@@ -125,6 +157,28 @@ inline void PopCurrentDirectory() {
         g_count_directory--;
     }
 }
+#else // !_WIN32
+static std::vector<std::string> g_directory;
+
+inline void PushCurrentDirectory(const wchar_t*) {
+    char buf[MAX_PATH];
+    if (getcwd(buf, sizeof(buf))) {
+        if ((int)g_directory.size() <= g_count_directory)
+            g_directory.push_back(std::string(buf));
+        else
+            g_directory[g_count_directory] = std::string(buf);
+        g_count_directory++;
+    }
+    // On Linux the game runs from its own directory; no appdata relocation needed.
+}
+
+inline void PopCurrentDirectory() {
+    if (!g_directory.empty() && g_count_directory > 0) {
+        chdir(g_directory[g_count_directory - 1].c_str());
+        g_count_directory--;
+    }
+}
+#endif // _WIN32
 inline const char* GetVersionStr() { return "1.0.0"; }
 // GetModuleHandleW: use 0 directly where needed (Windows API not applicable)
 inline void CalcFileHash(const wchar_t*, uint64_t*) {}

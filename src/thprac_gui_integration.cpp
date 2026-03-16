@@ -38,12 +38,27 @@ void THPracGuiInit(SDL_Window* window, void* glContext)
     // Try system fonts in order; fall back to ImGui's default ASCII font.
     bool fontLoaded = false;
     static const char* fontPaths[] = {
+#ifdef _WIN32
         "C:\\Windows\\Fonts\\msyh.ttc",   // Microsoft YaHei
         "C:\\Windows\\Fonts\\msyhbd.ttc",  // Microsoft YaHei Bold
         "C:\\Windows\\Fonts\\simhei.ttf",  // SimHei
         "C:\\Windows\\Fonts\\simsun.ttc",  // SimSun
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+#else
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+#endif
+        nullptr
     };
-    for (auto path : fontPaths) {
+    for (int fi = 0; fontPaths[fi]; fi++) {
+        const char* path = fontPaths[fi];
         FILE* f = fopen(path, "rb");
         if (f) {
             fclose(f);
