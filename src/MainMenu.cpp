@@ -28,6 +28,16 @@
 #include "i18n.hpp"
 #include "utils.hpp"
 
+// Forward-declare thprac practice menu functions (defined in thprac_th06.cpp)
+namespace THPrac { namespace TH06 {
+    void THPracMenuOpen();
+    void THPracMenuConfirm();
+    void THPracMenuCancel();
+    int  THPracMenuApply();
+    bool THPracIsActive();
+    void THPracResetParams();
+}}
+
 namespace th06
 {
 DIFFABLE_STATIC_ARRAY_ASSIGN(char *, 4, g_ShortCharacterList) = {"ReimuA ", "ReimuB ", "MarisaA", "MarisaB"};
@@ -799,6 +809,10 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         {
             chosenStage = 5;
         }
+        if (menu->stateTimer == 1)
+        {
+            THPrac::TH06::THPracMenuOpen();
+        }
         MoveCursor(menu, chosenStage);
         if (30 > menu->stateTimer)
         {
@@ -806,6 +820,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         }
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
+            THPrac::TH06::THPracMenuCancel();
             menu->gameState = STATE_SHOT_SELECT;
             menu->stateTimer = 0;
             for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
@@ -838,8 +853,19 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         }
         else if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
         {
-            g_GameManager.currentStage = menu->cursor;
-            g_GameManager.menuCursorBackup = menu->cursor;
+            THPrac::TH06::THPracMenuConfirm();
+            if (THPrac::TH06::THPracIsActive()) {
+                int stage = THPrac::TH06::THPracMenuApply();
+                g_GameManager.currentStage = stage;
+                g_GameManager.menuCursorBackup = stage;
+                if (stage == 6)
+                    g_GameManager.difficulty = EXTRA;
+                else
+                    g_GameManager.difficulty = (Difficulty)g_Supervisor.cfg.defaultDifficulty;
+            } else {
+                g_GameManager.currentStage = menu->cursor;
+                g_GameManager.menuCursorBackup = menu->cursor;
+            }
             goto something;
         }
         break;
@@ -2293,6 +2319,7 @@ ZunResult MainMenu::AddedCallback(MainMenu *m)
     }
 
     g_GameManager.isInPracticeMode = 0;
+    THPrac::TH06::THPracResetParams();
     if ((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING & 1) == 0)
     {
         m->color1 = 0x80004000;

@@ -145,6 +145,8 @@ HRESULT CStreamingSound::Play(DWORD dwPriority, DWORD dwFlags)
     m_dwCurFadeoutProgress = 0;
     m_dwTotalFadeout = 0;
     m_isPlaying = 1;
+    // Set BGM volume to 75% to match original DirectSound perceived loudness
+    Mix_VolumeMusic(MIX_MAX_VOLUME * 3 / 4);
     Mix_HookMusic(MusicHookCallback, this);
     return 0;
 }
@@ -326,4 +328,4 @@ HRESULT CWaveFile::ResetFile(bool loop)
 }
 
 }; // namespace th06
-
+

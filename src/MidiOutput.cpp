@@ -335,7 +335,7 @@ ZunResult MidiOutput::Play()
 
     if (this->midiHeaders[0] != NULL)
     {
-        Mix_VolumeMusic(MIX_MAX_VOLUME);
+        Mix_VolumeMusic(MIX_MAX_VOLUME * 3 / 4);
         Mix_PlayMusic((Mix_Music *)this->midiHeaders[0], -1);
     }
 

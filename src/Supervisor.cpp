@@ -1,6 +1,7 @@
 #include "Supervisor.hpp"
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
+#include "thprac_th06.h"
 #include "Chain.hpp"
 #include "ChainPriorities.hpp"
 #include "Controller.hpp"
@@ -366,6 +367,7 @@ ZunResult Supervisor::DeletedCallback(Supervisor *s)
         s->midiOutput = NULL;
     }
     ReplayManager::SaveReplay(NULL, NULL);
+    THPrac::TH06::THPracSaveData();
     TextHelper::ReleaseTextBuffer();
     Controller::CloseSDLController();
     return ZUN_SUCCESS;

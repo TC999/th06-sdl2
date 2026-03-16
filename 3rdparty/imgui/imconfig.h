@@ -41,7 +41,7 @@
 #define IMGUI_INCLUDE_IMGUI_USER_H
 
 //---- Pack colors to BGRA8 instead of RGBA8 (if you needed to convert from one to another anyway)
-#define IMGUI_USE_BGRA_PACKED_COLOR
+//#define IMGUI_USE_BGRA_PACKED_COLOR
 //#define IMGUI_OVERRIDE_DRAWVERT_STRUCT_LAYOUT struct ImDrawVert { ImVec2 pos; float z; ImU32 col; ImVec2 uv; }
 #define IMGUI_INCLUDE_IMGUI_USER_INL
 

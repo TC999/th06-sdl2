@@ -8,6 +8,7 @@
 #include "diffbuild.hpp"
 #include "i18n.hpp"
 #include "sdl2_renderer.hpp"
+#include "thprac_gui_integration.h"
 #include <cmath>
 
 namespace th06
@@ -17,6 +18,11 @@ DIFFABLE_STATIC(i32, g_TickCountToEffectiveFramerate)
 DIFFABLE_STATIC(f64, g_LastFrameTime)
 
 #define FRAME_TIME (1000. / 60.)
+
+static double GetFrameTime() {
+    float speed = THPrac::THPracGetSpeedMultiplier();
+    return (speed > 0.01f) ? (FRAME_TIME / speed) : FRAME_TIME;
+}
 
 #pragma var_order(res, viewport, slowdown, local_34, delta, curtime)
 RenderResult GameWindow::Render()
@@ -64,6 +70,7 @@ RenderResult GameWindow::Render()
         g_Supervisor.viewport.Height = 480;
         g_Renderer.SetViewport(0, 0, 640, 480);
         res = g_Chain.RunCalcChain();
+        THPrac::THPracGuiUpdate();
         g_SoundPlayer.PlaySounds();
         if (res == 0)
         {
@@ -87,13 +94,13 @@ RenderResult GameWindow::Render()
                 g_LastFrameTime = slowdown;
             }
             local_34 = fabs(slowdown - g_LastFrameTime);
-            if (local_34 >= FRAME_TIME)
+            if (local_34 >= GetFrameTime())
             {
                 do
                 {
-                    g_LastFrameTime += FRAME_TIME;
-                    local_34 -= FRAME_TIME;
-                } while (local_34 >= FRAME_TIME);
+                    g_LastFrameTime += GetFrameTime();
+                    local_34 -= GetFrameTime();
+                } while (local_34 >= GetFrameTime());
 
                 if (g_Supervisor.cfg.frameskipConfig < this->curFrame)
                     goto I_HAVE_NO_CLUE_WHY_BUT_I_MUST_JUMP_HERE;
@@ -164,10 +171,12 @@ void GameWindow::Present()
         u32 curTime = timeGetTime();
         if (s_lastPresentTime != 0)
         {
+            float speedMul = THPrac::THPracGetSpeedMultiplier();
+            u32 targetMs = (speedMul > 0.01f) ? (u32)(16.0f / speedMul) : 16;
             u32 elapsed = curTime - s_lastPresentTime;
-            if (elapsed < 16)
+            if (elapsed < targetMs)
             {
-                SDL_Delay(16 - elapsed);
+                SDL_Delay(targetMs - elapsed);
             }
         }
         s_lastPresentTime = timeGetTime();
@@ -211,10 +220,17 @@ void GameWindow::CreateGameWindow(void *unused)
 
     if (g_Supervisor.cfg.windowed == 0)
     {
-        windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_SHOWN;
+        // Create a borderless window covering the screen.
+        // Width is +1 pixel (overflows off right edge, invisible) so the OS
+        // does not recognize it as an exact-screen-size fullscreen window,
+        // preventing fullscreen optimizations that break screen capture
+        // and block third-party overlay windows.
+        SDL_DisplayMode dm;
+        SDL_GetDesktopDisplayMode(0, &dm);
+        windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_BORDERLESS;
         g_GameWindow.sdlWindow = SDL_CreateWindow(
-            "Touhou 06", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-            GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT, windowFlags);
+            "Touhou 06", 0, 0,
+            dm.w + 1, dm.h, windowFlags);
     }
     else
     {
@@ -232,6 +248,7 @@ void GameWindow_ProcessEvents()
     SDL_Event event;
     while (SDL_PollEvent(&event))
     {
+        THPrac::THPracGuiProcessEvent(&event);
         switch (event.type)
         {
         case SDL_QUIT:
@@ -291,6 +308,8 @@ i32 GameWindow::InitD3dRendering(void)
     SDL_GL_SetSwapInterval(g_Supervisor.cfg.windowed ? 1 : 0);
 
     g_Renderer.Init(g_GameWindow.sdlWindow, glCtx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
+
+    THPrac::THPracGuiInit(g_GameWindow.sdlWindow, glCtx);
 
     g_Supervisor.lockableBackbuffer = 1;
     g_Supervisor.hasD3dHardwareVertexProcessing = 1;

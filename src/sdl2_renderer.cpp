@@ -4,9 +4,25 @@
 
 #include "sdl2_renderer.hpp"
 #include "AnmManager.hpp"
+#include "thprac_gui_integration.h"
 #include <SDL_image.h>
 #include <cstring>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+// DwmFlush - dynamically loaded to fix screen capture on Windows
+typedef HRESULT (WINAPI *PFN_DwmFlush)(void);
+static PFN_DwmFlush s_DwmFlush = nullptr;
+static bool s_dwmLoaded = false;
+static void EnsureDwmFlush() {
+    if (!s_dwmLoaded) {
+        s_dwmLoaded = true;
+        HMODULE hDwm = LoadLibraryA("dwmapi.dll");
+        if (hDwm) s_DwmFlush = (PFN_DwmFlush)GetProcAddress(hDwm, "DwmFlush");
+    }
+}
+#endif
 
 // FBO extension function pointers (loaded at runtime)
 typedef void (APIENTRY *PFNGLGENFRAMEBUFFERSEXTPROC)(GLsizei, GLuint*);
@@ -228,7 +244,21 @@ void SDL2Renderer::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth)
     if (clearDepth)
         mask |= GL_DEPTH_BUFFER_BIT;
     if (mask)
+    {
+        // D3D8 Clear ignores write masks — it always clears regardless of
+        // D3DRS_ZWRITEENABLE / D3DRS_COLORWRITEENABLE.  OpenGL's glClear
+        // respects glDepthMask / glColorMask, so we must temporarily enable
+        // them to match D3D8 semantics.
+        GLboolean prevDepthMask;
+        GLboolean prevColorMask[4];
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &prevDepthMask);
+        glGetBooleanv(GL_COLOR_WRITEMASK, prevColorMask);
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glClear(mask);
+        glDepthMask(prevDepthMask);
+        glColorMask(prevColorMask[0], prevColorMask[1], prevColorMask[2], prevColorMask[3]);
+    }
 }
 
 void SDL2Renderer::SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ, f32 maxZ)
@@ -896,6 +926,7 @@ void SDL2Renderer::BeginFrame()
     if (this->fbo != 0)
     {
         glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, this->fbo);
+
         // Restore viewport/scissor to the values from the last SetViewport() call,
         // not full screen. D3D8's Present() does not alter render state, and the
         // game depends on CalcChain-set viewport (gameplay area 32,16,384,448)
@@ -911,6 +942,21 @@ void SDL2Renderer::EndFrame()
 {
     if (this->fbo != 0)
     {
+        // Save the game's entire GL state so it persists unchanged across frames.
+        // EndFrame modifies viewport, depth/color masks, blend, scissor, matrices,
+        // etc. for ImGui rendering and the FBO-to-screen blit.  Without this
+        // push/pop the cached render-state flags (currentZWriteDisable,
+        // currentBlendMode, …) would desync from actual GL state, causing the
+        // dirty-flag optimisation to skip necessary state changes next frame.
+        glPushAttrib(GL_ALL_ATTRIB_BITS);
+
+        // Render thprac ImGui overlay into the FBO at game resolution.
+        glViewport(0, 0, this->screenWidth, this->screenHeight);
+        glScissor(0, 0, this->screenWidth, this->screenHeight);
+        glDisable(GL_ALPHA_TEST);
+        glDisable(GL_FOG);
+        THPrac::THPracGuiRender();
+
         // Unbind FBO — draw to the real screen
         glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
 
@@ -984,36 +1030,30 @@ void SDL2Renderer::EndFrame()
         glMatrixMode(GL_TEXTURE);
         glPopMatrix();
 
-        // Restore render state
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glEnable(GL_DEPTH_TEST);
-        glDepthMask(GL_TRUE);
-        glEnable(GL_ALPHA_TEST);
-        glEnable(GL_BLEND);
-        glEnable(GL_SCISSOR_TEST);
-        if (this->fogEnabled)
-            glEnable(GL_FOG);
-
-        // Restore texture enable/binding to match currentTexture (mirrors SetTexture logic).
-        // The blit enabled GL_TEXTURE_2D; if the game had it disabled (currentTexture==0),
-        // we must disable it or the next SetTexture(0) early-outs without disabling.
-        if (this->currentTexture != 0)
-        {
-            glEnable(GL_TEXTURE_2D);
-            glBindTexture(GL_TEXTURE_2D, this->currentTexture);
-        }
-        else
-        {
-            glDisable(GL_TEXTURE_2D);
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-
-        // Restore matrix mode — the push/pop sequence above leaves it as GL_TEXTURE,
-        // but the game expects GL_MODELVIEW between frames.
-        glMatrixMode(GL_MODELVIEW);
+        // Restore the game's GL state saved at the top of EndFrame.
+        // FBO binding is NOT part of the attrib stack, so BeginFrame will
+        // re-bind the FBO as usual.  All other state (depth mask, color mask,
+        // blend mode, scissor, viewport, matrices, etc.) is restored here.
+        glPopAttrib();
+    }
+    else
+    {
+        // Non-FBO path: render ImGui directly to the screen
+        glDisable(GL_ALPHA_TEST);
+        glDisable(GL_FOG);
+        THPrac::THPracGuiRender();
     }
 
+    // Force GPU to finish rendering before swap - fixes screen capture tools
+    // seeing stale frames (they hook SwapBuffers and read the buffer content).
+    glFinish();
     SDL_GL_SwapWindow(this->window);
+#ifdef _WIN32
+    // Force DWM to composite updated frame immediately, so DWM-based capture
+    // tools (OBS window capture, Windows Game Bar, etc.) see the current frame.
+    EnsureDwmFlush();
+    if (s_DwmFlush) s_DwmFlush();
+#endif
 }
 
 } // namespace th06

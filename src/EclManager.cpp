@@ -12,6 +12,7 @@
 #include "Rng.hpp"
 #include "Stage.hpp"
 #include "utils.hpp"
+#include "thprac_th06.h"
 
 namespace th06
 {
@@ -707,6 +708,8 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                 g_EnemyManager.spellcardInfo.isActive = 1;
                 g_EnemyManager.spellcardInfo.idx = instruction->args.spellcardStart.spellcardId;
                 g_EnemyManager.spellcardInfo.captureScore = g_SpellcardScore[g_EnemyManager.spellcardInfo.idx];
+                THPrac::TH06::THPracLockTimerReset();
+                THPrac::TH06::THPracSpellAttempt();
                 g_BulletManager.TurnAllBulletsIntoPoints();
                 g_Stage.spellcardState = RUNNING;
                 g_Stage.ticksSinceSpellcardStarted = 0;
@@ -769,6 +772,7 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                                 local_80->characterShotType = g_GameManager.CharacterShotType();
                             }
                             g_GameManager.spellcardsCaptured++;
+                            THPrac::TH06::THPracSpellCapture();
                         }
                     }
                     g_EnemyManager.spellcardInfo.isActive = 0;

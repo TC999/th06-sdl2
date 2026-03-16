@@ -10,6 +10,7 @@
 #include "Rng.hpp"
 #include "diffbuild.hpp"
 #include "utils.hpp"
+#include "thprac_th06.h"
 
 namespace th06
 {
@@ -407,6 +408,7 @@ ZunBool Enemy::HandleTimerCallback()
         this->bossTimer.InitializeForPopup();
         if (!this->flags.unk16)
         {
+            THPrac::TH06::THPracSpellTimeout();
             g_EnemyManager.spellcardInfo.isCapturing = false;
             if (g_EnemyManager.spellcardInfo.isActive)
             {
@@ -732,9 +734,13 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
             }
         }
         Enemy::UpdateEffects(curEnemy);
-        if (g_GameManager.isTimeStopped == 0)
+        if (g_GameManager.isTimeStopped == 0 && !THPrac::TH06::THPracIsTimeLock())
         {
             curEnemy->bossTimer.Tick();
+        }
+        if (g_GameManager.isTimeStopped == 0)
+        {
+            THPrac::TH06::THPracLockTimerTick();
         }
     }
     mgr->timelineTime.Tick();

@@ -1,0 +1,1780 @@
+#include "thprac_games.h"
+#include "thprac_games_dx8.h"
+
+#include "thprac_utils.h"
+#include "../3rdParties/d3d8/include/d3d8.h"
+#include <fstream>
+
+#include <format>
+#include "../3rdParties/d3d8/include/dsound.h"
+
+
+#include "thprac_res.h"
+#include "thprac_th06.h"
+
+namespace THPrac {
+extern bool g_forceRenderCursor;
+
+struct FastRetryOpt {
+    // fast re
+    static constexpr int fast_retry_cout_down_max = 15;
+    bool enable_fast_retry = false;
+    int fast_retry_count_down = 0;
+};
+extern FastRetryOpt g_fast_re_opt;
+
+namespace TH06 {
+    static const GameManager* const GAME_MANAGER = (const GameManager* const)0x69bca0;
+
+    enum ADDRS {
+        INPUT_ADDR = 0x69D904,
+        INPUT_PREV_ADDR = 0x69D908,
+    };
+
+    ImTextureID g_hitbox_textureID = NULL;
+    ImVec2 g_hitbox_sz = { 32.0f, 32.0f };
+
+    ImVec2 g_books_pos[6] = { { 0.0f, 0.0f } };
+
+    int32_t g_last_rep_seed = 0;
+    bool g_show_bullet_hitbox = false;
+    float g_last_boss_x, g_last_boss_y;
+
+    int g_lock_timer = 0;
+
+    bool THBGMTest();
+    using std::pair;
+
+    class TH06Save {
+        SINGLETON(TH06Save)
+    public:
+        enum TH06SpellState {
+            Capture = 0,
+            Attempt = 1,
+            Timeout = 2
+        };
+    private:
+        struct Save {
+            int32_t SC_History[65][5][4][3] = { 0 }; // spellid, diff, playertype, [capture/attempt/timeout]
+            int64_t timePlayer[5][4] = { 0 }; // diff/type, precision:ns
+        };
+        Save save_current;
+        Save save_total;
+        bool is_save_loaded;
+        TH06Save()
+        {
+            save_current = { 0 };
+            save_total = { 0 };
+            is_save_loaded = false;
+            LoadSave();
+        }
+    public:
+        const static int spellid_books = 64;
+        void LoadSave()
+        {
+            if (is_save_loaded)
+                return;
+            is_save_loaded = true;
+            PushCurrentDirectory(L"%appdata%\\ShanghaiAlice\\th06");
+            auto fs_new = ::std::fstream("score06.dat", ::std::ios::in | ::std::ios::binary);
+            if (fs_new.is_open()) {
+                int version = 1;
+                fs_new.read((char*)&version, sizeof(version));
+                switch (version) {
+                    default:
+                    case 1: {
+                        fs_new.read((char*)save_total.SC_History, sizeof(save_total.SC_History));
+                        fs_new.read((char*)save_total.timePlayer, sizeof(save_total.timePlayer));
+                    } break;
+                }
+                fs_new.close();
+            } else {
+                // compatible
+                auto fs = ::std::fstream("spell_capture.dat", ::std::ios::in | ::std::ios::binary);
+                if (fs.is_open()) {
+                    is_save_loaded = true;
+                    fs.read((char*)save_total.SC_History, sizeof(save_total.SC_History));
+                    if (!fs.eof())
+                        fs.read((char*)save_total.timePlayer, sizeof(save_total.timePlayer)); // compatible , avoid eof
+
+                    for (int i = 0; i < 5; i++)
+                        for (int j = 0; j < 4; j++)
+                            save_total.timePlayer[i][j] *= 1000000; // make precision to ns
+                }
+                fs.close();
+            }
+            PopCurrentDirectory();
+        }
+
+        void SaveSave()
+        {
+            int version = 1;
+            PushCurrentDirectory(L"%appdata%\\ShanghaiAlice\\th06");
+            auto fs = ::std::fstream("score06.dat", ::std::ios::out | ::std::ios::binary);
+            if (fs.is_open()) {
+                fs.write((char*)(&version), sizeof(version));
+                fs.write((char*)(&save_total), sizeof(save_total));
+                fs.close();
+            }
+            PopCurrentDirectory();
+        }
+
+        void AddAttempt(int spell_id, byte diff, byte player_type)
+        {
+            LoadSave();
+            save_total.SC_History[spell_id][diff][player_type][1]++;
+            save_current.SC_History[spell_id][diff][player_type][1]++;
+            SaveSave();
+        }
+
+        void AddCapture(int spell_id, byte diff, byte player_type)
+        {
+            LoadSave();
+            save_total.SC_History[spell_id][diff][player_type][0]++;
+            save_current.SC_History[spell_id][diff][player_type][0]++;
+            SaveSave();
+        }
+
+        void AddTimeOut(int spell_id, byte diff, byte player_type)
+        {
+            LoadSave();
+            save_total.SC_History[spell_id][diff][player_type][2]++;
+            save_current.SC_History[spell_id][diff][player_type][2]++;
+            SaveSave();
+        }
+
+        void IncreaseGameTime()
+        {
+            static int clockid = -1;
+            static int64_t timePlayedns;
+            DWORD gameState = *(DWORD*)(0x6C6EA4);
+            BYTE pauseMenuState = *(BYTE*)(0x69D4BF);
+            byte is_rep = *(byte*)(0x69BCBC);
+            if ((!is_rep) && gameState == 2 && pauseMenuState == 0) {
+                if (clockid == -1)
+                    clockid = SetUpClock();
+                // SetThreadAffinityMask(GetCurrentThread(), 1);
+                // win7 has some problem with static performance counter when use full screen
+                byte cur_diff = *(byte*)(0x69BCB0);
+                byte cur_player_typea = *(byte*)(0x69D4BD);
+                byte cur_player_typeb = *(byte*)(0x69D4BE);
+                byte cur_player_type = (cur_player_typea << 1) | cur_player_typeb;
+
+                int64_t time_ns = static_cast<int64_t>(ResetClock(clockid) * 1e9);
+                save_total.timePlayer[cur_diff][cur_player_type] += time_ns;
+                save_current.timePlayer[cur_diff][cur_player_type] += time_ns;
+                timePlayedns += time_ns;
+                if (timePlayedns >= (1000000000ll * 60 * 3)) { // save every 3 minutes automatically
+                    LoadSave();// if load have failed, it will eat the time, but anyway
+                    timePlayedns = 0;
+                    SaveSave();
+                }
+            } else {
+                ResetClock(clockid);
+            }
+        }
+        
+        
+        int GetTotalSpellCardCount(int spell_id, int diff, int player_type, TH06SpellState state)
+        {
+            return save_total.SC_History[spell_id][diff][player_type][state];
+        }
+        int GetCurrentSpellCardCount(int spell_id, int diff, int player_type, TH06SpellState state)
+        {
+            return save_current.SC_History[spell_id][diff][player_type][state];
+        }
+        int64_t GetTotalGameTime(int diff, int player_type)
+        {
+            return save_total.timePlayer[diff][player_type];
+        }
+        int64_t GetCurrentGameTime(int diff, int player_type)
+        {
+            return save_current.timePlayer[diff][player_type];
+        }
+    };
+
+
+    struct THPracParam {
+        int32_t mode;
+
+        int32_t stage;
+        int32_t section;
+        int32_t phase;
+        int32_t frame;
+
+        int64_t score;
+        float life;
+        float bomb;
+        float power;
+        int32_t graze;
+        int32_t point;
+
+        int32_t rank;
+        bool rankLock;
+        int32_t fakeType;
+
+        int32_t delay_st6bs9;
+        bool wall_prac_st6;
+        bool dlg;
+
+        int bF;//book_fix
+        int bX1;//book_x
+        int bX2;
+        int bX3;
+        int bX4;
+        int bX5;
+        int bX6;
+
+        int bY1;//book_y
+        int bY2;
+        int bY3;
+        int bY4;
+        int bY5;
+        int bY6;
+
+        int snipeN;
+        int snipeF;
+
+        bool _playLock;
+        void Reset()
+        {
+            mode = 0;
+            stage = 0;
+            section = 0;
+            phase = 0;
+            score = 0ll;
+            life = 0.0f;
+            bomb = 0.0f;
+            power = 0.0f;
+            graze = 0;
+            point = 0;
+            rank = 0;
+            rankLock = false;
+            fakeType = 0;
+
+            bY1 = 32,
+            bY2 = 128,
+            bY3 = 144,
+            bY4 = 64,
+            bY5 = 80,
+            bY6 = 96;
+            bX1 = 0;
+            bX2 = 0;
+            bX3 = 0;
+            bX4 = 0;
+            bX5 = 0;
+            bX6 = 0;
+            bF = 0;
+            snipeN = 0;
+            snipeF = 0;
+            
+        }
+        bool ReadJson(std::string& json)
+        {
+            ParseJson();
+
+            ForceJsonValue(game, "th06");
+            GetJsonValue(mode);
+            GetJsonValue(stage);
+            GetJsonValue(section);
+            GetJsonValue(phase);
+            GetJsonValueEx(dlg, Bool);
+            GetJsonValue(frame);
+            GetJsonValue(score);
+            GetJsonValue(life);
+            GetJsonValue(bomb);
+            GetJsonValue(power);
+            GetJsonValue(graze);
+            GetJsonValue(point);
+            GetJsonValue(rank);
+            GetJsonValueEx(rankLock, Bool);
+            GetJsonValue(fakeType);
+            GetJsonValue(delay_st6bs9);
+            GetJsonValueEx(wall_prac_st6, Bool);
+
+            GetJsonValue(bF);
+            GetJsonValue(bX1);
+            GetJsonValue(bX2);
+            GetJsonValue(bX3);
+            GetJsonValue(bX4);
+            GetJsonValue(bX5);
+            GetJsonValue(bX6);
+            GetJsonValue(bY1);
+            GetJsonValue(bY2);
+            GetJsonValue(bY3);
+            GetJsonValue(bY4);
+            GetJsonValue(bY5);
+            GetJsonValue(bY6);
+
+            GetJsonValue(snipeN);
+            GetJsonValue(snipeF);
+
+            return true;
+        }
+        std::string GetJson()
+        {
+            CreateJson();
+
+            AddJsonValueEx(version, GetVersionStr(), jalloc);
+            AddJsonValueEx(game, "th06", jalloc);
+            AddJsonValue(mode);
+            AddJsonValue(stage);
+            if (section)
+                AddJsonValue(section);
+            if (phase)
+                AddJsonValue(phase);
+            if (frame)
+                AddJsonValue(frame);
+            if (dlg)
+                AddJsonValue(dlg);
+
+            AddJsonValue(score);
+            AddJsonValueEx(life, (int)life);
+            AddJsonValueEx(bomb, (int)bomb);
+            AddJsonValueEx(power, (int)power);
+            AddJsonValue(graze);
+            AddJsonValue(point);
+            AddJsonValue(rank);
+            AddJsonValue(rankLock);
+            AddJsonValue(fakeType);
+            AddJsonValue(delay_st6bs9);
+            AddJsonValue(wall_prac_st6);
+            
+            AddJsonValue(bF);
+            AddJsonValue(bX1);
+            AddJsonValue(bX2);
+            AddJsonValue(bX3);
+            AddJsonValue(bX4);
+            AddJsonValue(bX5);
+            AddJsonValue(bX6);
+            AddJsonValue(bY1);
+            AddJsonValue(bY2);
+            AddJsonValue(bY3);
+            AddJsonValue(bY4);
+            AddJsonValue(bY5);
+            AddJsonValue(bY6);
+
+            AddJsonValue(snipeN);
+            AddJsonValue(snipeF);
+
+            ReturnJson();
+        }
+    };
+    bool thRestartFlag = false;
+    bool threstartflag_normalgame = false;
+    
+
+    THPracParam thPracParam {};
+
+    class THOverlay : public Gui::GameGuiWnd {
+        THOverlay() noexcept
+        {
+            SetTitle("Mod Menu");
+            SetFade(0.5f, 0.5f);
+            SetPos(10.0f, 10.0f);
+            SetSize(0.0f, 0.0f);
+            SetWndFlag(
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | 0);
+            OnLocaleChange();
+        }
+        SINGLETON(THOverlay)
+    public:
+
+    protected:
+        virtual void OnLocaleChange() override
+        {
+            float x_offset_1 = 0.0f;
+            float x_offset_2 = 0.0f;
+            switch (Gui::LocaleGet()) {
+            case Gui::LOCALE_ZH_CN:
+                x_offset_1 = 0.12f;
+                x_offset_2 = 0.172f;
+                break;
+            case Gui::LOCALE_EN_US:
+                x_offset_1 = 0.12f;
+                x_offset_2 = 0.16f;
+                break;
+            case Gui::LOCALE_JA_JP:
+                x_offset_1 = 0.18f;
+                x_offset_2 = 0.235f;
+                break;
+            default:
+                break;
+            }
+
+            mMenu.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mMuteki.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mInfLives.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mInfBombs.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mInfPower.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mTimeLock.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mAutoBomb.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mElBgm.SetTextOffsetRel(x_offset_1, x_offset_2);
+            mShowSpellCapture.SetTextOffsetRel(x_offset_1, x_offset_2);
+        }
+        virtual void OnContentUpdate() override
+        {
+            mMuteki();
+            mInfLives();
+            mInfBombs();
+            mInfPower();
+            mTimeLock();
+            mAutoBomb();
+            mElBgm();
+            mShowSpellCapture();
+        }
+        virtual void OnPreUpdate() override
+        {
+            if (mMenu(false) && (!ImGui::IsAnyItemActive() || *mShowSpellCapture)) {
+                if (*mMenu) {
+                    Open();
+                } else {
+                    Close();
+                    *((int32_t*)0x6c6eb0) = 3;
+                }
+            }
+        }
+
+        Gui::GuiHotKeyChord mMenu { "ModMenuToggle", "BACKSPACE", Gui::GetBackspaceMenuChord() };
+        
+        HOTKEY_DEFINE(mMuteki, TH_MUTEKI, "F1", VK_F1)
+        PATCH_HK(0x4277c2, "03"),
+        PATCH_HK(0x42779a, "83c4109090")
+        HOTKEY_ENDDEF();
+
+        HOTKEY_DEFINE(mInfBombs, TH_INFBOMBS, "F3", VK_F3)
+        PATCH_HK(0x4289e3, "00")
+        HOTKEY_ENDDEF();
+        
+        HOTKEY_DEFINE(mInfPower, TH_INFPOWER, "F4", VK_F4)
+        PATCH_HK(0x428B7D, "00"),
+        PATCH_HK(0x428B67, "909090909090909090")
+        HOTKEY_ENDDEF();
+        
+        HOTKEY_DEFINE(mAutoBomb, TH_AUTOBOMB, "F6", VK_F6)
+        PATCH_HK(0x428989, "EB1D"),
+        PATCH_HK(0x4289B4, "85D2"),
+        PATCH_HK(0x428A94, "FF89"),
+        PATCH_HK(0x428A9D, "66C70504D9690002")
+        HOTKEY_ENDDEF();
+        
+
+    public:
+        HOTKEY_DEFINE(mInfLives, TH_INFLIVES2, "F2", VK_F2)
+        PATCH_HK(0x428DDB, "a0bad469009090909090909090909090"),
+        PATCH_HK(0x428AC6, "909090909090")
+        HOTKEY_ENDDEF();
+        
+        HOTKEY_DEFINE(mTimeLock, TH_TIMELOCK, "F5", VK_F5)
+        PATCH_HK(0x412DD1, "eb")
+        HOTKEY_ENDDEF();
+
+        Gui::GuiHotKey mElBgm { TH_EL_BGM, "F7", VK_F7 };
+        Gui::GuiHotKey mShowSpellCapture { THPRAC_INGAMEINFO, "F8", VK_F8 };
+    };
+
+    class THGuiPrac : public Gui::GameGuiWnd {
+        THGuiPrac() noexcept
+        {
+            *mLife = 8;
+            *mBomb = 8;
+            *mPower = 128;
+            *mMode = 1;
+            *mScore = 0;
+            *mGraze = 0;
+            *mRank = 32;
+
+            SetFade(0.8f, 0.1f);
+            SetStyle(ImGuiStyleVar_WindowRounding, 0.0f);
+            SetStyle(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            OnLocaleChange();
+        }
+        SINGLETON(THGuiPrac)
+    public:
+
+        __declspec(noinline) void State(int state)
+        {
+            switch (state) {
+            case 0:
+                break;
+            case 1:
+                SetFade(0.8f, 0.1f);
+                Open();
+                mDiffculty = (int)(*((int8_t*)0x69bcb0));
+                mShotType = (int)(*((int8_t*)0x69d4bd) * 2) + *((int8_t*)0x69d4be);
+                break;
+            case 2:
+                break;
+            case 3:
+                SetFade(0.8f, 0.8f);
+                Close();
+                *mNavFocus = 0;
+
+                // Fill Param
+                thPracParam.mode = *mMode;
+
+                thPracParam.stage = *mStage;
+                thPracParam.section = CalcSection();
+                thPracParam.phase = *mPhase;
+                thPracParam.frame = *mFrame;
+                if (SectionHasDlg(thPracParam.section))
+                    thPracParam.dlg = *mDlg;
+                if (thPracParam.section == TH06_ST6_BOSS9)
+                    thPracParam.delay_st6bs9 = *mDelaySt6Bs9;
+                if (thPracParam.section == TH06_ST6_BOSS9 || thPracParam.section == TH06_ST6_BOSS6)
+                {
+                    thPracParam.wall_prac_st6 = *mWallPrac;
+                    thPracParam.snipeF = *mWallPracSnipeF;
+                    thPracParam.snipeN = *mWallPracSnipeN;
+                }
+                if (thPracParam.section == TH06_ST4_BOOKS) {
+                    thPracParam.bF = 0;
+                    thPracParam.bF |= ((int)*mBookC1)<<0;thPracParam.bX1 = *mBookX1;thPracParam.bY1 = *mBookY1;
+                    thPracParam.bF |= ((int)*mBookC2)<<1;thPracParam.bX2 = *mBookX2;thPracParam.bY2 = *mBookY2;
+                    thPracParam.bF |= ((int)*mBookC3)<<2;thPracParam.bX3 = *mBookX3;thPracParam.bY3 = *mBookY3;
+                    thPracParam.bF |= ((int)*mBookC4)<<3;thPracParam.bX4 = *mBookX4;thPracParam.bY4 = *mBookY4;
+                    thPracParam.bF |= ((int)*mBookC5)<<4;thPracParam.bX5 = *mBookX5;thPracParam.bY5 = *mBookY5;
+                    thPracParam.bF |= ((int)*mBookC6)<<5;thPracParam.bX6 = *mBookX6;thPracParam.bY6 = *mBookY6;
+                }
+
+                thPracParam.score = *mScore;
+                thPracParam.life = (float)*mLife;
+                thPracParam.bomb = (float)*mBomb;
+                thPracParam.power = (float)*mPower;
+                thPracParam.graze = *mGraze;
+                thPracParam.point = *mPoint;
+
+                thPracParam.rank = *mRank;
+                thPracParam.rankLock = *mRankLock;
+                if (thPracParam.section >= TH06_ST4_BOSS1 && thPracParam.section <= TH06_ST4_BOSS7)
+                    thPracParam.fakeType = *mFakeShot;
+                break;
+            case 4:
+                Close();
+                *mNavFocus = 0;
+                break;
+            case 5:
+                // Fill Param
+                thPracParam.mode = *mMode;
+
+                thPracParam.stage = *mStage;
+                thPracParam.section = CalcSection();
+                thPracParam.phase = *mPhase;
+                thPracParam.frame = *mFrame;
+                if (SectionHasDlg(thPracParam.section))
+                    thPracParam.dlg = *mDlg;
+                if (thPracParam.section == TH06_ST6_BOSS9)
+                    thPracParam.delay_st6bs9 = *mDelaySt6Bs9;
+                if (thPracParam.section == TH06_ST6_BOSS9 || thPracParam.section == TH06_ST6_BOSS6) {
+                    thPracParam.wall_prac_st6 = *mWallPrac;
+                    thPracParam.snipeF = *mWallPracSnipeF;
+                    thPracParam.snipeN = *mWallPracSnipeN;
+                }
+                if (thPracParam.section == TH06_ST4_BOOKS) {
+                    thPracParam.bF = 0;
+                    thPracParam.bF |= ((int)*mBookC1)<<0;thPracParam.bX1 = *mBookX1;thPracParam.bY1 = *mBookY1;
+                    thPracParam.bF |= ((int)*mBookC2)<<1;thPracParam.bX2 = *mBookX2;thPracParam.bY2 = *mBookY2;
+                    thPracParam.bF |= ((int)*mBookC3)<<2;thPracParam.bX3 = *mBookX3;thPracParam.bY3 = *mBookY3;
+                    thPracParam.bF |= ((int)*mBookC4)<<3;thPracParam.bX4 = *mBookX4;thPracParam.bY4 = *mBookY4;
+                    thPracParam.bF |= ((int)*mBookC5)<<4;thPracParam.bX5 = *mBookX5;thPracParam.bY5 = *mBookY5;
+                    thPracParam.bF |= ((int)*mBookC6)<<5;thPracParam.bX6 = *mBookX6;thPracParam.bY6 = *mBookY6;
+                }
+                thPracParam.score = *mScore;
+                thPracParam.life = (float)*mLife;
+                thPracParam.bomb = (float)*mBomb;
+                thPracParam.power = (float)*mPower;
+                thPracParam.graze = *mGraze;
+                thPracParam.point = *mPoint;
+
+                thPracParam.rank = *mRank;
+                thPracParam.rankLock = *mRankLock;
+                if (thPracParam.section >= TH06_ST4_BOSS1 && thPracParam.section <= TH06_ST4_BOSS7)
+                    thPracParam.fakeType = *mFakeShot;
+                break;
+            default:
+                break;
+            }
+        }
+
+        void SpellPhase()
+        {
+            auto section = CalcSection();
+            if (section == TH06_ST7_END_S10) {
+                mPhase(TH_PHASE, TH_SPELL_PHASE1);
+            }else if (section == TH06_ST4_BOOKS) {
+                mPhase(TH_PHASE, TH_BOOKS_PHASE_INF_TIME);
+                if (*mPhase == 4){
+                    float w = ImGui::GetColumnWidth();
+                    ImGui::Columns(3);
+                    ImGui::SetColumnWidth(0, 0.2f*w);
+                    ImGui::SetColumnWidth(1, 0.4f*w);
+                    ImGui::SetColumnWidth(2, 0.4f*w);
+
+                    mBookC1();ImGui::NextColumn(); mBookX1();ImGui::NextColumn();mBookY1();ImGui::NextColumn();
+                    mBookC2();ImGui::NextColumn(); mBookX2();ImGui::NextColumn();mBookY2();ImGui::NextColumn();
+                    mBookC3();ImGui::NextColumn(); mBookX3();ImGui::NextColumn();mBookY3();ImGui::NextColumn();
+                    mBookC4();ImGui::NextColumn(); mBookX4();ImGui::NextColumn();mBookY4();ImGui::NextColumn();
+                    mBookC5();ImGui::NextColumn(); mBookX5();ImGui::NextColumn();mBookY5();ImGui::NextColumn();
+                    mBookC6();ImGui::NextColumn(); mBookX6();ImGui::NextColumn();mBookY6();ImGui::NextColumn();
+                    ImGui::Columns(1);
+                    if (ImGui::Button(S(TH_BOOK_MIRROR))) {
+                        *mBookX4 = -*mBookX3;
+                        *mBookX5 = -*mBookX2;
+                        *mBookX6 = -*mBookX1;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(S(TH_BOOK_MIRROR2))) {
+                        *mBookX1 = -*mBookX1;
+                        *mBookX2 = -*mBookX2;
+                        *mBookX3 = -*mBookX3;
+                        *mBookX4 = -*mBookX4;
+                        *mBookX5 = -*mBookX5;
+                        *mBookX6 = -*mBookX6;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(S(TH_BOOK_ROLL))) {
+                        int temp = *mBookX6;
+                        *mBookX6 = *mBookX5;
+                        *mBookX5 = *mBookX4;
+                        *mBookX4 = *mBookX3;
+                        *mBookX3 = *mBookX2;
+                        *mBookX2 = *mBookX1;
+                        *mBookX1 = temp;
+                    }
+                    if (ImGui::Button(S(TH_BOOK_RANDX))) {
+                        static std::default_random_engine rand_engine(timeGetTime());
+                        static std::uniform_int_distribution<int32_t> rand_value(-192, 192);
+                        *mBookX1 = rand_value(rand_engine);
+                        *mBookX2 = rand_value(rand_engine);
+                        *mBookX3 = rand_value(rand_engine);
+                        *mBookX4 = rand_value(rand_engine);
+                        *mBookX5 = rand_value(rand_engine);
+                        *mBookX6 = rand_value(rand_engine);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(S(TH_BOOK_RESETY))) {
+                        *mBookY1 = 32;
+                        *mBookY2 = 128;
+                        *mBookY3 = 144;
+                        *mBookY4 = 64;
+                        *mBookY5 = 80;
+                        *mBookY6 = 96;
+                    }
+                    if (ImGui::Button(S(TH_BOOK_COPY_SETTING)))
+                    {
+                        ImGui::SetClipboardText(std::format("({},{}),({},{}),({},{}),({},{}),({},{}),({},{})", 
+                            *mBookX1, *mBookY1, 
+                            *mBookX2, *mBookY2, 
+                            *mBookX3, *mBookY3,
+                            *mBookX4, *mBookY4,
+                            *mBookX5, *mBookY5,
+                            *mBookX6, *mBookY6
+                        ).c_str());
+                    }
+                    if (ImGui::Button(S(TH_BOOK_PASTE_SETTING))){
+                        int xs[6] = { 0 }, ys[6] = { 32,128,144,64,80,96 };
+                        auto text = ImGui::GetClipboardText();
+                        if (text){
+                            int n = 0;
+                            while (isspace(text[n]) && text[n+1] != 0)
+                                n++;
+                            // trim
+                            if (text && sscanf_s(text + n, "(%d,%d),(%d,%d),(%d,%d),(%d,%d),(%d,%d),(%d,%d)", &xs[0], &ys[0], &xs[1], &ys[1], &xs[2], &ys[2], &xs[3], &ys[3], &xs[4], &ys[4], &xs[5], &ys[5])) {
+                                *mBookX1 = xs[0], *mBookY1 = ys[0],
+                                *mBookX2 = xs[1], *mBookY2 = ys[1],
+                                *mBookX3 = xs[2], *mBookY3 = ys[2],
+                                *mBookX4 = xs[3], *mBookY4 = ys[3],
+                                *mBookX5 = xs[4], *mBookY5 = ys[4],
+                                *mBookX6 = xs[5], *mBookY6 = ys[5];
+                            }
+                        }
+                       
+                    }
+                }
+            }else if (section == TH06_ST5_BOSS6) {
+                mPhase(TH_PHASE, TH_EOSD_SAKUYA_DOLLS);
+            }else if (section == TH06_ST6_BOSS9){
+                mPhase(TH_PHASE, TH06_FINAL_SPELL);
+                if (*mPhase == 1 || *mPhase == 2 || *mPhase == 3)
+                    mDelaySt6Bs9();
+                mWallPrac();
+                if (*mWallPrac) {
+                    mWallPracSnipeN("%d%%");
+                    mWallPracSnipeF("%d%%");
+                }
+            } else if (section == TH06_ST6_BOSS6) {
+                mWallPrac();
+                if (*mWallPrac){
+                    mWallPracSnipeN("%d%%");
+                    mWallPracSnipeF("%d%%");
+                }
+            }
+        }
+        void PracticeMenu(Gui::GuiNavFocus& nav_focus)
+        {
+            mMode();
+            if (mStage())
+                *mSection = *mChapter = 0;
+            if (*mMode == 1) {
+                if (mWarp()) {
+                    *mSection = *mChapter = *mPhase = *mFrame = 0, *mDelaySt6Bs9 = 120,*mWallPrac = false,*mWallPracSnipeF=30,*mWallPracSnipeN=0;
+                    //(-180,32),(-116,128),(-61,144),(41,64),(112,80),(180,96)
+                    //(-180,32),(-12,128),(-72,144),(68,64),(130,80),(180,96)
+                    *mBookC1 = true,*mBookX1 = -180, *mBookY1 = 32;
+                    *mBookC2 = true,*mBookX2 = -116, *mBookY2 = 128;
+                    *mBookC3 = true, *mBookX3 = -61, *mBookY3 = 144;
+                    *mBookC4 = true,*mBookX4 = 41, *mBookY4 = 64;
+                    *mBookC5 = true,*mBookX5 = 112, *mBookY5 = 80;
+                    *mBookC6 = true,*mBookX6 = 180, *mBookY6 = 96;
+                }
+                if (*mWarp) {
+                    int st = 0;
+                    if (*mStage == 3) {
+                        mFakeShot();
+                        st = (*mFakeShot ? *mFakeShot - 1 : mShotType) + 4;
+                    }
+                    SectionWidget();
+                    SpellPhase();
+                }
+
+                mLife();
+                mBomb();
+                mScore();
+                mScore.RoundDown(10);
+                mPower();
+                mGraze();
+                mPoint();
+                mRank();
+                if (mRankLock()) {
+                    if (*mRankLock)
+                        mRank.SetBound(0, 99);
+                    else
+                        mRank.SetBound(0, 32);
+                }
+            }
+
+            nav_focus();
+        }
+
+    protected:
+        virtual void OnLocaleChange() override
+        {
+            SetTitle(S(TH_MENU));
+            switch (Gui::LocaleGet()) {
+            case Gui::LOCALE_ZH_CN:
+                SetSize(330.f, 390.f);
+                SetPos(260.f, 65.f);
+                SetItemWidth(-60.0f);
+                break;
+            case Gui::LOCALE_EN_US:
+                SetSize(370.f, 375.f);
+                SetPos(240.f, 75.f);
+                SetItemWidth(-60.0f);
+                break;
+            case Gui::LOCALE_JA_JP:
+                SetSize(330.f, 390.f);
+                SetPos(260.f, 65.f);
+                SetItemWidth(-65.0f);
+                break;
+            default:
+                break;
+            }
+        }
+        virtual void OnContentUpdate() override
+        {
+            ImGui::TextUnformatted(S(TH_MENU));
+            ImGui::Separator();
+
+            PracticeMenu(mNavFocus);
+        }
+        int CalcSection()
+        {
+            int chapterId = 0;
+            switch (*mWarp) {
+            case 1: // Chapter
+                // Chapter Id = 10000 + Stage * 100 + Section
+                chapterId += (*mStage + 1) * 100;
+                chapterId += *mChapter;
+                chapterId += 10000; // Base of chapter ID is 1000.
+                return chapterId;
+                break;
+            case 2:
+            case 3: // Mid boss & End boss
+                return th_sections_cba[*mStage][*mWarp - 2][*mSection];
+                break;
+            case 4:
+            case 5: // Non-spell & Spellcard
+                return th_sections_cbt[*mStage][*mWarp - 4][*mSection];
+                break;
+            default:
+                return 0;
+                break;
+            }
+        }
+        bool SectionHasDlg(int32_t section)
+        {
+            switch (section) {
+            case TH06_ST1_BOSS1:
+            case TH06_ST2_BOSS1:
+            case TH06_ST3_BOSS1:
+            case TH06_ST4_BOSS1:
+            case TH06_ST5_BOSS1:
+            case TH06_ST5_MID1:
+            case TH06_ST6_BOSS1:
+            case TH06_ST6_MID1:
+            case TH06_ST7_END_NS1:
+            case TH06_ST7_MID1:
+                return true;
+            default:
+                return false;
+            }
+        }
+        void SectionWidget()
+        {
+            static char chapterStr[256] {};
+            auto& chapterCounts = mChapterSetup[*mStage];
+
+            int st = 0;
+            if (*mStage == 3) {
+                st = (*mFakeShot ? *mFakeShot - 1 : mShotType) + 4;
+            }
+
+            switch (*mWarp) {
+            case 1: // Chapter
+                mChapter.SetBound(1, chapterCounts[0] + chapterCounts[1]);
+
+                if (chapterCounts[1] == 0) {
+                    sprintf_s(chapterStr, S(TH_STAGE_PORTION_N), *mChapter);
+                } else if (*mChapter <= chapterCounts[0]) {
+                    sprintf_s(chapterStr, S(TH_STAGE_PORTION_1), *mChapter);
+                } else {
+                    sprintf_s(chapterStr, S(TH_STAGE_PORTION_2), *mChapter - chapterCounts[0]);
+                };
+
+                mChapter(chapterStr);
+                break;
+            case 2:
+            case 3: // Mid boss & End boss
+                if (mSection(TH_WARP_SELECT_FRAME[*mWarp],
+                    th_sections_cba[*mStage + st][*mWarp - 2],
+                    th_sections_str[::THPrac::Gui::LocaleGet()][mDiffculty]))
+                    *mPhase = 0;
+                if (SectionHasDlg(th_sections_cba[*mStage][*mWarp - 2][*mSection]))
+                    mDlg();
+                break;
+            case 4:
+            case 5: // Non-spell & Spellcard
+                if (mSection(TH_WARP_SELECT_FRAME[*mWarp],
+                    th_sections_cbt[*mStage + st][*mWarp - 4],
+                    th_sections_str[::THPrac::Gui::LocaleGet()][mDiffculty]))
+                    *mPhase = 0;
+                if (SectionHasDlg(th_sections_cbt[*mStage][*mWarp - 4][*mSection]))
+                    mDlg();
+                break;
+            case 6:
+                mFrame();
+                break;
+            }
+        }
+
+
+        // Data
+        Gui::GuiCombo mMode { TH_MODE, TH_MODE_SELECT };
+        Gui::GuiCombo mStage { TH_STAGE, TH_STAGE_SELECT };
+        Gui::GuiCombo mWarp { TH_WARP, TH_WARP_SELECT_FRAME };
+        Gui::GuiCombo mSection { TH_MODE };
+        Gui::GuiCombo mPhase { TH_PHASE };
+        Gui::GuiCheckBox mDlg { TH_DLG };
+
+        Gui::GuiSlider<int, ImGuiDataType_S32> mChapter { TH_CHAPTER, 0, 0 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mFrame { TH_FRAME, 0, INT_MAX };
+        Gui::GuiSlider<int, ImGuiDataType_S32> mLife { TH_LIFE, 0, 8 };
+        Gui::GuiSlider<int, ImGuiDataType_S32> mBomb { TH_BOMB, 0, 8 };
+        Gui::GuiDrag<int64_t, ImGuiDataType_S64> mScore { TH_SCORE, 0, 9999999990, 10, 100000000 };
+        Gui::GuiSlider<int, ImGuiDataType_S32> mPower { TH_POWER, 0, 128 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mGraze { TH_GRAZE, 0, 99999, 1, 10000 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mPoint { TH_POINT, 0, 9999, 1, 1000 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mDelaySt6Bs9 { TH_DELAY, 0, 600, 1, 10,10};
+        Gui::GuiCheckBox mWallPrac { TH06_ST6_WALL_PRAC };
+
+
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookX1 { TH_BOOK_X1, -192, 192, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookY1 { TH_BOOK_Y1, -50, 448, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookX2 { TH_BOOK_X2, -192, 192, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookY2 { TH_BOOK_Y2, -50, 448, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookX3 { TH_BOOK_X3, -192, 192, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookY3 { TH_BOOK_Y3, -50, 448, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookX4 { TH_BOOK_X4, -192, 192, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookY4 { TH_BOOK_Y4, -50, 448, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookX5 { TH_BOOK_X5, -192, 192, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookY5 { TH_BOOK_Y5, -50, 448, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookX6 { TH_BOOK_X6, -192, 192, 1, 10, 10 };
+        Gui::GuiDrag<int, ImGuiDataType_S32> mBookY6 { TH_BOOK_Y6, -50, 448, 1, 10, 10 };
+
+        Gui::GuiSlider<int, ImGuiDataType_S32> mWallPracSnipeF { TH06_ST6_WALL_PRAC_SNIPE_F, 0, 100};
+        Gui::GuiSlider<int, ImGuiDataType_S32> mWallPracSnipeN { TH06_ST6_WALL_PRAC_SNIPE_N, 0, 100};
+
+        Gui::GuiCheckBox                           mBookC1 { TH_BOOK_C1};
+        Gui::GuiCheckBox                           mBookC2 { TH_BOOK_C2};
+        Gui::GuiCheckBox                           mBookC3 { TH_BOOK_C3};
+        Gui::GuiCheckBox                           mBookC4 { TH_BOOK_C4};
+        Gui::GuiCheckBox                           mBookC5 { TH_BOOK_C5};
+        Gui::GuiCheckBox                           mBookC6 { TH_BOOK_C6};
+
+
+        Gui::GuiSlider<int, ImGuiDataType_S32> mRank { TH06_RANK, 0, 32, 1, 10, 10 };
+        Gui::GuiCheckBox mRankLock { TH06_RANKLOCK };
+        Gui::GuiCombo mFakeShot { TH06_FS, TH06_TYPE_SELECT };
+
+        Gui::GuiNavFocus mNavFocus { TH_STAGE, TH_MODE, TH_WARP, TH_FRAME,
+            TH_MID_STAGE, TH_END_STAGE, TH_NONSPELL, TH_SPELL, TH_PHASE, TH_CHAPTER,
+            TH_LIFE, TH_BOMB, TH_SCORE, TH_POWER, TH_GRAZE, TH_POINT,
+            TH06_RANK, TH06_RANKLOCK, TH06_FS,
+            TH_BOOK_X1,TH_BOOK_Y1,
+            TH_BOOK_X2,TH_BOOK_Y2,
+            TH_BOOK_X3,TH_BOOK_Y3,
+            TH_BOOK_X4,TH_BOOK_Y4,
+            TH_BOOK_X5,TH_BOOK_Y5,
+            TH_BOOK_X6,TH_BOOK_Y6,
+        };
+
+        int mChapterSetup[7][2] {
+            { 4, 2 },
+            { 2, 2 },
+            { 4, 3 },
+            { 4, 5 },
+            { 3, 2 },
+            { 2, 0 },
+            { 4, 3 }
+        };
+
+        float mStep = 10.0;
+        int mDiffculty = 0;
+        int mShotType = 0;
+    };
+    
+    class THPauseMenu : public Gui::GameGuiWnd {
+        THPauseMenu() noexcept
+        {
+            SetTitle("Pause Menu");
+            SetFade(0.8f, 0.1f);
+            SetSize(384.f, 448.f);
+            SetPos(32.f, 16.f);
+            SetItemWidth(-60);
+            SetStyle(ImGuiStyleVar_WindowRounding, 0.0f);
+            SetStyle(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        }
+        SINGLETON(THPauseMenu)
+    public:
+
+        bool el_bgm_signal { false };
+        bool el_bgm_changed { false };
+
+        enum state {
+            STATE_CLOSE = 0,
+            STATE_RESUME = 1,
+            STATE_EXIT = 2,
+            STATE_RESTART = 3,
+            STATE_OPEN = 4,
+            STATE_EXIT2 = 5,
+        };
+        enum signal {
+            SIGNAL_NONE = 0,
+            SIGNAL_RESUME = 1,
+            SIGNAL_EXIT = 2,
+            SIGNAL_RESTART = 3,
+            SIGNAL_EXIT2 = 4,
+        };
+        signal PMState()
+        {
+            switch (mState) {
+            case THPrac::TH06::THPauseMenu::STATE_CLOSE:
+                return StateClose();
+            case THPrac::TH06::THPauseMenu::STATE_RESUME:
+                return StateResume();
+            case THPrac::TH06::THPauseMenu::STATE_EXIT:
+                return StateExit();
+            case THPrac::TH06::THPauseMenu::STATE_EXIT2:
+                return StateExit2();
+            case THPrac::TH06::THPauseMenu::STATE_RESTART:
+                return StateRestart();
+            case THPrac::TH06::THPauseMenu::STATE_OPEN:
+                return StateOpen();
+            default:
+                return SIGNAL_NONE;
+            }
+        }
+
+    protected:
+        signal StateRestart()
+        {
+            if (mState != STATE_RESTART) {
+                mState = STATE_RESTART;
+                mFrameCounter = 0;
+            }
+
+            if (mFrameCounter == 1) {
+                *mNavFocus = 0;
+                inSettings = false;
+
+                auto oldMode = thPracParam.mode;
+                auto oldStage = thPracParam.stage;
+                auto oldBgmFlag = THBGMTest();
+                thRestartFlag = true;
+                THGuiPrac::singleton().State(5);
+                if (*(THOverlay::singleton().mElBgm) && !el_bgm_changed && oldMode == thPracParam.mode && oldStage == thPracParam.stage && oldBgmFlag == THBGMTest()) {
+                    el_bgm_signal = true;
+                }
+
+                Close();
+            } else if (mFrameCounter == 10) {
+                StateClose();
+                return SIGNAL_RESTART;
+            }
+
+            return SIGNAL_NONE;
+        }
+        signal StateExit()
+        {
+            if (mState != STATE_EXIT) {
+                mState = STATE_EXIT;
+                mFrameCounter = 0;
+            }
+
+            if (mFrameCounter == 1) {
+                *mNavFocus = 0;
+                inSettings = false;
+                Close();
+            } else if (mFrameCounter == 10) {
+                StateClose();
+                return SIGNAL_EXIT;
+            }
+
+            return SIGNAL_NONE;
+        }
+        signal StateExit2()
+        {
+            if (mState != STATE_EXIT2) {
+                mState = STATE_EXIT2;
+                mFrameCounter = 0;
+            }
+            if (mFrameCounter == 1) {
+                *mNavFocus = 0;
+                inSettings = false;
+                Close();
+            } else if (mFrameCounter == 10) {
+                StateClose();
+                return SIGNAL_EXIT2;
+            }
+            return SIGNAL_NONE;
+        }
+        signal StateResume()
+        {
+            if (mState != STATE_RESUME) {
+                mState = STATE_RESUME;
+                mFrameCounter = 0;
+            }
+
+            if (mFrameCounter == 1) {
+                *mNavFocus = 0;
+                inSettings = false;
+                Close();
+            } else if (mFrameCounter == 10) {
+                StateClose();
+                return SIGNAL_RESUME;
+            }
+
+            return SIGNAL_NONE;
+        }
+        signal StateClose()
+        {
+            if (mState != STATE_CLOSE) {
+                mState = STATE_CLOSE;
+                mFrameCounter = 0;
+            }
+
+            if (mFrameCounter > 5) {
+                return StateOpen();
+            }
+
+            return SIGNAL_NONE;
+        }
+        signal StateOpen()
+        {
+            if (mState != STATE_OPEN) {
+                mState = STATE_OPEN;
+                mFrameCounter = 0;
+            }
+
+            if (mFrameCounter == 1) {
+                Open();
+            }
+            if (mFrameCounter > 10) {
+                if (Gui::KeyboardInputGetSingle(VK_ESCAPE))
+                    StateResume();
+                else if (Gui::KeyboardInputGetRaw('Q'))
+                    StateExit2();
+                else if (Gui::KeyboardInputGetRaw('R'))
+                    StateRestart();
+            }
+            if (g_fast_re_opt.fast_retry_count_down && g_fast_re_opt.fast_retry_count_down <= 1)
+                StateRestart();
+
+            return SIGNAL_NONE;
+        }
+
+        virtual void OnPreUpdate() override
+        {
+            if (mFrameCounter < UINT_MAX)
+                mFrameCounter++;
+        }
+        virtual void OnLocaleChange() override
+        {
+            switch (Gui::LocaleGet()) {
+            case Gui::LOCALE_ZH_CN:
+                SetItemWidth(-60.0f);
+                break;
+            case Gui::LOCALE_EN_US:
+                SetItemWidth(-60.0f);
+                break;
+            case Gui::LOCALE_JA_JP:
+                SetItemWidth(-65.0f);
+                break;
+            default:
+                break;
+            }
+        }
+        virtual void OnContentUpdate() override
+        {
+            if (!inSettings) {
+                ImGui::Dummy(ImVec2(10.0f, 140.0f));
+                ImGui::Indent(119.0f);
+                if (mResume())
+                    StateResume();
+                if (ImGui::IsItemFocused()) {
+                    WORD key = *(WORD*)(0x69D904);
+                    WORD key_last = *(WORD*)(0x69D908);
+                    if (((key & (16)) == 16 && (key & (16)) != (key_last & (16)))) { // up
+                        mNavFocus.ForceFocus(TH_TWEAK);
+                    }
+                }
+                ImGui::Spacing();
+                if (mExit())
+                    StateExit();
+                ImGui::Spacing();
+                if (mExit2())
+                    StateExit2();
+                ImGui::Spacing();
+                if (mRestart())
+                    StateRestart();
+                ImGui::Spacing();
+                if (mSettings())
+                    inSettings = !inSettings;
+                if (ImGui::IsItemFocused()) {
+                    WORD key = *(WORD*)(0x69D904);
+                    WORD key_last = *(WORD*)(0x69D908);
+                    if (((key & (32)) == 32 && (key & (32)) != (key_last & (32)))) { // down
+                        mNavFocus.ForceFocus(TH_RESUME);
+                    }
+                }
+                ImGui::Spacing();
+                ImGui::Unindent();
+                mNavFocus();
+            } else {
+                ImGui::Dummy(ImVec2(10.0f, 10.0f));
+                ImGui::Indent(119.0f);
+                if (mResume())
+                    StateResume();
+                ImGui::Spacing();
+                if (mExit())
+                    StateExit();
+                ImGui::Spacing();
+                if (mExit2())
+                    StateExit2();
+                ImGui::Spacing();
+                if (mRestart())
+                    StateRestart();
+                ImGui::Spacing();
+                if (mSettings())
+                    inSettings = !inSettings;
+                ImGui::Spacing();
+                ImGui::Unindent(67.0f);
+                THGuiPrac::singleton().PracticeMenu(mNavFocus);
+            }
+        }
+
+        // Var
+        state mState = STATE_CLOSE;
+        unsigned int mFrameCounter = 0;
+        bool inSettings = false;
+
+        Gui::GuiButton mResume { TH_RESUME, 130.0f, 25.0f };
+        Gui::GuiButton mExit { TH_EXIT, 130.0f, 25.0f };
+        Gui::GuiButton mExit2 { TH_EXIT2, 130.0f, 25.0f };
+        Gui::GuiButton mRestart { TH_RESTART, 130.0f, 25.0f };
+        Gui::GuiButton mSettings { TH_TWEAK, 130.0f, 25.0f };
+
+        Gui::GuiNavFocus mNavFocus { TH_RESUME, TH_EXIT, TH_EXIT2, TH_RESTART, TH_TWEAK,
+            TH_STAGE, TH_MODE, TH_WARP,
+            TH_MID_STAGE, TH_END_STAGE, TH_NONSPELL, TH_SPELL, TH_PHASE,
+            TH_LIFE, TH_BOMB, TH_SCORE, TH_POWER, TH_GRAZE, TH_POINT,
+            TH06_RANK, TH06_RANKLOCK, TH06_FS };
+    };
+
+    class THGuiRep : public Gui::GameGuiWnd {
+        THGuiRep() noexcept
+        {
+        }
+        SINGLETON(THGuiRep)
+    public:
+
+        void CheckReplay()
+        {
+            uint32_t index = GetMemContent(0x6d46c0 + 0x81e8);
+            char* raw = (char*)(0x6d46c0 + index * 512 + 0x823c);
+
+            std::string param;
+            if (ReplayLoadParam(mb_to_utf16(raw, 932).c_str(), param) && mRepParam.ReadJson(param))
+                mParamStatus = true;
+            else
+                mRepParam.Reset();
+        }
+
+        bool mRepStatus = false;
+        void State(int state)
+        {
+            switch (state) {
+            case 1:
+                mRepStatus = false;
+                mParamStatus = false;
+                thPracParam.Reset();
+                break;
+            case 2:
+                CheckReplay();
+                break;
+            case 3:
+                mRepStatus = true;
+                if (mParamStatus)
+                    memcpy(&thPracParam, &mRepParam, sizeof(THPracParam));
+                break;
+            default:
+                break;
+            }
+        }
+
+    protected:
+        bool mParamStatus = false;
+        THPracParam mRepParam;
+    };
+
+    
+    class TH06InGameInfo : public Gui::GameGuiWnd {
+        TH06InGameInfo() noexcept
+        {
+            SetTitle("igi");
+            SetFade(0.9f, 0.9f);
+            SetSizeRel(180.0f / 640.0f, 0.0f);
+            SetPosRel(433.0f / 640.0f, 245.0f / 480.0f);
+            SetWndFlag(ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | 0);
+            OnLocaleChange();
+        }
+        SINGLETON(TH06InGameInfo)
+
+    public:
+        int32_t mMissCount;
+        struct BooksInfo {
+            bool is_books;
+            int32_t time_books;
+            bool is_died;
+            int32_t miss_count;
+            int32_t bomb_count;
+        } booksInfo;
+
+        void GameStartInit()
+        {
+            mMissCount = 0;
+            booksInfo.is_books = false;
+            booksInfo.time_books = 0;
+            booksInfo.is_died = false;
+            booksInfo.miss_count = 0;
+            booksInfo.bomb_count = 0;
+        }
+
+    protected:
+        bool detail_open = false;
+        virtual void OnLocaleChange() override
+        {
+            float x_offset_1 = 0.0f;
+            float x_offset_2 = 0.0f;
+            switch (Gui::LocaleGet()) {
+            case Gui::LOCALE_ZH_CN:
+                x_offset_1 = 0.12f;
+                x_offset_2 = 0.172f;
+                break;
+            case Gui::LOCALE_EN_US:
+                x_offset_1 = 0.12f;
+                x_offset_2 = 0.16f;
+                break;
+            case Gui::LOCALE_JA_JP:
+                x_offset_1 = 0.18f;
+                x_offset_2 = 0.235f;
+                break;
+            default:
+                break;
+            }
+        }
+
+        virtual void OnContentUpdate() override
+        {
+            int32_t mBombCount = *(int8_t*)(0x0069BCC4);
+
+            byte cur_player_typea = *(byte*)(0x69D4BD);
+            byte cur_player_typeb = *(byte*)(0x69D4BE);
+            byte cur_player_type = (cur_player_typea << 1) | cur_player_typeb;
+            int8_t diff = *(int8_t*)(0x69bcb0);
+            auto diff_pl = std::format("{} ({})", S(IGI_DIFF[diff]), S(IGI_PL_06[cur_player_type]));
+            auto diff_pl_sz = ImGui::CalcTextSize(diff_pl.c_str());
+
+            ImGui::SetCursorPosX(ImGui::GetWindowSize().x * 0.5f - diff_pl_sz.x * 0.5f);
+            ImGui::Text(diff_pl.c_str());
+
+            ImGui::Columns(2);
+            ImGui::Text(S(THPRAC_INGAMEINFO_MISS_COUNT));
+            ImGui::NextColumn();
+            ImGui::Text("%8d", mMissCount);
+            ImGui::NextColumn();
+            ImGui::Text(S(THPRAC_INGAMEINFO_BOMB_COUNT));
+            ImGui::NextColumn();
+            ImGui::Text("%8d", mBombCount);
+
+            if (g_adv_igi_options.th06_showRank) {
+                ImGui::NextColumn();
+                ImGui::Text(S(THPRAC_INGAMEINFO_TH06_RANK));
+                ImGui::NextColumn();
+                ImGui::Text("%8d.%02d", *(int32_t*)(0x69d710), *(int32_t*)(0x69d71C));
+            }
+
+            ImGui::Columns(1);
+
+            bool cur_is_in_spell = *(bool*)(0x5A5F90);
+
+            if (booksInfo.is_books || cur_is_in_spell) {
+                byte cur_spell_id = booksInfo.is_books ? TH06Save::spellid_books : *(byte*)(0x5A5F98);
+
+                ImGui::Text("%s", th06_spells_str[Gui::LocaleGet()][cur_spell_id]);
+                int tot_sc_caped = TH06Save::singleton().GetTotalSpellCardCount(cur_spell_id, diff, cur_player_type, TH06Save::Capture);
+                int tot_sc_tot = TH06Save::singleton().GetTotalSpellCardCount(cur_spell_id, diff, cur_player_type, TH06Save::Attempt);
+                int tot_sc_to = TH06Save::singleton().GetTotalSpellCardCount(cur_spell_id, diff, cur_player_type, TH06Save::Timeout);
+                ImGui::Text("%d/%d(%.1f%%); %d", tot_sc_caped, tot_sc_tot, (float)(tot_sc_caped) / std::fmax(1.0f, tot_sc_tot) * 100.0f, tot_sc_to);
+                int cur_sc_caped = TH06Save::singleton().GetCurrentSpellCardCount(cur_spell_id, diff, cur_player_type, TH06Save::Capture);
+                int cur_sc_tot = TH06Save::singleton().GetCurrentSpellCardCount(cur_spell_id, diff, cur_player_type, TH06Save::Attempt);
+                int cur_sc_to = TH06Save::singleton().GetCurrentSpellCardCount(cur_spell_id, diff, cur_player_type, TH06Save::Timeout);
+                ImGui::Text("%d/%d(%.1f%%); %d", cur_sc_caped, cur_sc_tot, (float)(cur_sc_caped) / std::fmax(1.0f, cur_sc_tot) * 100.0f, cur_sc_to);
+
+                if (booksInfo.is_books && thPracParam.mode && (thPracParam.phase != 0)) { // books
+                    ImGui::Text("%.1f", (float)booksInfo.time_books / 60.0f);
+                }
+            }
+        }
+        virtual void OnPreUpdate() override
+        {
+            DWORD gameState = *(DWORD*)(0x6C6EA4);
+            if (gameState == 2)
+            {
+                GameUpdateInner(6);
+            }
+            if (*THOverlay::singleton().mShowSpellCapture && (gameState == 2)) {
+                SetPosRel(433.0f / 640.0f, 245.0f / 480.0f);
+                SetSizeRel(180.0f / 640.0f, 0.0f);
+                Open();
+            } else {
+                Close();
+                *((int32_t*)0x6c6eb0) = 3;
+            }
+        }
+    };
+
+
+    float g_bossMoveDownRange = BOSS_MOVE_DOWN_RANGE_INIT;
+    EHOOK_ST(th06_bossmovedown, 0x0040917F, 5, {
+        //float* left = (float*)(pCtx->Ecx + 0xE60);
+        float* top = (float*)(pCtx->Ecx + 0xE64);
+        //float* right = (float*)(pCtx->Ecx + 0xE68);
+        float* bottom = (float*)(pCtx->Ecx + 0xE6C);
+        float range = *bottom - *top;
+        *top = *bottom - range * (1.0f - g_bossMoveDownRange);
+    });
+
+    HOOKSET_DEFINE(th06_rankdown_disable)
+    PATCH_DY(th06_rankdown_disable1, 0x428C34, "909090909090909090909090909090")
+    PATCH_DY(th06_rankdown_disable2, 0x428A55, "909090909090909090909090909090")
+    HOOKSET_ENDDEF()
+
+    HOOKSET_DEFINE(TH06BgFix)
+    // fix igi render problem
+    PATCH_DY(th06_background_fix_1, 0x42073B, "909090909090")
+    PATCH_DY(th06_background_fix_2, 0x419F4B, "909090909090")
+    PATCH_DY(th06_background_fix_3, 0x419F81, "909090909090")
+    EHOOK_DY(th06_stage_color_fix, 0x4039E5, 3,
+        {
+            pCtx->Edx = 0x00000000;
+        })
+    HOOKSET_ENDDEF()
+
+
+    class THAdvOptWnd : public Gui::PPGuiWnd {
+        SINGLETON(THAdvOptWnd)
+        // Option Related Functions
+
+    private:
+        void FpsInit()
+        {
+            if ((mOptCtx.vpatch_base = (uintptr_t)GetModuleHandleW(L"openinputlagpatch.dll")) != NULL) {
+                OILPInit(mOptCtx);
+            } else if ((mOptCtx.vpatch_base = (int32_t)GetModuleHandleW(L"vpatch_th06.dll")) != NULL) {
+                uint64_t hash[2];
+                CalcFileHash(L"vpatch_th06.dll", hash);
+                if (hash[0] != 3665784961181135876ll || hash[1] != 9283021252209177490ll)
+                    mOptCtx.fps_status = -1;
+                else if (*(int32_t*)(mOptCtx.vpatch_base + 0x17024) == 0) {
+                    mOptCtx.fps_status = 2;
+                    mOptCtx.fps = *(int32_t*)(mOptCtx.vpatch_base + 0x17034);
+                }
+            } else if ((mOptCtx.vpatch_base = (uintptr_t)GetModuleHandleW(L"vpatch_th06_unicode.dll")) != NULL) {
+                uint64_t hash[2];
+                CalcFileHash(L"vpatch_th06_unicode.dll", hash);
+                if (hash[0] != 5021620919341617817ll || hash[1] != 10919509441391235291ll)
+                    mOptCtx.fps_status = -1;
+                else if (*(int32_t*)(mOptCtx.vpatch_base + 0x17024) == 0) {
+                    mOptCtx.fps_status = 2;
+                    mOptCtx.fps = *(int32_t*)(mOptCtx.vpatch_base + 0x17034);
+                }
+            } else
+                mOptCtx.fps_status = 0;
+        }
+        void FpsSet()
+        {
+            if (mOptCtx.fps_status == 1) {
+                mOptCtx.fps_dbl = 1.0 / (double)mOptCtx.fps;
+            } else if (mOptCtx.fps_status == 2) {
+                *(int32_t*)(mOptCtx.vpatch_base + 0x15a4c) = mOptCtx.fps;
+                *(int32_t*)(mOptCtx.vpatch_base + 0x17034) = mOptCtx.fps;
+            } else if (mOptCtx.fps_status == 3) {
+                mOptCtx.oilp_set_game_fps(mOptCtx.fps);
+                mOptCtx.oilp_set_replay_skip_fps(mOptCtx.fps_replay_fast);
+                mOptCtx.oilp_set_replay_slow_fps(mOptCtx.fps_replay_slow);
+            } 
+        }
+        void GameplayInit()
+        {
+        }
+        void GameplaySet()
+        {
+        }
+
+        THAdvOptWnd() noexcept
+        {
+            SetWndFlag(ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove);
+            SetFade(0.8f, 0.8f);
+            SetStyle(ImGuiStyleVar_WindowRounding, 0.0f);
+            SetStyle(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+            InitUpdFunc([&]() { ContentUpdate(); },
+                [&]() { LocaleUpdate(); },
+                [&]() {},
+                []() {});
+
+            OnLocaleChange();
+            FpsInit();
+
+            for (int i = 0; i < 2; i++)
+                th06_rankdown_disable[i].Setup();
+            for (int i = 0; i < 2; i++)
+                th06_rankdown_disable[i].Toggle(g_adv_igi_options.th06_disable_drop_rank);
+            th06_bossmovedown.Setup();
+            th06_bossmovedown.Toggle(false);
+            GameplayInit();
+        }
+
+    public:
+        bool forceBossMoveDown = false;
+        __declspec(noinline) static bool StaticUpdate()
+        {
+            auto& advOptWnd = THAdvOptWnd::singleton();
+
+            if (Gui::GetChordPressed(Gui::GetAdvancedMenuChord())) {
+                if (advOptWnd.IsOpen())
+                    advOptWnd.Close();
+                else
+                    advOptWnd.Open();
+            }
+            advOptWnd.Update();
+
+            return advOptWnd.IsOpen();
+        }
+
+    protected:
+        void LocaleUpdate()
+        {
+            SetTitle(S(TH_SPELL_PRAC));
+            switch (Gui::LocaleGet()) {
+            case Gui::LOCALE_ZH_CN:
+                SetSizeRel(1.0f, 1.0f);
+                SetPosRel(0.0f, 0.0f);
+                SetItemWidthRel(-0.0f);
+                SetAutoSpacing(true);
+                break;
+            case Gui::LOCALE_EN_US:
+                SetSizeRel(1.0f, 1.0f);
+                SetPosRel(0.0f, 0.0f);
+                SetItemWidthRel(-0.0f);
+                SetAutoSpacing(true);
+                break;
+            case Gui::LOCALE_JA_JP:
+                SetSizeRel(1.0f, 1.0f);
+                SetPosRel(0.0f, 0.0f);
+                SetItemWidthRel(-0.0f);
+                SetAutoSpacing(true);
+                break;
+            default:
+                break;
+            }
+        }
+        void ShowDetail(bool* isOpen)
+        {
+            ImGui::BeginTabBar("Detail Spell");
+            {
+                const char* tabs_diff[5] = { S(THPRAC_IGI_DIFF_E), S(THPRAC_IGI_DIFF_N), S(THPRAC_IGI_DIFF_H), S(THPRAC_IGI_DIFF_L), S(THPRAC_IGI_DIFF_EX) };
+                for (int diff = 0; diff < 5; diff++) {
+                    if (ImGui::BeginTabItem(tabs_diff[diff])) {
+                        ImGui::BeginTabBar("Player Type");
+                        const char* tabs_player[4] = { S(THPRAC_IGI_PL_ReimuA), S(THPRAC_IGI_PL_ReimuB), S(THPRAC_IGI_PL_MarisaA), S(THPRAC_IGI_PL_MarisaB) };
+                        for (int pl = 0; pl < 4; pl++) {
+                            if (ImGui::BeginTabItem(tabs_player[pl])) {
+                                // time
+                                ImGui::BeginTable(std::format("{}{}timetable", tabs_diff[diff], tabs_player[pl]).c_str(), 4, ImGuiTableFlags_::ImGuiTableFlags_Resizable);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_TOT));
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CUR));
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CHARACTER_TOT));
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_ALL));
+                                ImGui::TableHeadersRow();
+
+                                int64_t gametime_tot = TH06Save::singleton().GetTotalGameTime(diff,pl);
+                                int64_t gametime_cur = TH06Save::singleton().GetCurrentGameTime(diff, pl);
+                                int64_t gametime_chartot = 0;
+                                for (int i = 0; i < 5; i++)
+                                    gametime_chartot += TH06Save::singleton().GetTotalGameTime(i, pl);
+                                int64_t gametime_all = 0;
+                                for (int i = 0; i < 5; i++)
+                                    for (int j = 0; j < 4; j++)
+                                        gametime_all += TH06Save::singleton().GetTotalGameTime(i, j);
+
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_tot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_cur).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_chartot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_all).c_str());
+
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_tot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_cur).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_chartot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_all).c_str());
+
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_tot, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_cur, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_chartot, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_all, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+
+                                ImGui::EndTable();
+                                // spell capture
+                                ImGui::BeginTable(std::format("{}{}sptable", tabs_diff[diff], tabs_player[pl]).c_str(), 5, ImGuiTableFlags_::ImGuiTableFlags_Resizable);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_SPELL_NAME), 0, 100.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_TOT), 0, 50.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_TOT), 0, 30.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_CUR), 0, 50.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_CUR), 0, 30.0f);
+                                ImGui::TableHeadersRow();
+
+                                for (int spell = 0; spell < 65; spell++) {
+                                    if (is_spell_used[diff][spell]) {
+                                        ImGui::TableNextRow();
+                                        ImGui::TableNextColumn();
+                                        ImGui::Text("%s", th06_spells_str[Gui::LocaleGet()][spell]);
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d/%d(%.1f%%)",
+                                                    TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Capture),
+                                                    TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Attempt),
+                                            ((float)TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Capture)) /
+                                           std::fmax(1.0f,((float)TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Attempt))) * 100.0f);
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d", TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Timeout));
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d/%d(%.1f%%)",
+                                            TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Capture),
+                                            TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Attempt),
+                                            ((float)TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Capture)) / 
+                                            std::fmax(1.0f, ((float)TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Attempt))) * 100.0f);
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d", TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Timeout));
+                                    }
+                                }
+                                ImGui::EndTable();
+                                ImGui::EndTabItem();
+                            }
+                        }
+                        ImGui::EndTabBar();
+                        ImGui::EndTabItem();
+                    }
+                }
+            }
+            ImGui::EndTabBar();
+            if (isOpen != nullptr && ImGui::Button(S(TH_BACK))) {
+                *isOpen = false;
+            }
+        }
+        void ContentUpdate()
+        {
+            *((int32_t*)0x6c6eb0) = 3;
+            ImGui::TextUnformatted(S(TH_ADV_OPT));
+            ImGui::Separator();
+            ImGui::BeginChild("Adv. Options", ImVec2(0.0f, 0.0f));
+            
+            if (BeginOptGroup<TH_GAME_SPEED>()) {
+                if (GameFPSOpt(mOptCtx))
+                    FpsSet();
+                EndOptGroup();
+            }
+            {
+                if (ImGui::Checkbox(S(TH06_RANKLOCK_DOWN), &g_adv_igi_options.th06_disable_drop_rank)){
+
+                    for (int i = 0; i < 2; i++)
+                        th06_rankdown_disable[i].Toggle(g_adv_igi_options.th06_disable_drop_rank);
+                }
+                ImGui::SameLine();
+                HelpMarker(S(TH06_RANKLOCK_DOWN_DESC));
+                if (ImGui::IsKeyDown(0x10)) // shift
+                {
+                    if (ImGui::IsKeyPressed('C'))
+                    {
+                        g_adv_igi_options.th06_disable_drop_rank = !g_adv_igi_options.th06_disable_drop_rank;
+                        for (int i = 0; i < 2; i++)
+                            th06_rankdown_disable[i].Toggle(g_adv_igi_options.th06_disable_drop_rank);
+                    }
+                }
+            }
+            DisableKeyOpt();
+            KeyHUDOpt();
+            InfLifeOpt();
+            if (ImGui::Checkbox(S(TH_BOSS_FORCE_MOVE_DOWN), &forceBossMoveDown)) {
+                th06_bossmovedown.Toggle(forceBossMoveDown);
+            }
+            ImGui::SameLine();
+            HelpMarker(S(TH_BOSS_FORCE_MOVE_DOWN_DESC));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(180.0f);
+            if (ImGui::DragFloat(S(TH_BOSS_FORCE_MOVE_DOWN_RANGE), &g_bossMoveDownRange, 0.002f, 0.0f, 1.0f))
+                g_bossMoveDownRange = std::clamp(g_bossMoveDownRange, 0.0f, 1.0f);
+
+            ImGui::Checkbox(S(TH_ENABLE_LOCK_TIMER), &g_adv_igi_options.enable_lock_timer_autoly);
+
+            ImGui::Checkbox(S(THPRAC_SHOW_BULLET_HITBOX), &g_show_bullet_hitbox);
+
+            ImGui::Checkbox(S(THPRAC_INGAMEINFO_TH06_SHOW_RANK), &g_adv_igi_options.th06_showRank);
+            ImGui::Checkbox(S(THPRAC_INGAMEINFO_TH06_SHOW_HITBOX), &g_adv_igi_options.th06_show_hitbox);
+            ImGui::SameLine();
+            HelpMarker(S(THPRAC_INGAMEINFO_TH06_SHOW_HITBOX_DESC));
+            ImGui::SameLine();
+            if (ImGui::Button(S(THPRAC_INGAMEINFO_TH06_SHOW_HITBOX_RELOAD))) {
+                if (g_hitbox_textureID)
+                {
+                    ((LPDIRECT3DTEXTURE8)g_hitbox_textureID)->Release();
+                    g_hitbox_textureID = nullptr;
+                }
+                g_hitbox_textureID = ReadImage(8, *(DWORD*)0x6c6d20, "hitbox.png", hitbox_file, sizeof(hitbox_file));
+                D3DSURFACE_DESC desc;
+                ((LPDIRECT3DTEXTURE8)g_hitbox_textureID)->GetLevelDesc(0, &desc);
+                g_hitbox_sz.x = static_cast<float>(desc.Width),g_hitbox_sz.y = static_cast<float>(desc.Height);
+            }
+            ImGui::Checkbox(S(THPRAC_TH06_SHOW_REP_MARKER), &g_adv_igi_options.th06_showRepMarker);
+            ImGui::Checkbox(S(THPRAC_TH06_FIX_RAND_SEED), &g_adv_igi_options.th06_fix_seed);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(180.0f);
+            if (ImGui::InputInt(S(THPRAC_TH06_RAND_SEED), &g_adv_igi_options.th06_seed)){
+                g_adv_igi_options.th06_seed = std::clamp(g_adv_igi_options.th06_seed, 0, 65535);
+            }
+            ImGui::Text("%s: %d",S(THPRAC_TH06_REP_RAND_SEED),g_last_rep_seed);
+
+            if (ImGui::Checkbox(S(THPRAC_TH06_BACKGROUND_FIX), &g_adv_igi_options.th06_bg_fix))
+            {
+                if (g_adv_igi_options.th06_bg_fix)
+                    EnableAllHooks(TH06BgFix);
+                else
+                    DisableAllHooks(TH06BgFix);
+            }
+            HelpMarker(S(THPRAC_INGAMEINFO_ADV_DESC1));
+            ImGui::SameLine();
+            HelpMarker(S(THPRAC_INGAMEINFO_ADV_DESC2));
+
+            SSS::SSS_UI(6);
+
+            {
+                ImGui::SetNextWindowCollapsed(false);
+                if (ImGui::CollapsingHeader(S(THPRAC_INGAMEINFO_06_SHOWDETAIL_COLLAPSE)))
+                {
+                    ShowDetail(nullptr);
+                    ImGui::NewLine();
+                    ImGui::Separator();
+                    ImGui::Separator();
+                    ImGui::Separator();
+                    ImGui::NewLine();
+                }
+                ImGui::Text("%s:(%d,%d),(%d,%d),(%d,%d),(%d,%d),(%d,%d),(%d,%d)", S(TH_BOOK_LAST), 
+                    (int)(g_books_pos[0].x - 192.0f), (int)g_books_pos[0].y,
+                    (int)(g_books_pos[1].x - 192.0f), (int)g_books_pos[1].y,
+                    (int)(g_books_pos[2].x - 192.0f), (int)g_books_pos[2].y,
+                    (int)(g_books_pos[3].x - 192.0f), (int)g_books_pos[3].y,
+                    (int)(g_books_pos[4].x - 192.0f), (int)g_books_pos[4].y,
+                    (int)(g_books_pos[5].x - 192.0f), (int)g_books_pos[5].y
+                );
+                if (ImGui::Button(S(TH_BOOK_COPY_SETTING))) {
+                    ImGui::SetClipboardText(std::format("({},{}),({},{}),({},{}),({},{}),({},{}),({},{})", 
+                        (int)(g_books_pos[0].x - 192.0f), (int)g_books_pos[0].y,
+                        (int)(g_books_pos[1].x - 192.0f), (int)g_books_pos[1].y,
+                        (int)(g_books_pos[2].x - 192.0f), (int)g_books_pos[2].y,
+                        (int)(g_books_pos[3].x - 192.0f), (int)g_books_pos[3].y,
+                        (int)(g_books_pos[4].x - 192.0f), (int)g_books_pos[4].y,
+                        (int)(g_books_pos[5].x - 192.0f), (int)g_books_pos[5].y).c_str());
+                }
+            }
+            InGameReactionTestOpt();
+            AboutOpt();
+            ImGui::EndChild();
+            ImGui::SetWindowFocus();
+        }
+
+        adv_opt_ctx mOptCtx;
+
+
+    };
+
+    // ECL Patch Helper
+
+    void ECLJump(ECLHelper& ecl,int32_t time,int32_t pos, int32_t time_jmp,int32_t target)

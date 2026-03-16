@@ -19,6 +19,7 @@
 #include "ZunBool.hpp"
 #include "i18n.hpp"
 #include "utils.hpp"
+#include "thprac_th06.h"
 
 namespace th06
 {
@@ -176,6 +177,9 @@ ChainCallbackResult Player::OnUpdate(Player *p)
     {
         g_GameManager.bombsUsed++;
         g_GameManager.bombsRemaining--;
+        // thprac: InfBombs — undo the decrement
+        if (THPrac::TH06::THPracIsInfBombs())
+            g_GameManager.bombsRemaining++;
         g_Gui.flags.flag1 = 2;
         p->bombInfo.isInUse = 1;
         p->bombInfo.timer.SetCurrent(0);
@@ -201,13 +205,17 @@ ChainCallbackResult Player::OnUpdate(Player *p)
                     g_ItemManager.SpawnItem(&p->positionCenter, ITEM_POWER_SMALL, 2);
                     g_ItemManager.SpawnItem(&p->positionCenter, ITEM_POWER_SMALL, 2);
                     g_ItemManager.SpawnItem(&p->positionCenter, ITEM_POWER_SMALL, 2);
-                    if (g_GameManager.currentPower <= 16)
+                    // thprac: InfPower — skip power loss on death
+                    if (!THPrac::TH06::THPracIsInfPower())
                     {
-                        g_GameManager.currentPower = 0;
-                    }
-                    else
-                    {
-                        g_GameManager.currentPower -= 16;
+                        if (g_GameManager.currentPower <= 16)
+                        {
+                            g_GameManager.currentPower = 0;
+                        }
+                        else
+                        {
+                            g_GameManager.currentPower -= 16;
+                        }
                     }
                     g_Gui.flags.flag2 = 2;
                 }
@@ -218,7 +226,9 @@ ChainCallbackResult Player::OnUpdate(Player *p)
                     g_ItemManager.SpawnItem(&p->positionCenter, ITEM_FULL_POWER, 2);
                     g_ItemManager.SpawnItem(&p->positionCenter, ITEM_FULL_POWER, 2);
                     g_ItemManager.SpawnItem(&p->positionCenter, ITEM_FULL_POWER, 2);
-                    g_GameManager.currentPower = 0;
+                    // thprac: InfPower — skip power reset on game over
+                    if (!THPrac::TH06::THPracIsInfPower())
+                        g_GameManager.currentPower = 0;
                     g_Gui.flags.flag2 = 2;
                     g_GameManager.extraLives = 255;
                 }
@@ -247,11 +257,22 @@ ChainCallbackResult Player::OnUpdate(Player *p)
                 g_AnmManager->SetAndExecuteScriptIdx(&p->playerSprite, ANM_SCRIPT_PLAYER_IDLE);
                 if (g_GameManager.livesRemaining <= 0)
                 {
-                    g_GameManager.isInRetryMenu = 1;
+                    // thprac: InfLives — prevent game over
+                    if (THPrac::TH06::THPracIsInfLives())
+                    {
+                        g_GameManager.livesRemaining = 1;
+                    }
+                    else
+                    {
+                        g_GameManager.isInRetryMenu = 1;
+                    }
                 }
                 else
                 {
                     g_GameManager.livesRemaining--;
+                    // thprac: InfLives — undo the decrement
+                    if (THPrac::TH06::THPracIsInfLives())
+                        g_GameManager.livesRemaining++;
                     g_Gui.flags.flag0 = 2;
                     if (g_GameManager.difficulty < 4 && g_GameManager.isInPracticeMode == 0)
                     {
@@ -1400,6 +1421,29 @@ void Player::ScoreGraze(D3DXVECTOR3 *center)
 void Player::Die()
 {
     int curLaserTimerIdx;
+
+    // thprac: AutoBomb — automatically use a bomb instead of dying
+    if (THPrac::TH06::THPracIsAutoBomb() && g_GameManager.bombsRemaining > 0 && this->bombInfo.calc != NULL)
+    {
+        g_GameManager.bombsUsed++;
+        g_GameManager.bombsRemaining--;
+        g_Gui.flags.flag1 = 2;
+        this->bombInfo.isInUse = 1;
+        this->bombInfo.timer.SetCurrent(0);
+        this->bombInfo.duration = 999;
+        this->bombInfo.calc(this);
+        g_EnemyManager.spellcardInfo.isCapturing = false;
+        g_GameManager.DecreaseSubrank(200);
+        g_EnemyManager.spellcardInfo.usedBomb = g_EnemyManager.spellcardInfo.isActive;
+        return;
+    }
+
+    // thprac: Muteki — skip death entirely
+    if (THPrac::TH06::THPracIsMuteki())
+        return;
+
+    // thprac: count miss
+    THPrac::TH06::THPracCountMiss();
 
     g_EnemyManager.spellcardInfo.isCapturing = 0;
     g_EffectManager.SpawnParticles(PARTICLE_EFFECT_UNK_12, &this->positionCenter, 1, COLOR_NEONBLUE);

@@ -18,6 +18,7 @@
 
 #include "sdl2_compat.hpp"
 #include "sdl2_renderer.hpp"
+#include "thprac_th06.h"
 #include <SDL.h>
 
 namespace th06
@@ -387,6 +388,8 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
             mgr->currentPower = 128;
         }
     }
+    // Apply thprac practice overrides (lives, bombs, power, rank, etc.)
+    THPrac::TH06::THPracApplyStageParams();
     g_Supervisor.LoadPbg3(CM_PBG3_INDEX, TH_CM_DAT_FILE);
     g_Supervisor.LoadPbg3(ST_PBG3_INDEX, TH_ST_DAT_FILE);
     SDL_PumpEvents();
@@ -405,6 +408,8 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
     }
     g_Rng.generationCount = 0;
     mgr->randomSeed = g_Rng.seed;
+    // Fix RNG seed for deterministic play (must be after randomSeed capture)
+    THPrac::TH06::THPracFixSeed();
     SDL_PumpEvents();
     if (Stage::RegisterChain(mgr->currentStage) != ZUN_SUCCESS)
     {
@@ -435,6 +440,8 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         GameErrorContext::Log(&g_GameErrorContext, TH_ERR_GAMEMANAGER_FAILED_TO_INITIALIZE_ECLMANAGER);
         return ZUN_ERROR;
     }
+    // Apply ECL patches for practice mode warps (must be after ECL is loaded)
+    THPrac::TH06::THPracPostEclLoad();
     if (EffectManager::RegisterChain() != ZUN_SUCCESS)
     {
         GameErrorContext::Log(&g_GameErrorContext, TH_ERR_GAMEMANAGER_FAILED_TO_INITIALIZE_EFFECTMANAGER);
@@ -445,6 +452,8 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         GameErrorContext::Log(&g_GameErrorContext, TH_ERR_GAMEMANAGER_FAILED_TO_INITIALIZE_GUI);
         return ZUN_ERROR;
     }
+    // Suppress stage title / song name during practice warp (must be after Gui init)
+    THPrac::TH06::THPracPostGuiInit();
     if (g_GameManager.isInReplay == 0)
     {
         ReplayManager::RegisterChain(0, "replay/th6_00.rpy");
@@ -454,7 +463,10 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         // Read boss battle, and store it for use when boss is started.
         g_Supervisor.ReadMidiFile(1, g_Stage.stdData->songPaths[1]);
         // Immediately start playing this level's theme.
-        g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[0]);
+        if (THPrac::TH06::THPracShouldPlayBossBGM())
+            g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[1]);
+        else
+            g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[0]);
     }
     mgr->isInRetryMenu = 0;
     mgr->isInMenu = 1;
@@ -472,6 +484,7 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         g_Supervisor.curState = SUPERVISOR_STATE_MAINMENU;
     }
     g_Supervisor.unk198 = 3;
+
     return ZUN_SUCCESS;
 }
 
@@ -596,6 +609,8 @@ void GameManager::IncreaseSubrank(i32 amount)
 
 void GameManager::DecreaseSubrank(i32 amount)
 {
+    if (THPrac::TH06::THPracIsRankLockDown())
+        return;
     this->subRank = this->subRank - amount;
     while (this->subRank < 0)
     {
