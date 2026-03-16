@@ -4,10 +4,6 @@
 #include "inttypes.hpp"
 #include "sdl2_compat.hpp"
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 namespace th06
 {
 struct FormatInfo
@@ -41,15 +37,7 @@ struct TextHelper
     i32 height;
     u32 imageSizeInBytes;
     i32 imageWidthInBytes;
-#ifdef _WIN32
-    HDC hdc;
-    HGDIOBJ gdiObj;
-    HGDIOBJ gdiObj2;
-#else
-    void *hdc;
-    void *gdiObj;
-    void *gdiObj2;
-#endif
+    bool allocated;
     u8 *buffer;
 };
 }; // namespace th06

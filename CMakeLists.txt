@@ -318,9 +318,9 @@ else()
     target_link_libraries(th06 PRIVATE OpenGL::GL)
 endif()
 
-# Windows 特定: GDI32 (TextHelper 文本渲染), Winmm (timeGetTime 兼容)
+# Windows 特定: Winmm (timeGetTime 兼容)
 if(WIN32)
-    target_link_libraries(th06 PRIVATE gdi32 winmm)
+    target_link_libraries(th06 PRIVATE winmm)
 endif()
 
 # Windows: 复制 DLL 到主游戏输出目录
