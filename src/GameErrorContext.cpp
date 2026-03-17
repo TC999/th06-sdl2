@@ -2,6 +2,7 @@
 
 #include "CMyFont.hpp"
 #include "GameErrorContext.hpp"
+#include "GamePaths.hpp"
 #include <stdio.h>
 
 namespace th06
@@ -76,10 +77,15 @@ void GameErrorContext::Flush()
 #endif
         }
 
-        logFile = fopen("./log.txt", "wt");
-
-        fprintf(logFile, m_Buffer);
-        fclose(logFile);
+        char resolvedLogPath[512];
+        GamePaths::Resolve(resolvedLogPath, sizeof(resolvedLogPath), "./log.txt");
+        GamePaths::EnsureParentDir(resolvedLogPath);
+        logFile = fopen(resolvedLogPath, "wt");
+        if (logFile != NULL)
+        {
+            fprintf(logFile, "%s", m_Buffer);
+            fclose(logFile);
+        }
     }
 }
 }; // namespace th06

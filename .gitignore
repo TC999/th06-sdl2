@@ -25,3 +25,16 @@ build_sdl2/
 build_linux/
 
 build_linux_gles/
+
+# Android build
+android/SDL2_src/
+android/SDL2_image_src/
+android/SDL2_mixer_src/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/app/libs/
+android/app/src/main/assets/
+android/local.properties
+android/cmake_test/

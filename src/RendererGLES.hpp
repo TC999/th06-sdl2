@@ -6,7 +6,15 @@
 
 #include "IRenderer.hpp"
 #include "sdl2_renderer.hpp" // for vertex structs, BlendMode enum
+#ifdef __ANDROID__
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#ifndef APIENTRY
+#define APIENTRY GL_APIENTRY
+#endif
+#else
 #include <SDL_opengl.h>
+#endif
 
 namespace th06
 {

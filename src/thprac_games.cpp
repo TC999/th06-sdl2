@@ -72,6 +72,8 @@ void GameGuiBegin(game_gui_impl /*impl*/, bool game_nav)
 #else
     ImGui_ImplOpenGL2_NewFrame();
 #endif
+    if (!io.Fonts->IsBuilt())
+        return;
     ImGui_ImplSDL2_NewFrame(s_guiWindow);
     // Override display size to game's logical resolution (640x480).
     // ImGui_ImplSDL2_NewFrame sets it to the actual window size, which

@@ -107,7 +107,9 @@ struct IRenderer
 extern IRenderer *g_Renderer;
 
 // Access the two static renderer instances.
+#ifndef __ANDROID__
 IRenderer *GetRendererGL();
+#endif
 IRenderer *GetRendererGLES();
 
 // Returns true if the current renderer is RendererGLES.

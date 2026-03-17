@@ -5,7 +5,14 @@
 // =============================================================================
 
 #include <SDL.h>
+#ifdef __ANDROID__
+#include <GLES2/gl2.h>
+#ifndef APIENTRY
+#define APIENTRY GL_APIENTRY
+#endif
+#else
 #include <SDL_opengl.h>
+#endif
 #include <cmath>
 #include <cstring>
 #include "inttypes.hpp"

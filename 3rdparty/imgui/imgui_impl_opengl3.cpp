@@ -4,7 +4,15 @@
 
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
+#ifdef __ANDROID__
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#ifndef APIENTRY
+#define APIENTRY GL_APIENTRY
+#endif
+#else
 #include <SDL_opengl.h>
+#endif
 #include <SDL.h>
 #include <cstdio>
 #include <cstring>

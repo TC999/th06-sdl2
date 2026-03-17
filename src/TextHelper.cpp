@@ -369,6 +369,10 @@ static void EnsureFontLoaded()
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
+#elif defined(__ANDROID__)
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/NotoSansSC-Regular.otf",
+        "/system/fonts/DroidSansFallback.ttf",
 #else
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -408,6 +412,9 @@ static void EnsureFontLoaded()
 #elif defined(__APPLE__)
         "/System/Library/Fonts/Apple Symbols.ttf",
         "/Library/Fonts/Arial Unicode.ttf",
+#elif defined(__ANDROID__)
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/DroidSansFallback.ttf",
 #else
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",

@@ -44,43 +44,85 @@ void THPracGuiInit(SDL_Window* window, void* glContext)
 #endif
 
     // Load a CJK-capable font for Chinese/Japanese locale strings.
-    // Try system fonts in order; fall back to ImGui's default ASCII font.
     bool fontLoaded = false;
-    static const char* fontPaths[] = {
-#ifdef _WIN32
-        "C:\\Windows\\Fonts\\msyh.ttc",   // Microsoft YaHei
-        "C:\\Windows\\Fonts\\msyhbd.ttc",  // Microsoft YaHei Bold
-        "C:\\Windows\\Fonts\\simhei.ttf",  // SimHei
-        "C:\\Windows\\Fonts\\simsun.ttc",  // SimSun
-#elif defined(__APPLE__)
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/Library/Fonts/Arial Unicode.ttf",
-#else
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-#endif
-        nullptr
-    };
-    for (int fi = 0; fontPaths[fi]; fi++) {
-        const char* path = fontPaths[fi];
-        FILE* f = fopen(path, "rb");
-        if (f) {
-            fclose(f);
-            ImFont* font = io.Fonts->AddFontFromFileTTF(
-                path, 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-            if (font) {
-                fontLoaded = true;
-                break;
+#ifdef __ANDROID__
+    // On Android, load the bundled font from APK assets via SDL_RWFromFile.
+    // System fonts may be in formats stb_truetype can't handle (variable fonts etc.)
+    {
+        static const char* assetFonts[] = {
+            "font/Noto Sans SC.ttf",
+            nullptr
+        };
+        for (int fi = 0; assetFonts[fi]; fi++) {
+            SDL_RWops* rw = SDL_RWFromFile(assetFonts[fi], "rb");
+            if (rw) {
+                Sint64 size = SDL_RWsize(rw);
+                if (size > 0) {
+                    void* data = IM_ALLOC((size_t)size);
+                    if (data && SDL_RWread(rw, data, 1, (size_t)size) == (size_t)size) {
+                        // AddFontFromMemoryTTF takes ownership of data
+                        ImFont* font = io.Fonts->AddFontFromMemoryTTF(
+                            data, (int)size, 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
+                        if (font) {
+                            fontLoaded = true;
+                            SDL_RWclose(rw);
+                            break;
+                        }
+                    }
+                    if (!fontLoaded) IM_FREE(data);
+                }
+                SDL_RWclose(rw);
             }
         }
     }
+#else
+    // Desktop: try system fonts in order
+    {
+        static const char* fontPaths[] = {
+#ifdef _WIN32
+            "C:\\Windows\\Fonts\\msyh.ttc",   // Microsoft YaHei
+            "C:\\Windows\\Fonts\\msyhbd.ttc",  // Microsoft YaHei Bold
+            "C:\\Windows\\Fonts\\simhei.ttf",  // SimHei
+            "C:\\Windows\\Fonts\\simsun.ttc",  // SimSun
+#elif defined(__APPLE__)
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+#else
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+#endif
+            nullptr
+        };
+        for (int fi = 0; fontPaths[fi]; fi++) {
+            const char* path = fontPaths[fi];
+            FILE* f = fopen(path, "rb");
+            if (f) {
+                fclose(f);
+                ImFont* font = io.Fonts->AddFontFromFileTTF(
+                    path, 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
+                if (font) {
+                    fontLoaded = true;
+                    break;
+                }
+            }
+        }
+    }
+#endif
     if (!fontLoaded) {
         io.Fonts->AddFontDefault();
+    }
+    // Pre-build the font atlas to catch failures early.
+    // If Build() fails (e.g. font data incompatible), fall back to default.
+    io.Fonts->Build();
+    if (!io.Fonts->IsBuilt()) {
+        io.Fonts->Clear();
+        io.Fonts->AddFontDefault();
+        io.Fonts->Build();
     }
 
     // Store window pointer for GameGuiBegin's NewFrame call

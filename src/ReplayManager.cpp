@@ -5,6 +5,7 @@
 #include "Controller.hpp"
 #include "FileSystem.hpp"
 #include "GameManager.hpp"
+#include "GamePaths.hpp"
 #include "Gui.hpp"
 #include "ReplayManager.hpp"
 #include "Rng.hpp"
@@ -466,7 +467,10 @@ void ReplayManager::SaveReplay(char *replayPath, char *replayName)
                 }
 
                 // Write the data to the replay file.
-                file = fopen(replayPath, "wb");
+                char resolvedReplayPath[512];
+                GamePaths::Resolve(resolvedReplayPath, sizeof(resolvedReplayPath), replayPath);
+                GamePaths::EnsureParentDir(resolvedReplayPath);
+                file = fopen(resolvedReplayPath, "wb");
                 fwrite(&replayCopy, sizeof(ReplayData), 1, file);
                 for (stageIdx = 0; stageIdx < ARRAY_SIZE_SIGNED(mgr->replayData->stageReplayData); stageIdx += 1)
                 {

@@ -7,6 +7,7 @@
 #include "Controller.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
+#include "GamePaths.hpp"
 #include "GameWindow.hpp"
 #include "IRenderer.hpp"
 #include "MidiOutput.hpp"
@@ -25,6 +26,17 @@ int main(int argc, char *argv[])
 {
     i32 renderResult = 0;
 
+#ifdef __ANDROID__
+    // On Android, SDL must be initialized before GamePaths::Init()
+    // because SDL_AndroidGetInternalStoragePath() requires SDL_Init.
+    if (SDL_Init(0) < 0)
+    {
+        return 1;
+    }
+#endif
+
+    GamePaths::Init();
+
     if (utils::CheckForRunningGameInstance())
     {
         g_GameErrorContext.Flush();
@@ -34,8 +46,15 @@ int main(int argc, char *argv[])
 
     if (g_Supervisor.LoadConfig(TH_CONFIG_FILE) != ZUN_SUCCESS)
     {
+#ifdef __ANDROID__
+        // On Android, config file may not exist on first run.
+        // LoadConfig sets defaults and tries to write — if write fails,
+        // continue anyway with defaults.
+        SDL_Log("LoadConfig failed (first run?), continuing with defaults");
+#else
         g_GameErrorContext.Flush();
         return -1;
+#endif
     }
 
     if (GameWindow::InitD3dInterface())

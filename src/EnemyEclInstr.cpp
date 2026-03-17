@@ -216,10 +216,13 @@ i32 *GetVar(Enemy *enemy, EclVarId *eclVarId, EclValueType *valueType)
         return &enemy->bossTimer.current;
 
     case ECL_VAR_PLAYER_DISTANCE:
-        g_PlayerDistance = D3DXVec3Length(&(g_Player.positionCenter - enemy->position));
+    {
+        D3DXVECTOR3 tmpDist = g_Player.positionCenter - enemy->position;
+        g_PlayerDistance = D3DXVec3Length(&tmpDist);
         if (valueType != NULL)
             *valueType = ECL_VALUE_TYPE_READONLY;
         return (i32 *)&g_PlayerDistance;
+    }
 
     case ECL_VAR_ENEMY_LIFE:
         if (valueType != NULL)

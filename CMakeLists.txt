@@ -161,6 +161,7 @@ set(TH06_GAME_SOURCES
     src/FileSystem.cpp
     src/GameErrorContext.cpp
     src/GameManager.cpp
+    src/GamePaths.cpp
     src/GameWindow.cpp
     src/Gui.cpp
     src/ItemManager.cpp

@@ -8,6 +8,7 @@
 #include "Ending.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
+#include "GamePaths.hpp"
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "MainMenu.hpp"
@@ -25,7 +26,11 @@
 #include <string.h>
 #include <SDL.h>
 #ifndef _WIN32
+#ifdef __ANDROID__
+#include <dirent.h>
+#else
 #include <glob.h>
+#endif
 #endif
 
 namespace th06
@@ -505,6 +510,30 @@ static const wchar_t *FindDatBySuffixW(const char *filename, wchar_t *outBuf, si
     wcscpy(outBuf, fd.cFileName);
     FindClose(hFind);
     return outBuf;
+#elif defined(__ANDROID__)
+    // Android: APK assets can't be listed via opendir.
+    // Try known prefixes for the .dat files.
+    static const char *kPrefixes[] = {"KOUMAKYO_", "紅魔郷"};
+    size_t sfxLen = strlen(suffix);
+    for (size_t pi = 0; pi < sizeof(kPrefixes) / sizeof(kPrefixes[0]); pi++)
+    {
+        char tryName[256];
+        snprintf(tryName, sizeof(tryName), "%s%s", kPrefixes[pi], suffix);
+        // Verify the file exists via SDL_RWFromFile
+        SDL_RWops *rw = SDL_RWFromFile(tryName, "rb");
+        if (rw)
+        {
+            SDL_RWclose(rw);
+            size_t nameLen = strlen(tryName);
+            if (nameLen < outBufLen)
+            {
+                for (size_t i = 0; i <= nameLen; i++)
+                    outBuf[i] = (wchar_t)(unsigned char)tryName[i];
+                return outBuf;
+            }
+        }
+    }
+    return NULL;
 #else
     // Linux: search current directory for a file ending with the suffix using glob.
     // Use character classes [xX] for case-insensitivity since drvfs (WSL /mnt/c/) is case-sensitive.
@@ -602,12 +631,10 @@ i32 Supervisor::LoadPbg3(i32 pbg3FileIdx, char *filename)
     return 0;
 }
 
-#pragma var_order(data, wavFile, wavFile2)
+#pragma var_order(data)
 ZunResult Supervisor::LoadConfig(char *path)
 {
     GameConfiguration *data;
-    FILE *wavFile;
-    FILE *wavFile2;
 
     memset(&g_Supervisor.cfg, 0, sizeof(GameConfiguration));
     g_Supervisor.cfg.opts = g_Supervisor.cfg.opts | (1 << GCOS_USE_D3D_HW_TEXTURE_BLENDING);
@@ -620,16 +647,20 @@ ZunResult Supervisor::LoadConfig(char *path)
         g_Supervisor.cfg.version = GAME_VERSION;
         g_Supervisor.cfg.padXAxis = 600;
         g_Supervisor.cfg.padYAxis = 600;
-        wavFile = fopen("bgm/th06_01.wav", "rb");
-        if (wavFile != NULL)
         {
-            g_Supervisor.cfg.musicMode = WAV;
-            fclose(wavFile);
-        }
-        else
-        {
-            g_Supervisor.cfg.musicMode = MIDI;
-            utils::DebugPrint(TH_ERR_NO_WAVE_FILE);
+            // On Android, bgm/ lives inside APK assets — use SDL_RWFromFile
+            // which transparently reads from assets/ on Android.
+            SDL_RWops *rwCheck = SDL_RWFromFile("bgm/th06_01.wav", "rb");
+            if (rwCheck != NULL)
+            {
+                g_Supervisor.cfg.musicMode = WAV;
+                SDL_RWclose(rwCheck);
+            }
+            else
+            {
+                g_Supervisor.cfg.musicMode = MIDI;
+                utils::DebugPrint(TH_ERR_NO_WAVE_FILE);
+            }
         }
         g_Supervisor.cfg.playSounds = 1;
         g_Supervisor.cfg.defaultDifficulty = 1;
@@ -654,16 +685,18 @@ ZunResult Supervisor::LoadConfig(char *path)
             g_Supervisor.cfg.version = GAME_VERSION;
             g_Supervisor.cfg.padXAxis = 600;
             g_Supervisor.cfg.padYAxis = 600;
-            wavFile2 = fopen("bgm/th06_01.wav", "rb");
-            if (wavFile2 != NULL)
             {
-                g_Supervisor.cfg.musicMode = WAV;
-                fclose(wavFile2);
-            }
-            else
-            {
-                g_Supervisor.cfg.musicMode = MIDI;
-                utils::DebugPrint(TH_ERR_NO_WAVE_FILE);
+                SDL_RWops *rwCheck2 = SDL_RWFromFile("bgm/th06_01.wav", "rb");
+                if (rwCheck2 != NULL)
+                {
+                    g_Supervisor.cfg.musicMode = WAV;
+                    SDL_RWclose(rwCheck2);
+                }
+                else
+                {
+                    g_Supervisor.cfg.musicMode = MIDI;
+                    utils::DebugPrint(TH_ERR_NO_WAVE_FILE);
+                }
             }
             g_Supervisor.cfg.playSounds = 1;
             g_Supervisor.cfg.defaultDifficulty = 1;

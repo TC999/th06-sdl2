@@ -254,14 +254,22 @@ FileAbstraction::~FileAbstraction()
 #include <cstring>
 #include <cwchar>
 #include <unistd.h>
+#include "GamePaths.hpp"
+#ifdef __ANDROID__
+#include <SDL.h>
+#endif
 
 namespace th06
 {
 
 // On Linux, we store a FILE* in the handle field (cast to void*).
-// access: 1 = read, 2 = write.
+// On Android for read access, we store an SDL_RWops* (access == 3).
+// access: 1 = FILE* read, 2 = FILE* write, 3 = SDL_RWops* read (Android).
 
 static FILE *AsFile(HANDLE h) { return reinterpret_cast<FILE *>(h); }
+#ifdef __ANDROID__
+static SDL_RWops *AsRW(HANDLE h) { return reinterpret_cast<SDL_RWops *>(h); }
+#endif
 
 FileAbstraction::FileAbstraction()
 {
@@ -274,23 +282,58 @@ i32 FileAbstraction::Open(char *filename, char *mode)
     this->Close();
 
     const char *fopenMode = "rb";
+    int requestedAccess = 1;
     for (char *curMode = mode; *curMode != '\0'; curMode++)
     {
-        if (*curMode == 'r') { fopenMode = "rb"; this->access = 1; break; }
-        else if (*curMode == 'w') { fopenMode = "wb"; this->access = 2; break; }
-        else if (*curMode == 'a') { fopenMode = "ab"; this->access = 2; break; }
+        if (*curMode == 'r') { fopenMode = "rb"; requestedAccess = 1; break; }
+        else if (*curMode == 'w') { fopenMode = "wb"; requestedAccess = 2; break; }
+        else if (*curMode == 'a') { fopenMode = "ab"; requestedAccess = 2; break; }
     }
 
-    FILE *f = fopen(filename, fopenMode);
+    // Resolve platform-specific path (Android: assets vs user data).
+    char resolvedPath[512];
+    GamePaths::Resolve(resolvedPath, sizeof(resolvedPath), filename);
+
+#ifdef __ANDROID__
+    // On Android, SDL_RWFromFile transparently reads from APK assets
+    // for relative paths, and from the filesystem for absolute paths.
+    if (requestedAccess == 1)
+    {
+        SDL_RWops *rw = SDL_RWFromFile(resolvedPath, "rb");
+        if (!rw)
+        {
+            // Case-insensitive fallback: try lowercase
+            char lower[512];
+            size_t len = strlen(resolvedPath);
+            if (len < sizeof(lower))
+            {
+                for (size_t i = 0; i <= len; i++)
+                    lower[i] = (resolvedPath[i] >= 'A' && resolvedPath[i] <= 'Z') ? resolvedPath[i] + 32 : resolvedPath[i];
+                rw = SDL_RWFromFile(lower, "rb");
+            }
+        }
+        if (!rw)
+        {
+            this->handle = INVALID_HANDLE_VALUE;
+            return 0;
+        }
+        this->access = 3; // SDL_RWops read
+        this->handle = reinterpret_cast<HANDLE>(rw);
+        return 1;
+    }
+#endif
+
+    this->access = requestedAccess;
+    FILE *f = fopen(resolvedPath, fopenMode);
     if (!f)
     {
         // Case-insensitive fallback: try lowercase filename
         char lower[512];
-        size_t len = strlen(filename);
+        size_t len = strlen(resolvedPath);
         if (len < sizeof(lower))
         {
             for (size_t i = 0; i <= len; i++)
-                lower[i] = (filename[i] >= 'A' && filename[i] <= 'Z') ? filename[i] + 32 : filename[i];
+                lower[i] = (resolvedPath[i] >= 'A' && resolvedPath[i] <= 'Z') ? resolvedPath[i] + 32 : resolvedPath[i];
             f = fopen(lower, fopenMode);
         }
     }
@@ -319,7 +362,12 @@ void FileAbstraction::Close()
 {
     if (this->handle != INVALID_HANDLE_VALUE && this->handle != NULL)
     {
-        fclose(AsFile(this->handle));
+#ifdef __ANDROID__
+        if (this->access == 3)
+            SDL_RWclose(AsRW(this->handle));
+        else
+#endif
+            fclose(AsFile(this->handle));
         this->handle = INVALID_HANDLE_VALUE;
         this->access = 0;
     }
@@ -327,7 +375,15 @@ void FileAbstraction::Close()
 
 i32 FileAbstraction::Read(u8 *data, u32 dataLen, u32 *numBytesRead)
 {
-    if (this->access != 1) return FALSE;
+    if (this->access != 1 && this->access != 3) return FALSE;
+#ifdef __ANDROID__
+    if (this->access == 3)
+    {
+        size_t n = SDL_RWread(AsRW(this->handle), data, 1, dataLen);
+        if (numBytesRead) *numBytesRead = (u32)n;
+        return TRUE;
+    }
+#endif
     size_t n = fread(data, 1, dataLen, AsFile(this->handle));
     if (numBytesRead) *numBytesRead = (u32)n;
     return TRUE;
@@ -362,6 +418,16 @@ i32 FileAbstraction::WriteByte(u32 b)
 i32 FileAbstraction::Seek(u32 amount, u32 seekFrom)
 {
     if (this->handle == INVALID_HANDLE_VALUE) return 0;
+#ifdef __ANDROID__
+    if (this->access == 3)
+    {
+        int whence = RW_SEEK_SET;
+        if (seekFrom == 1) whence = RW_SEEK_CUR;
+        else if (seekFrom == 2) whence = RW_SEEK_END;
+        SDL_RWseek(AsRW(this->handle), (Sint64)amount, whence);
+        return 1;
+    }
+#endif
     int whence = SEEK_SET;
     if (seekFrom == 1) whence = SEEK_CUR;
     else if (seekFrom == 2) whence = SEEK_END;
@@ -372,12 +438,23 @@ i32 FileAbstraction::Seek(u32 amount, u32 seekFrom)
 u32 FileAbstraction::Tell()
 {
     if (this->handle == INVALID_HANDLE_VALUE) return 0;
+#ifdef __ANDROID__
+    if (this->access == 3)
+        return (u32)SDL_RWtell(AsRW(this->handle));
+#endif
     return (u32)ftell(AsFile(this->handle));
 }
 
 u32 FileAbstraction::GetSize()
 {
     if (this->handle == INVALID_HANDLE_VALUE) return 0;
+#ifdef __ANDROID__
+    if (this->access == 3)
+    {
+        i64 size = SDL_RWsize(AsRW(this->handle));
+        return (size > 0) ? (u32)size : 0;
+    }
+#endif
     FILE *f = AsFile(this->handle);
     long cur = ftell(f);
     fseek(f, 0, SEEK_END);
@@ -388,7 +465,7 @@ u32 FileAbstraction::GetSize()
 
 u8 *FileAbstraction::ReadWholeFile(u32 maxSize)
 {
-    if (this->access != 1) return NULL;
+    if (this->access != 1 && this->access != 3) return NULL;
     u32 dataLen = this->GetSize();
     u32 outDataLen;
     if (dataLen <= maxSize)

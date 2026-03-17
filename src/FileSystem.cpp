@@ -2,8 +2,12 @@
 #include <string.h>
 
 #include "FileSystem.hpp"
+#include "GamePaths.hpp"
 #include "pbg3/Pbg3Archive.hpp"
 #include "utils.hpp"
+#ifdef __ANDROID__
+#include <SDL.h>
+#endif
 
 namespace th06
 {
@@ -18,6 +22,10 @@ u8 *FileSystem::OpenPath(char *filepath, int isExternalResource)
     i32 entryIdx;
     char *entryname;
     i32 pbg3Idx;
+
+    // Resolve platform-specific path (Android: assets vs user data).
+    char resolvedPath[512];
+    GamePaths::Resolve(resolvedPath, sizeof(resolvedPath), filepath);
 
     entryIdx = -1;
     if (isExternalResource == 0)
@@ -67,11 +75,29 @@ u8 *FileSystem::OpenPath(char *filepath, int isExternalResource)
     }
     else
     {
-        utils::DebugPrint2("%s Load ... \n", filepath);
-        file = fopen(filepath, "rb");
+        utils::DebugPrint2("%s Load ... \n", resolvedPath);
+#ifdef __ANDROID__
+        // On Android, use SDL_RWFromFile to transparently read from APK assets.
+        SDL_RWops *rw = SDL_RWFromFile(resolvedPath, "rb");
+        if (rw == NULL)
+        {
+            utils::DebugPrint2("error : %s is not found.\n", resolvedPath);
+            return NULL;
+        }
+        else
+        {
+            i64 rwSize = SDL_RWsize(rw);
+            fsize = (rwSize > 0) ? (size_t)rwSize : 0;
+            g_LastFileSize = fsize;
+            data = (u8 *)malloc(fsize);
+            SDL_RWread(rw, data, 1, fsize);
+            SDL_RWclose(rw);
+        }
+#else
+        file = fopen(resolvedPath, "rb");
         if (file == NULL)
         {
-            utils::DebugPrint2("error : %s is not found.\n", filepath);
+            utils::DebugPrint2("error : %s is not found.\n", resolvedPath);
             return NULL;
         }
         else
@@ -84,6 +110,7 @@ u8 *FileSystem::OpenPath(char *filepath, int isExternalResource)
             fread(data, 1, fsize, file);
             fclose(file);
         }
+#endif
     }
     return data;
 }
@@ -92,7 +119,12 @@ int FileSystem::WriteDataToFile(char *path, void *data, size_t size)
 {
     FILE *f;
 
-    f = fopen(path, "wb");
+    // Resolve to writable user-data directory on Android.
+    char resolvedPath[512];
+    GamePaths::Resolve(resolvedPath, sizeof(resolvedPath), path);
+    GamePaths::EnsureParentDir(resolvedPath);
+
+    f = fopen(resolvedPath, "wb");
     if (f == NULL)
     {
         return -1;

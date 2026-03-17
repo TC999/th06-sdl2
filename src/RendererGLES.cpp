@@ -304,7 +304,11 @@ void RendererGLES::Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h)
     glEnable(GL_SCISSOR_TEST);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+#ifdef __ANDROID__
+    glDepthRangef(0.0f, 1.0f);
+#else
     glDepthRange(0.0, 1.0);
+#endif
 
     // Upload identity texture matrix
     D3DXMATRIX ident;
@@ -543,7 +547,11 @@ void RendererGLES::SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ, f32 maxZ)
     this->viewportH = h;
     glViewport(x, this->screenHeight - y - h, w, h);
     glScissor(x, this->screenHeight - y - h, w, h);
+#ifdef __ANDROID__
+    glDepthRangef(minZ, maxZ);
+#else
     glDepthRange(minZ, maxZ);
+#endif
 }
 
 void RendererGLES::SetBlendMode(u8 mode)

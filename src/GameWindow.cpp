@@ -19,6 +19,12 @@ DIFFABLE_STATIC(GameWindow, g_GameWindow)
 DIFFABLE_STATIC(i32, g_TickCountToEffectiveFramerate)
 DIFFABLE_STATIC(f64, g_LastFrameTime)
 
+#ifdef __ANDROID__
+// On Android, sdl2_renderer.cpp is excluded (fixed-function GL).
+// Provide the global renderer pointer here.
+IRenderer *g_Renderer = nullptr;
+#endif
+
 #define FRAME_TIME (1000. / 60.)
 
 static double GetFrameTime() {
@@ -123,6 +129,14 @@ RenderResult GameWindow::Render()
     LOOP_USING_GOTO_BECAUSE_WHY_NOT:
         if (g_Supervisor.cfg.frameskipConfig <= this->curFrame)
         {
+            // Capture the screenshot BEFORE clearing/drawing the new frame.
+            // The FBO still holds the previous frame's clean game scene.
+            // This must happen before Clear/DrawChain so that the pause menu
+            // background texture is filled with valid data before it is drawn.
+            // Previously this lived in Present(), but frame-skipping could
+            // skip Present() while still running DrawChain, causing the menu
+            // background to show stale/undefined texture data ("texture overflow").
+            g_AnmManager->TakeScreenshotIfRequested();
             if (g_Supervisor.IsUnknown())
             {
                 viewport.X = 0;
@@ -260,7 +274,6 @@ void GameWindow::Present()
         }
         s_lastPresentTime = timeGetTime();
     }
-    g_AnmManager->TakeScreenshotIfRequested();
     if (g_Supervisor.unk198 != 0)
     {
         g_Supervisor.unk198--;
@@ -312,6 +325,14 @@ void GameWindow::CreateGameWindow(void *unused)
 #endif
 #endif
 
+#ifdef __ANDROID__
+    // On Android, SDL manages the window via SDLActivity.
+    // Use SDL_WINDOW_FULLSCREEN to let SDL handle the native surface.
+    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN;
+    g_GameWindow.sdlWindow = SDL_CreateWindow(
+        "Touhou 06", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        0, 0, windowFlags);
+#else
     if (g_Supervisor.cfg.windowed == 0)
     {
         // Create a borderless window covering the screen.
@@ -333,6 +354,7 @@ void GameWindow::CreateGameWindow(void *unused)
             "Touhou 06", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT, windowFlags);
     }
+#endif
 
     g_Supervisor.hwndGameWindow = (HWND)g_GameWindow.sdlWindow;
 }
@@ -402,7 +424,11 @@ i32 GameWindow::InitD3dRendering(void)
     SDL_GL_SetSwapInterval(g_Supervisor.cfg.windowed ? 1 : 0);
 
     // Select renderer based on persisted config (unk[0]: 0=GLES, 1=GL)
+#ifdef __ANDROID__
+    g_Renderer = GetRendererGLES();
+#else
     g_Renderer = (g_Supervisor.cfg.unk[0] == 1) ? GetRendererGL() : GetRendererGLES();
+#endif
     g_Renderer->Init(g_GameWindow.sdlWindow, glCtx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
     UpdateWindowTitle();
 
@@ -484,7 +510,11 @@ void UpdateWindowTitle()
 
 void SwitchRenderer(bool useGLES)
 {
+#ifdef __ANDROID__
+    IRenderer *newRenderer = GetRendererGLES();
+#else
     IRenderer *newRenderer = useGLES ? GetRendererGLES() : GetRendererGL();
+#endif
     if (newRenderer == g_Renderer)
         return;
 

@@ -18,6 +18,7 @@
 #include "Filesystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
+#include "GamePaths.hpp"
 #include "ReplayData.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
@@ -1333,15 +1334,24 @@ i32 MainMenu::ReplayHandling()
                     }
                     free(replayData);
                 }
-#ifdef _WIN32
-                _mkdir("./replay");
-#else
-                mkdir("./replay", 0755);
-#endif
                 {
+                    // Resolve replay directory to writable user-data path on Android.
+                    char replayDir[512];
+                    GamePaths::Resolve(replayDir, sizeof(replayDir), "./replay");
 #ifdef _WIN32
+                    _mkdir(replayDir);
+#else
+                    mkdir(replayDir, 0755);
+#endif
+                }
+                {
+                    char replayDirResolved[512];
+                    GamePaths::Resolve(replayDirResolved, sizeof(replayDirResolved), "./replay");
+#ifdef _WIN32
+                    char findPattern[512];
+                    snprintf(findPattern, sizeof(findPattern), "%s/th6_ud*.rpy", replayDirResolved);
                     struct _finddata_t fd;
-                    intptr_t hFind = _findfirst("./replay/th6_ud*.rpy", &fd);
+                    intptr_t hFind = _findfirst(findPattern, &fd);
                     cur = 0;
                     if (hFind != -1)
                     {
@@ -1350,7 +1360,7 @@ i32 MainMenu::ReplayHandling()
                             if (cur >= 0x2d) break;
                             const char *name = fd.name;
 #else
-                    DIR *replayFileHandle = opendir("./replay");
+                    DIR *replayFileHandle = opendir(replayDirResolved);
                     struct dirent *replayFileInfo;
                     cur = 0;
                     if (replayFileHandle != NULL)
