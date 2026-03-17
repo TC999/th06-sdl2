@@ -315,3 +315,15 @@ if(WIN32)
         COMMENT "复制 SDL2 DLL 到游戏输出目录"
     )
 endif()
+
+# 如果 src/font/Noto Sans SC.ttf 存在，自动部署到游戏输出目录的 font/ 文件夹
+set(FONT_SRC "${CMAKE_SOURCE_DIR}/src/font/Noto Sans SC.ttf")
+if(EXISTS "${FONT_SRC}")
+    add_custom_command(TARGET th06 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:th06>/font"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FONT_SRC}"
+            "$<TARGET_FILE_DIR:th06>/font/Noto Sans SC.ttf"
+        COMMENT "部署字体文件到游戏目录"
+    )
+endif()

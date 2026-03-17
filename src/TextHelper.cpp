@@ -367,12 +367,10 @@ static void EnsureFontLoaded()
     if (s_fontInitAttempted) return;
     s_fontInitAttempted = true;
 
-    // Try system font paths in order of preference.
-    // Use fonts with broad CJK coverage (Chinese + Japanese + Korean)
-    // first so a single binary works with both GBK and Shift-JIS data.
+    // Try local font first (font/ directory next to exe), then system fonts.
     static const char *fontPaths[] = {
+        "font/Noto Sans SC.ttf",
 #ifdef _WIN32
-        // msyh covers both Chinese and Japanese; best single-font choice
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/msyhbd.ttc",
         "C:/Windows/Fonts/simsun.ttc",
@@ -386,7 +384,6 @@ static void EnsureFontLoaded()
         "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
 #else
-        // Linux: Noto CJK, Google Noto, WenQuanYi, etc.
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
@@ -415,6 +412,7 @@ static void EnsureFontLoaded()
     // Load fallback fonts for missing glyphs (symbols like ♪ ▶).
     // Try fonts that weren't selected as primary.
     static const char *fallbackPaths[] = {
+        "font/Noto Sans SC.ttf",
 #ifdef _WIN32
         "C:/Windows/Fonts/msgothic.ttc",
         "C:/Windows/Fonts/msyh.ttc",
