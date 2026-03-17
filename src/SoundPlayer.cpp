@@ -254,7 +254,7 @@ ZunResult SoundPlayer::InitSoundBuffers()
                 i32 dsVol = g_SoundBufferIdxVol[idx].volume;
                 // DirectSound volume is in hundredths of dB (0 = max, negative = quieter)
                 // Convert from dB to linear amplitude: amplitude = 10^(dB/2000)
-                i32 sdlVol = (i32)(powf(10.0f, (f32)dsVol / 2000.0f) * MIX_MAX_VOLUME);
+                i32 sdlVol = (i32)(powf(10.0f, (f32)dsVol / 2000.0f) * MIX_MAX_VOLUME * 60 / 100);
                 if (sdlVol < 0)
                     sdlVol = 0;
                 if (sdlVol > MIX_MAX_VOLUME)
@@ -381,7 +381,7 @@ void SoundPlayer::PlaySounds()
         i32 dsVol = g_SoundBufferIdxVol[sndBufIdx].volume;
         // DirectSound volume is in hundredths of dB (0 = max, negative = quieter)
         // Convert from dB to linear amplitude: amplitude = 10^(dB/2000)
-        i32 sdlVol = (i32)(powf(10.0f, (f32)dsVol / 2000.0f) * MIX_MAX_VOLUME);
+        i32 sdlVol = (i32)(powf(10.0f, (f32)dsVol / 2000.0f) * MIX_MAX_VOLUME * 60 / 100);
         if (sdlVol < 0)
             sdlVol = 0;
         if (sdlVol > MIX_MAX_VOLUME)

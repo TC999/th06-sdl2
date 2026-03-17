@@ -616,10 +616,7 @@ ZunResult GuiImpl::RunMsg()
             AnmManager::DrawStringFormat(g_AnmManager, &this->songNameSprite, COLOR_RGB(COLOR_LIGHTCYAN),
                                          COLOR_RGB(COLOR_BLACK), TH_SONG_NAME,
                                          g_Stage.stdData->songNames[this->msg.currentInstr->args.music]);
-            if (g_Supervisor.PlayMidiFile(this->msg.currentInstr->args.music) != 0)
-            {
-                g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[this->msg.currentInstr->args.music]);
-            }
+            g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[this->msg.currentInstr->args.music]);
             break;
         case MSG_OPCODE_TEXTINTRO:
             args = &this->msg.currentInstr->args;
