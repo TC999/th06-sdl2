@@ -11,10 +11,10 @@ namespace th06
 
 void ScreenEffect::Clear(D3DCOLOR color)
 {
-    g_Renderer.Clear(color, 1, 1);
-    g_Renderer.EndScene();
-    g_Renderer.Clear(color, 1, 1);
-    g_Renderer.EndScene();
+    g_Renderer->Clear(color, 1, 1);
+    g_Renderer->EndScene();
+    g_Renderer->Clear(color, 1, 1);
+    g_Renderer->EndScene();
     return;
 }
 
@@ -27,7 +27,7 @@ void ScreenEffect::SetViewport(D3DCOLOR color)
     g_Supervisor.viewport.Height = GAME_WINDOW_HEIGHT;
     g_Supervisor.viewport.MinZ = 0.0;
     g_Supervisor.viewport.MaxZ = 1.0;
-    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height, g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
+    g_Renderer->SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height, g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
     ScreenEffect::Clear(color);
 }
 
@@ -66,17 +66,17 @@ void ScreenEffect::DrawSquare(ZunRect *rect, D3DCOLOR rectColor)
 
     if (((g_Supervisor.cfg.opts >> GCOS_NO_COLOR_COMP) & 0x01) == 0)
     {
-        g_Renderer.SetTextureStageSelectDiffuse();
+        g_Renderer->SetTextureStageSelectDiffuse();
     }
-    g_Renderer.SetTextureStageSelectDiffuse();
+    g_Renderer->SetTextureStageSelectDiffuse();
     if (((g_Supervisor.cfg.opts >> GCOS_TURN_OFF_DEPTH_TEST) & 0x01) == 0)
     {
-        g_Renderer.SetDepthFunc(1);
-        g_Renderer.SetZWriteDisable(1);
+        g_Renderer->SetDepthFunc(1);
+        g_Renderer->SetZWriteDisable(1);
     }
 
-    g_Renderer.SetDestBlendInvSrcAlpha();
-    g_Renderer.DrawTriangleStrip(vertices, 4);
+    g_Renderer->SetDestBlendInvSrcAlpha();
+    g_Renderer->DrawTriangleStrip(vertices, 4);
     g_AnmManager->SetCurrentVertexShader(0xff);
     g_AnmManager->SetCurrentSprite(NULL);
     g_AnmManager->SetCurrentTexture(NULL);
@@ -86,10 +86,10 @@ void ScreenEffect::DrawSquare(ZunRect *rect, D3DCOLOR rectColor)
 
     if (((g_Supervisor.cfg.opts >> GCOS_NO_COLOR_COMP) & 0x01) == 0)
     {
-        g_Renderer.SetTextureStageModulateTexture();
+        g_Renderer->SetTextureStageModulateTexture();
     }
-    g_Renderer.SetTextureStageModulateTexture();
-    g_Renderer.SetDepthFunc(0);
+    g_Renderer->SetTextureStageModulateTexture();
+    g_Renderer->SetDepthFunc(0);
 }
 
 ChainCallbackResult ScreenEffect::CalcFadeOut(ScreenEffect *effect)
@@ -183,7 +183,7 @@ ChainCallbackResult ScreenEffect::DrawFadeIn(ScreenEffect *effect)
     g_Supervisor.viewport.Y = 0;
     g_Supervisor.viewport.Width = 640;
     g_Supervisor.viewport.Height = 480;
-    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height, g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
+    g_Renderer->SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y, g_Supervisor.viewport.Width, g_Supervisor.viewport.Height, g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
     ScreenEffect::DrawSquare(&fadeRect, (effect->fadeAlpha << 24) | effect->genericParam);
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

@@ -288,11 +288,8 @@
 #define TH_ST_DAT_FILE TH_MAKE_LANG_STR(TH_LANG, _ST_DAT_FILE)
 #define TH_TL_DAT_FILE TH_MAKE_LANG_STR(TH_LANG, _TL_DAT_FILE)
 
-// Use hex-escaped bytes for the music note to avoid encoding issues.
-// GB18030 ♪ = 0x81 0x37 0xAC 0x38; Shift-JIS ♪ = 0x81 0xF4
-#ifdef TH_CHARSET_GBK
-#define TH_SONG_NAME "\x81\x37\xAC\x38%s"
-#else
-#define TH_SONG_NAME "\x81\xF4%s"
-#endif
+// Use marker byte 0x01 for ♪ (U+266A) — converted to UTF-8 in ConvertToUtf8.
+// Do NOT use raw UTF-8 here: the %s argument is in native encoding (GBK/SJIS)
+// and mixing encodings breaks the decoder.
+#define TH_SONG_NAME "\x01%s"
 #define TH_FONT_NAME "ＭＳ ゴシック"

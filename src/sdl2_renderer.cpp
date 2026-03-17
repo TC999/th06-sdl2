@@ -1,9 +1,10 @@
 // =============================================================================
-// sdl2_renderer.cpp - OpenGL rendering backend implementation for th06
+// sdl2_renderer.cpp - OpenGL 1.x/2.x fixed-function rendering backend (RendererGL)
 // =============================================================================
 
 #include "sdl2_renderer.hpp"
 #include "AnmManager.hpp"
+#include "Supervisor.hpp"
 #include "thprac_gui_integration.h"
 #include <SDL_image.h>
 #include <cstring>
@@ -105,9 +106,16 @@ static void ApplySamplerFor3D()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 }
 
-SDL2Renderer g_Renderer;
+// The static RendererGL instance, allocated when this translation unit is linked.
+static RendererGL s_RendererGL;
 
-void SDL2Renderer::Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h)
+// Accessor for the fixed-function renderer (used by SwitchRenderer).
+IRenderer *GetRendererGL() { return &s_RendererGL; }
+
+// The global renderer pointer. Defaults to GLES; can be switched at runtime.
+IRenderer *g_Renderer = nullptr;
+
+void RendererGL::Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h)
 {
     this->window = win;
     this->glContext = ctx;
@@ -205,17 +213,157 @@ void SDL2Renderer::Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h)
     BeginFrame();
 }
 
-void SDL2Renderer::BeginScene()
+void RendererGL::InitDevice(u32 opts)
+{
+    // opts is the raw g_Supervisor.cfg.opts bitfield
+    if (((opts >> GCOS_TURN_OFF_DEPTH_TEST) & 1) == 0)
+    {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+    }
+    else
+    {
+        glDisable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+    }
+
+    glDisable(GL_LIGHTING);
+    glDisable(GL_CULL_FACE);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    if (((opts >> GCOS_SUPPRESS_USE_OF_GOROUD_SHADING) & 1) == 0)
+    {
+        glShadeModel(GL_SMOOTH);
+    }
+    else
+    {
+        glShadeModel(GL_FLAT);
+    }
+
+    glEnable(GL_ALPHA_TEST);
+    glAlphaFunc(GL_GEQUAL, 4.0f / 255.0f);
+
+    if (((opts >> GCOS_DONT_USE_FOG) & 1) == 0)
+    {
+        glEnable(GL_FOG);
+        this->fogEnabled = 1;
+    }
+    else
+    {
+        glDisable(GL_FOG);
+        this->fogEnabled = 0;
+    }
+    glFogi(GL_FOG_MODE, GL_LINEAR);
+    f32 fogCol[4] = {0.627f, 0.627f, 0.627f, 1.0f};
+    glFogfv(GL_FOG_COLOR, fogCol);
+    glFogf(GL_FOG_START, 1000.0f);
+    glFogf(GL_FOG_END, 5000.0f);
+    glFogf(GL_FOG_DENSITY, 1.0f);
+
+    this->fogColor = 0xffa0a0a0;
+    this->fogStart = 1000.0f;
+    this->fogEnd = 5000.0f;
+
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+}
+
+void RendererGL::Release()
+{
+    if (this->fbo != 0)
+    {
+        glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
+        glDeleteTextures(1, &this->fboColorTex);
+        glDeleteRenderbuffersEXT_(1, &this->fboDepthRb);
+        glDeleteFramebuffersEXT_(1, &this->fbo);
+        this->fbo = 0;
+        this->fboColorTex = 0;
+        this->fboDepthRb = 0;
+    }
+    this->window = nullptr;
+    this->glContext = nullptr;
+}
+
+void RendererGL::ResizeTarget()
+{
+    // Clean up old FBO resources
+    if (this->fbo != 0)
+    {
+        glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
+        glDeleteTextures(1, &this->fboColorTex);
+        glDeleteRenderbuffersEXT_(1, &this->fboDepthRb);
+        glDeleteFramebuffersEXT_(1, &this->fbo);
+        this->fbo = 0;
+        this->fboColorTex = 0;
+        this->fboDepthRb = 0;
+    }
+
+    // Use pre-set realScreenWidth/realScreenHeight (set by caller before this)
+    i32 rw = this->realScreenWidth;
+    i32 rh = this->realScreenHeight;
+    i32 w = this->screenWidth;
+    i32 h = this->screenHeight;
+    if (rw != w || rh != h)
+    {
+        if (LoadFBOExtensions())
+        {
+            glGenTextures(1, &this->fboColorTex);
+            glBindTexture(GL_TEXTURE_2D, this->fboColorTex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            glGenRenderbuffersEXT_(1, &this->fboDepthRb);
+            glBindRenderbufferEXT_(GL_RENDERBUFFER_EXT, this->fboDepthRb);
+            glRenderbufferStorageEXT_(GL_RENDERBUFFER_EXT, GL_DEPTH_COMPONENT16, w, h);
+
+            glGenFramebuffersEXT_(1, &this->fbo);
+            glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, this->fbo);
+            glFramebufferTexture2DEXT_(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, this->fboColorTex, 0);
+            glFramebufferRenderbufferEXT_(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_RENDERBUFFER_EXT, this->fboDepthRb);
+
+            GLenum status = glCheckFramebufferStatusEXT_(GL_FRAMEBUFFER_EXT);
+            if (status != GL_FRAMEBUFFER_COMPLETE_EXT)
+            {
+                glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
+                glDeleteTextures(1, &this->fboColorTex);
+                glDeleteRenderbuffersEXT_(1, &this->fboDepthRb);
+                glDeleteFramebuffersEXT_(1, &this->fbo);
+                this->fbo = 0;
+                this->fboColorTex = 0;
+                this->fboDepthRb = 0;
+            }
+            else
+            {
+                glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
+            }
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+    }
+
+    SetViewport(0, 0, w, h);
+    BeginFrame();
+}
+
+void RendererGL::BeginScene()
 {
     // OpenGL doesn't have explicit begin/end scene
 }
 
-void SDL2Renderer::EndScene()
+void RendererGL::EndScene()
 {
     // OpenGL doesn't have explicit begin/end scene
 }
 
-void SDL2Renderer::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth)
+void RendererGL::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth)
 {
     GLbitfield mask = 0;
     if (clearColor)
@@ -247,7 +395,7 @@ void SDL2Renderer::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth)
     }
 }
 
-void SDL2Renderer::SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ, f32 maxZ)
+void RendererGL::SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ, f32 maxZ)
 {
     this->viewportX = x;
     this->viewportY = y;
@@ -258,7 +406,7 @@ void SDL2Renderer::SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ, f32 maxZ)
     glDepthRange(minZ, maxZ);
 }
 
-void SDL2Renderer::SetBlendMode(u8 mode)
+void RendererGL::SetBlendMode(u8 mode)
 {
     if (mode == this->currentBlendMode)
         return;
@@ -273,7 +421,7 @@ void SDL2Renderer::SetBlendMode(u8 mode)
     }
 }
 
-void SDL2Renderer::SetTexture(GLuint tex)
+void RendererGL::SetTexture(GLuint tex)
 {
     if (tex == this->currentTexture)
         return;
@@ -290,12 +438,12 @@ void SDL2Renderer::SetTexture(GLuint tex)
     }
 }
 
-void SDL2Renderer::SetTextureFactor(D3DCOLOR factor)
+void RendererGL::SetTextureFactor(D3DCOLOR factor)
 {
     this->textureFactor = factor;
 }
 
-void SDL2Renderer::SetZWriteDisable(u8 disable)
+void RendererGL::SetZWriteDisable(u8 disable)
 {
     if (disable == this->currentZWriteDisable)
         return;
@@ -303,33 +451,33 @@ void SDL2Renderer::SetZWriteDisable(u8 disable)
     glDepthMask(disable ? GL_FALSE : GL_TRUE);
 }
 
-void SDL2Renderer::SetDepthFunc(i32 alwaysPass)
+void RendererGL::SetDepthFunc(i32 alwaysPass)
 {
     glDepthFunc(alwaysPass ? GL_ALWAYS : GL_LEQUAL);
 }
 
-void SDL2Renderer::SetDestBlendInvSrcAlpha()
+void RendererGL::SetDestBlendInvSrcAlpha()
 {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
-void SDL2Renderer::SetDestBlendOne()
+void RendererGL::SetDestBlendOne()
 {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
 }
 
-void SDL2Renderer::SetTextureStageSelectDiffuse()
+void RendererGL::SetTextureStageSelectDiffuse()
 {
     glDisable(GL_TEXTURE_2D);
     this->currentTexture = 0;
 }
 
-void SDL2Renderer::SetTextureStageModulateTexture()
+void RendererGL::SetTextureStageModulateTexture()
 {
     glEnable(GL_TEXTURE_2D);
 }
 
-void SDL2Renderer::SetFog(i32 enable, D3DCOLOR color, f32 start, f32 end)
+void RendererGL::SetFog(i32 enable, D3DCOLOR color, f32 start, f32 end)
 {
     this->fogEnabled = enable;
     this->fogColor = color;
@@ -360,7 +508,7 @@ static void ApplyVertexColor(D3DCOLOR c)
     glColor4ub(D3DCOLOR_R(c), D3DCOLOR_G(c), D3DCOLOR_B(c), D3DCOLOR_A(c));
 }
 
-static void Begin2DDraw(SDL2Renderer *r)
+static void Begin2DDraw(RendererGL *r)
 {
     g_PrevDepthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
     glGetBooleanv(GL_DEPTH_WRITEMASK, &g_PrevDepthMask);
@@ -397,7 +545,7 @@ static void Begin2DDraw(SDL2Renderer *r)
     }
 }
 
-static void End2DDraw(SDL2Renderer *r)
+static void End2DDraw(RendererGL *r)
 {
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
@@ -423,7 +571,7 @@ static void End2DDraw(SDL2Renderer *r)
     glDepthMask(g_PrevDepthMask);
 }
 
-void SDL2Renderer::DrawTriangleStrip(const VertexDiffuseXyzrwh *verts, i32 count)
+void RendererGL::DrawTriangleStrip(const VertexDiffuseXyzrwh *verts, i32 count)
 {
     glDisable(GL_TEXTURE_2D);
     Begin2DDraw(this);
@@ -444,7 +592,7 @@ void SDL2Renderer::DrawTriangleStrip(const VertexDiffuseXyzrwh *verts, i32 count
         glEnable(GL_TEXTURE_2D);
 }
 
-void SDL2Renderer::DrawTriangleStripTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count)
+void RendererGL::DrawTriangleStripTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count)
 {
     Begin2DDraw(this);
 
@@ -463,7 +611,7 @@ void SDL2Renderer::DrawTriangleStripTextured(const VertexTex1DiffuseXyzrwh *vert
     End2DDraw(this);
 }
 
-void SDL2Renderer::DrawTriangleStripTextured3D(const VertexTex1DiffuseXyz *verts, i32 count)
+void RendererGL::DrawTriangleStripTextured3D(const VertexTex1DiffuseXyz *verts, i32 count)
 {
     // Apply view/projection matrices
     glMatrixMode(GL_PROJECTION);
@@ -493,7 +641,7 @@ void SDL2Renderer::DrawTriangleStripTextured3D(const VertexTex1DiffuseXyz *verts
     glPopMatrix();
 }
 
-void SDL2Renderer::DrawTriangleFanTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count)
+void RendererGL::DrawTriangleFanTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count)
 {
     Begin2DDraw(this);
 
@@ -512,7 +660,7 @@ void SDL2Renderer::DrawTriangleFanTextured(const VertexTex1DiffuseXyzrwh *verts,
     End2DDraw(this);
 }
 
-void SDL2Renderer::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, i32 count)
+void RendererGL::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, i32 count)
 {
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
@@ -541,7 +689,7 @@ void SDL2Renderer::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, 
     glPopMatrix();
 }
 
-GLuint SDL2Renderer::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR colorKey, i32 *outWidth, i32 *outHeight)
+GLuint RendererGL::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR colorKey, i32 *outWidth, i32 *outHeight)
 {
     SDL_RWops *rw = SDL_RWFromConstMem(data, dataLen);
     if (!rw) return 0;
@@ -595,7 +743,7 @@ GLuint SDL2Renderer::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOL
     return tex;
 }
 
-GLuint SDL2Renderer::CreateEmptyTexture(i32 width, i32 height)
+GLuint RendererGL::CreateEmptyTexture(i32 width, i32 height)
 {
     GLuint tex;
     glGenTextures(1, &tex);
@@ -610,7 +758,7 @@ GLuint SDL2Renderer::CreateEmptyTexture(i32 width, i32 height)
     return tex;
 }
 
-void SDL2Renderer::DeleteTexture(GLuint tex)
+void RendererGL::DeleteTexture(GLuint tex)
 {
     if (tex != 0)
     {
@@ -623,7 +771,7 @@ void SDL2Renderer::DeleteTexture(GLuint tex)
     }
 }
 
-void SDL2Renderer::SetColorOp(u8 colorOp)
+void RendererGL::SetColorOp(u8 colorOp)
 {
     if (colorOp == this->currentColorOp)
         return;
@@ -638,14 +786,14 @@ void SDL2Renderer::SetColorOp(u8 colorOp)
     }
 }
 
-void SDL2Renderer::SetViewTransform(const D3DXMATRIX *matrix)
+void RendererGL::SetViewTransform(const D3DXMATRIX *matrix)
 {
     this->viewMatrix = *matrix;
     glMatrixMode(GL_MODELVIEW);
     glLoadMatrixf(&this->viewMatrix.m[0][0]);
 }
 
-void SDL2Renderer::SetProjectionTransform(const D3DXMATRIX *matrix)
+void RendererGL::SetProjectionTransform(const D3DXMATRIX *matrix)
 {
     this->projectionMatrix = *matrix;
     glMatrixMode(GL_PROJECTION);
@@ -653,7 +801,7 @@ void SDL2Renderer::SetProjectionTransform(const D3DXMATRIX *matrix)
     glMatrixMode(GL_MODELVIEW);
 }
 
-void SDL2Renderer::SetWorldTransform(const D3DXMATRIX *matrix)
+void RendererGL::SetWorldTransform(const D3DXMATRIX *matrix)
 {
     glMatrixMode(GL_MODELVIEW);
     D3DXMATRIX combined;
@@ -661,7 +809,7 @@ void SDL2Renderer::SetWorldTransform(const D3DXMATRIX *matrix)
     glLoadMatrixf(&combined.m[0][0]);
 }
 
-void SDL2Renderer::SetTextureTransform(const D3DXMATRIX *matrix)
+void RendererGL::SetTextureTransform(const D3DXMATRIX *matrix)
 {
     // D3D uses row-vector * matrix (row-major), GL uses matrix * column-vector (column-major).
     // glLoadMatrixf reads the row-major D3D data as column-major, which naturally transposes
@@ -671,7 +819,7 @@ void SDL2Renderer::SetTextureTransform(const D3DXMATRIX *matrix)
     glLoadMatrixf(&matrix->m[0][0]);
 }
 
-GLuint SDL2Renderer::LoadSurfaceFromFile(const u8 *data, i32 dataLen, i32 *outWidth, i32 *outHeight)
+GLuint RendererGL::LoadSurfaceFromFile(const u8 *data, i32 dataLen, i32 *outWidth, i32 *outHeight)
 {
     SDL_RWops *rw = SDL_RWFromConstMem(data, dataLen);
     if (!rw) return 0;
@@ -700,7 +848,7 @@ GLuint SDL2Renderer::LoadSurfaceFromFile(const u8 *data, i32 dataLen, i32 *outWi
     return tex;
 }
 
-void SDL2Renderer::CopySurfaceToScreen(GLuint surfaceTex, i32 srcX, i32 srcY, i32 dstX, i32 dstY, i32 w, i32 h,
+void RendererGL::CopySurfaceToScreen(GLuint surfaceTex, i32 srcX, i32 srcY, i32 dstX, i32 dstY, i32 w, i32 h,
                                        i32 texW, i32 texH)
 {
     if (surfaceTex == 0) return;
@@ -731,7 +879,7 @@ void SDL2Renderer::CopySurfaceToScreen(GLuint surfaceTex, i32 srcX, i32 srcY, i3
         glBindTexture(GL_TEXTURE_2D, this->currentTexture);
 }
 
-void SDL2Renderer::CopySurfaceRectToScreen(GLuint surfaceTex, i32 srcX, i32 srcY, i32 srcW, i32 srcH,
+void RendererGL::CopySurfaceRectToScreen(GLuint surfaceTex, i32 srcX, i32 srcY, i32 srcW, i32 srcH,
                                            i32 dstX, i32 dstY, i32 texW, i32 texH)
 {
     if (surfaceTex == 0) return;
@@ -759,7 +907,7 @@ void SDL2Renderer::CopySurfaceRectToScreen(GLuint surfaceTex, i32 srcX, i32 srcY
         glBindTexture(GL_TEXTURE_2D, this->currentTexture);
 }
 
-void SDL2Renderer::TakeScreenshot(GLuint dstTex, i32 left, i32 top, i32 width, i32 height)
+void RendererGL::TakeScreenshot(GLuint dstTex, i32 left, i32 top, i32 width, i32 height)
 {
     if (dstTex == 0) return;
 
@@ -800,7 +948,7 @@ void SDL2Renderer::TakeScreenshot(GLuint dstTex, i32 left, i32 top, i32 width, i
     delete[] flipped;
 }
 
-void SDL2Renderer::CopyAlphaChannel(GLuint dstTex, const u8 *srcData, i32 dataLen, i32 width, i32 height)
+void RendererGL::CopyAlphaChannel(GLuint dstTex, const u8 *srcData, i32 dataLen, i32 width, i32 height)
 {
     if (dstTex == 0) return;
 
@@ -855,7 +1003,7 @@ void SDL2Renderer::CopyAlphaChannel(GLuint dstTex, const u8 *srcData, i32 dataLe
     SDL_FreeSurface(srcRgba);
 }
 
-void SDL2Renderer::UpdateTextureSubImage(GLuint tex, i32 x, i32 y, i32 w, i32 h, const u8 *rgbaPixels)
+void RendererGL::UpdateTextureSubImage(GLuint tex, i32 x, i32 y, i32 w, i32 h, const u8 *rgbaPixels)
 {
     if (tex == 0 || !rgbaPixels) return;
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -864,7 +1012,7 @@ void SDL2Renderer::UpdateTextureSubImage(GLuint tex, i32 x, i32 y, i32 w, i32 h,
         glBindTexture(GL_TEXTURE_2D, this->currentTexture);
 }
 
-void SDL2Renderer::DrawTriangleStripTex(const VertexTex1Xyzrwh *verts, i32 count)
+void RendererGL::DrawTriangleStripTex(const VertexTex1Xyzrwh *verts, i32 count)
 {
     Begin2DDraw(this);
 
@@ -885,7 +1033,7 @@ void SDL2Renderer::DrawTriangleStripTex(const VertexTex1Xyzrwh *verts, i32 count
     End2DDraw(this);
 }
 
-void SDL2Renderer::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count)
+void RendererGL::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count)
 {
     // Uses currently set world transform and texture transform
     // Projection already setup via glMatrixMode calls
@@ -907,7 +1055,7 @@ void SDL2Renderer::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count)
     glEnd();
 }
 
-GLuint SDL2Renderer::LoadSurfaceFromFile(const u8 *data, i32 dataLen, D3DXIMAGE_INFO *info)
+GLuint RendererGL::LoadSurfaceFromFile(const u8 *data, i32 dataLen, D3DXIMAGE_INFO *info)
 {
     i32 w = 0, h = 0;
     GLuint result = LoadSurfaceFromFile(data, dataLen, &w, &h);
@@ -919,12 +1067,12 @@ GLuint SDL2Renderer::LoadSurfaceFromFile(const u8 *data, i32 dataLen, D3DXIMAGE_
     return result;
 }
 
-void SDL2Renderer::CopySurfaceToScreen(GLuint surfaceTex, i32 texW, i32 texH, i32 dstX, i32 dstY)
+void RendererGL::CopySurfaceToScreen(GLuint surfaceTex, i32 texW, i32 texH, i32 dstX, i32 dstY)
 {
     CopySurfaceToScreen(surfaceTex, 0, 0, dstX, dstY, texW, texH, texW, texH);
 }
 
-void SDL2Renderer::BeginFrame()
+void RendererGL::BeginFrame()
 {
     if (this->fbo != 0)
     {
@@ -946,7 +1094,7 @@ void SDL2Renderer::BeginFrame()
 // (for the front buffer) and once after swap (so the back buffer also
 // holds the current frame — this is the root cause fix for screen capture
 // tools reading stale data from the post-swap back buffer).
-void SDL2Renderer::BlitFBOToScreen()
+void RendererGL::BlitFBOToScreen()
 {
     glBindFramebufferEXT_(GL_FRAMEBUFFER_EXT, 0);
 
@@ -1020,7 +1168,7 @@ void SDL2Renderer::BlitFBOToScreen()
     glPopMatrix();
 }
 
-void SDL2Renderer::EndFrame()
+void RendererGL::EndFrame()
 {
     if (this->fbo != 0)
     {

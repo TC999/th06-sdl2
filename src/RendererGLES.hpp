@@ -1,62 +1,52 @@
 #pragma once
 // =============================================================================
-// sdl2_renderer.hpp - OpenGL 1.x/2.x fixed-function rendering backend for th06
-// Implements IRenderer; legacy code preserved as RendererGL.
+// RendererGLES.hpp - OpenGL ES 2.0 rendering backend for th06
+// Implements IRenderer using shaders + VBO instead of fixed-function pipeline.
 // =============================================================================
 
 #include "IRenderer.hpp"
+#include "sdl2_renderer.hpp" // for vertex structs, BlendMode enum
 #include <SDL_opengl.h>
 
 namespace th06
 {
 
-// Blend modes matching original D3D8 blend states
-enum BlendMode
+struct RendererGLES : public IRenderer
 {
-    BLEND_MODE_ALPHA = 0,         // SrcAlpha, InvSrcAlpha
-    BLEND_MODE_ADD = 1,           // SrcAlpha, One
-    BLEND_MODE_INV_SRC_ALPHA = 0, // alias for ALPHA
-    BLEND_MODE_ADDITIVE = 1,      // alias for ADD
-};
+    // Shader program
+    GLuint shaderProgram;
+    GLint loc_a_Position;
+    GLint loc_a_Color;
+    GLint loc_a_TexCoord;
+    GLint loc_u_MVP;
+    GLint loc_u_TexMatrix;
+    GLint loc_u_ModelView;
+    GLint loc_u_Texture;
+    GLint loc_u_TextureEnabled;
+    GLint loc_u_ColorOp;
+    GLint loc_u_AlphaRef;
+    GLint loc_u_FogEnabled;
+    GLint loc_u_FogStart;
+    GLint loc_u_FogEnd;
+    GLint loc_u_FogColor;
 
-// Vertex structures matching original FVF formats
-struct VertexDiffuseXyzrwh
-{
-    D3DXVECTOR4 position;
-    D3DCOLOR diffuse;
-};
+    // CPU-side matrix state (replaces GL matrix stack)
+    D3DXMATRIX modelviewMatrix;   // view * world
+    D3DXMATRIX worldMatrix;
+    D3DXMATRIX textureMatrix;
 
-struct VertexTex1Xyzrwh
-{
-    D3DXVECTOR4 position;
-    D3DXVECTOR2 textureUV;
-};
+    // Current state tracking
+    u8 textureEnabled;
 
-struct VertexTex1DiffuseXyzrwh
-{
-    D3DXVECTOR4 position;
-    D3DCOLOR diffuse;
-    D3DXVECTOR2 textureUV;
-};
-
-struct VertexTex1DiffuseXyz
-{
-    D3DXVECTOR3 position;
-    D3DCOLOR diffuse;
-    D3DXVECTOR2 textureUV;
-};
-
-// RenderVertexInfo is defined in AnmManager.hpp
-struct RenderVertexInfo;
-
-// OpenGL 1.x/2.x fixed-function pipeline renderer (original implementation).
-struct RendererGL : public IRenderer
-{
-    // FBO for render-to-texture (fullscreen scaling) — GL-specific handles
+    // FBO (GLES core — not EXT)
     GLuint fbo;
     GLuint fboColorTex;
     GLuint fboDepthRb;
 
+    // Dynamic VBO for streaming vertices
+    GLuint vbo;
+
+    // --- IRenderer interface ---
     void Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h) override;
     void InitDevice(u32 opts) override;
     void Release() override;
@@ -109,8 +99,11 @@ struct RendererGL : public IRenderer
                                  i32 dstX, i32 dstY, i32 texW, i32 texH) override;
     void TakeScreenshot(u32 dstTex, i32 left, i32 top, i32 width, i32 height) override;
 
-    // Internal helper
+    // Internal helpers
     void BlitFBOToScreen();
+    void UploadUniforms();
+    void UploadMVP();
+    void DrawArrays(GLenum mode, const f32 *positions, const f32 *colors, const f32 *texcoords, i32 vertCount);
 };
 
 } // namespace th06

@@ -51,6 +51,7 @@ static SDL_Scancode VKToScancode(int vk)
     case VK_F10:    return SDL_SCANCODE_F10;
     case VK_F11:    return SDL_SCANCODE_F11;
     case VK_F12:    return SDL_SCANCODE_F12;
+    case 0xC0: return SDL_SCANCODE_GRAVE; // VK_OEM_3 (~/`)
     default:
         // ASCII keys map directly for A-Z (0x41-0x5A) and 0-9 (0x30-0x39)
         if (vk >= 0x41 && vk <= 0x5A)

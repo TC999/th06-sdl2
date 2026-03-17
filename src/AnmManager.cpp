@@ -33,7 +33,7 @@ void AnmManager::ReleaseSurfaces(void)
     {
         if (this->surfaces[idx] != 0)
         {
-            g_Renderer.DeleteTexture(this->surfaces[idx]);
+            g_Renderer->DeleteTexture(this->surfaces[idx]);
             this->surfaces[idx] = 0;
         }
     }
@@ -150,7 +150,7 @@ ZunResult AnmManager::LoadTexture(i32 textureIdx, char *textureName, i32 texture
         return ZUN_ERROR;
     }
 
-    this->textures[textureIdx] = g_Renderer.CreateTextureFromMemory((const u8 *)this->imageDataArray[textureIdx], g_LastFileSize, colorKey, NULL, NULL);
+    this->textures[textureIdx] = g_Renderer->CreateTextureFromMemory((const u8 *)this->imageDataArray[textureIdx], g_LastFileSize, colorKey, NULL, NULL);
     if (this->textures[textureIdx] == 0)
     {
         return ZUN_ERROR;
@@ -174,7 +174,7 @@ ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, char *textureName,
         return ZUN_ERROR;
     }
 
-    g_Renderer.CopyAlphaChannel(this->textures[textureIdx], data, g_LastFileSize, 0, 0);
+    g_Renderer->CopyAlphaChannel(this->textures[textureIdx], data, g_LastFileSize, 0, 0);
 
     free(data);
     return ZUN_SUCCESS;
@@ -182,7 +182,7 @@ ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, char *textureName,
 
 ZunResult AnmManager::CreateEmptyTexture(i32 textureIdx, u32 width, u32 height, i32 textureFormat)
 {
-    this->textures[textureIdx] = g_Renderer.CreateEmptyTexture(width, height);
+    this->textures[textureIdx] = g_Renderer->CreateEmptyTexture(width, height);
     return ZUN_SUCCESS;
 }
 
@@ -296,7 +296,7 @@ void AnmManager::ReleaseTexture(i32 textureIdx)
 {
     if (this->textures[textureIdx] != 0)
     {
-        g_Renderer.DeleteTexture(this->textures[textureIdx]);
+        g_Renderer->DeleteTexture(this->textures[textureIdx]);
         this->textures[textureIdx] = 0;
     }
 
@@ -370,11 +370,11 @@ void AnmManager::SetRenderStateForVm(AnmVm *vm)
         this->currentBlendMode = vm->flags.blendMode;
         if (this->currentBlendMode == AnmVmBlendMode_InvSrcAlpha)
         {
-            g_Renderer.SetBlendMode(BLEND_MODE_INV_SRC_ALPHA);
+            g_Renderer->SetBlendMode(BLEND_MODE_INV_SRC_ALPHA);
         }
         else
         {
-            g_Renderer.SetBlendMode(BLEND_MODE_ADDITIVE);
+            g_Renderer->SetBlendMode(BLEND_MODE_ADDITIVE);
         }
     }
     if ((((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1) == 0) &&
@@ -383,11 +383,11 @@ void AnmManager::SetRenderStateForVm(AnmVm *vm)
         this->currentColorOp = vm->flags.colorOp;
         if (this->currentColorOp == AnmVmColorOp_Modulate)
         {
-            g_Renderer.SetColorOp(0);
+            g_Renderer->SetColorOp(0);
         }
         else
         {
-            g_Renderer.SetColorOp(1);
+            g_Renderer->SetColorOp(1);
         }
     }
     if (((g_Supervisor.cfg.opts >> GCOS_DONT_USE_VERTEX_BUF) & 1) == 0)
@@ -395,7 +395,7 @@ void AnmManager::SetRenderStateForVm(AnmVm *vm)
         if (this->currentTextureFactor != vm->color)
         {
             this->currentTextureFactor = vm->color;
-            g_Renderer.SetTextureFactor(this->currentTextureFactor);
+            g_Renderer->SetTextureFactor(this->currentTextureFactor);
         }
     }
     else
@@ -413,7 +413,7 @@ void AnmManager::SetRenderStateForVm(AnmVm *vm)
         (this->currentZWriteDisable != vm->flags.zWriteDisable))
     {
         this->currentZWriteDisable = vm->flags.zWriteDisable;
-        g_Renderer.SetZWriteDisable(this->currentZWriteDisable);
+        g_Renderer->SetZWriteDisable(this->currentZWriteDisable);
     }
     return;
 }
@@ -457,7 +457,7 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
     if (this->currentTexture != this->textures[vm->sprite->sourceFileIndex])
     {
         this->currentTexture = this->textures[vm->sprite->sourceFileIndex];
-        g_Renderer.SetTexture(this->currentTexture);
+        g_Renderer->SetTexture(this->currentTexture);
     }
     if (this->currentVertexShader != 2)
     {
@@ -466,7 +466,7 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
     this->SetRenderStateForVm(vm);
     if (((g_Supervisor.cfg.opts >> GCOS_DONT_USE_VERTEX_BUF) & 1) == 0)
     {
-        g_Renderer.DrawTriangleStripTex(g_PrimitivesToDrawVertexBuf, 4);
+        g_Renderer->DrawTriangleStripTex(g_PrimitivesToDrawVertexBuf, 4);
     }
     else
     {
@@ -490,7 +490,7 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
             vm->sprite->uvStart.y + vm->uvScrollPos.y;
         g_PrimitivesToDrawNoVertexBuf[2].textureUV.y = g_PrimitivesToDrawNoVertexBuf[3].textureUV.y =
             vm->sprite->uvEnd.y + vm->uvScrollPos.y;
-        g_Renderer.DrawTriangleStripTextured(g_PrimitivesToDrawNoVertexBuf, 4);
+        g_Renderer->DrawTriangleStripTextured(g_PrimitivesToDrawNoVertexBuf, 4);
     }
     return ZUN_SUCCESS;
 }
@@ -718,7 +718,7 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
 
     worldTransformMatrix.m[3][2] = vm->pos.z;
 
-    g_Renderer.SetWorldTransform(&worldTransformMatrix);
+    g_Renderer->SetWorldTransform(&worldTransformMatrix);
 
     // Explicit UV assignment is more robust than relying on fixed-pipeline texture matrix semantics.
     this->vertexBufferContents[0].textureUV.x = this->vertexBufferContents[2].textureUV.x =
@@ -732,7 +732,7 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
 
     D3DXMATRIX textureIdentity;
     D3DXMatrixIdentity(&textureIdentity);
-    g_Renderer.SetTextureTransform(&textureIdentity);
+    g_Renderer->SetTextureTransform(&textureIdentity);
 
     if (this->currentSprite != vm->sprite)
     {
@@ -741,7 +741,7 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
     if (this->currentTexture != this->textures[vm->sprite->sourceFileIndex])
     {
         this->currentTexture = this->textures[vm->sprite->sourceFileIndex];
-        g_Renderer.SetTexture(this->currentTexture);
+        g_Renderer->SetTexture(this->currentTexture);
     }
 
     if (this->currentVertexShader != 3)
@@ -751,7 +751,7 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
 
     this->SetRenderStateForVm(vm);
 
-    g_Renderer.DrawVertexBuffer3D(this->vertexBufferContents, 4);
+    g_Renderer->DrawVertexBuffer3D(this->vertexBufferContents, 4);
     return ZUN_SUCCESS;
 }
 
@@ -795,7 +795,7 @@ ZunResult AnmManager::Draw2(AnmVm *vm)
     worldTransformMatrix.m[3][2] = vm->pos.z;
     worldTransformMatrix.m[0][0] *= vm->scaleX;
     worldTransformMatrix.m[1][1] *= -vm->scaleY;
-    g_Renderer.SetWorldTransform(&worldTransformMatrix);
+    g_Renderer->SetWorldTransform(&worldTransformMatrix);
 
     this->vertexBufferContents[0].textureUV.x = this->vertexBufferContents[2].textureUV.x =
         vm->sprite->uvStart.x + vm->uvScrollPos.x;
@@ -808,7 +808,7 @@ ZunResult AnmManager::Draw2(AnmVm *vm)
 
     D3DXMATRIX textureIdentity;
     D3DXMatrixIdentity(&textureIdentity);
-    g_Renderer.SetTextureTransform(&textureIdentity);
+    g_Renderer->SetTextureTransform(&textureIdentity);
 
     if (this->currentSprite != vm->sprite)
     {
@@ -817,14 +817,14 @@ ZunResult AnmManager::Draw2(AnmVm *vm)
     if (this->currentTexture != this->textures[vm->sprite->sourceFileIndex])
     {
         this->currentTexture = this->textures[vm->sprite->sourceFileIndex];
-        g_Renderer.SetTexture(this->currentTexture);
+        g_Renderer->SetTexture(this->currentTexture);
     }
     if (this->currentVertexShader != 3)
     {
         this->currentVertexShader = 3;
     }
     this->SetRenderStateForVm(vm);
-    g_Renderer.DrawVertexBuffer3D(this->vertexBufferContents, 4);
+    g_Renderer->DrawVertexBuffer3D(this->vertexBufferContents, 4);
     return ZUN_SUCCESS;
 }
 
@@ -1274,7 +1274,7 @@ ZunResult AnmManager::LoadSurface(i32 surfaceIdx, char *path)
         return ZUN_ERROR;
     }
 
-    u32 tex = g_Renderer.LoadSurfaceFromFile(data, g_LastFileSize, &this->surfaceSourceInfo[surfaceIdx]);
+    u32 tex = g_Renderer->LoadSurfaceFromFile(data, g_LastFileSize, &this->surfaceSourceInfo[surfaceIdx]);
     if (tex == 0)
     {
         free(data);
@@ -1292,7 +1292,7 @@ void AnmManager::ReleaseSurface(i32 surfaceIdx)
 {
     if (this->surfaces[surfaceIdx] != 0)
     {
-        g_Renderer.DeleteTexture(this->surfaces[surfaceIdx]);
+        g_Renderer->DeleteTexture(this->surfaces[surfaceIdx]);
         this->surfaces[surfaceIdx] = 0;
     }
     this->surfacesBis[surfaceIdx] = 0;
@@ -1305,7 +1305,7 @@ void AnmManager::CopySurfaceToBackBuffer(i32 surfaceIdx, i32 left, i32 top, i32 
         return;
     }
 
-    g_Renderer.CopySurfaceToScreen(this->surfaces[surfaceIdx],
+    g_Renderer->CopySurfaceToScreen(this->surfaces[surfaceIdx],
                                    this->surfaceSourceInfo[surfaceIdx].Width,
                                    this->surfaceSourceInfo[surfaceIdx].Height,
                                    x, y);
@@ -1318,7 +1318,7 @@ void AnmManager::DrawEndingRect(i32 surfaceIdx, i32 rectX, i32 rectY, i32 rectLe
         return;
     }
 
-    g_Renderer.CopySurfaceRectToScreen(this->surfaces[surfaceIdx],
+    g_Renderer->CopySurfaceRectToScreen(this->surfaces[surfaceIdx],
                                        this->surfaceSourceInfo[surfaceIdx].Width,
                                        this->surfaceSourceInfo[surfaceIdx].Height,
                                        rectLeft, rectTop, width, height,
@@ -1332,7 +1332,7 @@ void AnmManager::TakeScreenshot(i32 textureId, i32 left, i32 top, i32 width, i32
     {
         return;
     }
-    g_Renderer.TakeScreenshot(this->textures[textureId], left, top, width, height);
+    g_Renderer->TakeScreenshot(this->textures[textureId], left, top, width, height);
     return;
 }
 }; // namespace th06

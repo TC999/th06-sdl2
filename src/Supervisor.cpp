@@ -293,15 +293,15 @@ ZunResult Supervisor::AddedCallback(Supervisor *s)
     }
     g_AnmManager->LoadSurface(0, "data/title/th06logo.jpg");
     g_AnmManager->CopySurfaceToBackBuffer(0, 0, 0, 0, 0);
-    g_Renderer.EndFrame();
+    g_Renderer->EndFrame();
     SDL_PumpEvents();
 
-    g_Renderer.BeginFrame();
+    g_Renderer->BeginFrame();
     g_AnmManager->CopySurfaceToBackBuffer(0, 0, 0, 0, 0);
-    g_Renderer.EndFrame();
+    g_Renderer->EndFrame();
     SDL_PumpEvents();
 
-    g_Renderer.BeginFrame();
+    g_Renderer->BeginFrame();
 
     g_AnmManager->ReleaseSurface(0);
 
@@ -616,7 +616,7 @@ ZunResult Supervisor::LoadConfig(char *path)
     {
         g_Supervisor.cfg.lifeCount = 2;
         g_Supervisor.cfg.bombCount = 3;
-        g_Supervisor.cfg.colorMode16bit = 0xff;
+        g_Supervisor.cfg.colorMode16bit = 0;
         g_Supervisor.cfg.version = GAME_VERSION;
         g_Supervisor.cfg.padXAxis = 600;
         g_Supervisor.cfg.padYAxis = 600;
@@ -641,15 +641,16 @@ ZunResult Supervisor::LoadConfig(char *path)
     else
     {
         g_Supervisor.cfg = *data;
+        // SDL2: skip colorMode16bit validation (16-bit mode doesn't exist in GL)
         if ((g_Supervisor.cfg.lifeCount >= 5) || (g_Supervisor.cfg.bombCount >= 4) ||
-            (g_Supervisor.cfg.colorMode16bit >= 2) || (g_Supervisor.cfg.musicMode >= 3) ||
+            (g_Supervisor.cfg.musicMode >= 3) ||
             (g_Supervisor.cfg.defaultDifficulty >= 5) || (g_Supervisor.cfg.playSounds >= 2) ||
             (g_Supervisor.cfg.windowed >= 2) || (g_Supervisor.cfg.frameskipConfig >= 3) ||
             (g_Supervisor.cfg.version != GAME_VERSION) || (g_LastFileSize != 0x38))
         {
             g_Supervisor.cfg.lifeCount = 2;
             g_Supervisor.cfg.bombCount = 3;
-            g_Supervisor.cfg.colorMode16bit = 0xff;
+            g_Supervisor.cfg.colorMode16bit = 0;
             g_Supervisor.cfg.version = GAME_VERSION;
             g_Supervisor.cfg.padXAxis = 600;
             g_Supervisor.cfg.padYAxis = 600;
@@ -674,6 +675,9 @@ ZunResult Supervisor::LoadConfig(char *path)
             GameErrorContext::Log(&g_GameErrorContext, TH_ERR_CONFIG_CORRUPTED);
         }
         g_ControllerMapping = g_Supervisor.cfg.controllerMapping;
+        // SDL2: normalize legacy 0xFF auto-detect marker to 0 (32-bit)
+        if (g_Supervisor.cfg.colorMode16bit >= 2)
+            g_Supervisor.cfg.colorMode16bit = 0;
         free(data);
     }
     if (((this->cfg.opts >> GCOS_DONT_USE_VERTEX_BUF) & 1) != 0)

@@ -28,6 +28,8 @@ static stbtt_fontinfo s_fontInfo;
 static bool s_fontLoaded = false;
 static bool s_fontInitAttempted = false;
 
+static const char *s_primaryFontPath = NULL;  // track which font was loaded as primary
+
 // Fallback font for glyphs missing from primary (e.g. ♪, ▶)
 static u8 *s_fallbackFontData = NULL;
 static stbtt_fontinfo s_fallbackFontInfo;
@@ -63,6 +65,13 @@ static bool TryLoadFontFile(const char *path)
     s_fontLoaded = true;
     return true;
 }
+
+// =========================================================================
+// Runtime encoding detection: GBK vs Shift-JIS
+// Detected once from the first non-ASCII, non-UTF-8 string; cached globally.
+// =========================================================================
+enum TextEncoding { ENC_UNKNOWN = 0, ENC_GBK = 1, ENC_SJIS = 2 };
+static TextEncoding g_detectedEncoding = ENC_UNKNOWN;
 
 // =========================================================================
 // Cross-platform encoding conversion: GBK / Shift-JIS → UTF-8
@@ -166,8 +175,109 @@ static u16 SjisLookup(u8 lead, u8 trail)
     return g_sjisToUnicode[leadIdx * SJIS_TRAIL_COUNT + (trail - SJIS_TRAIL_MIN)];
 }
 
+static TextEncoding DetectEncoding(const u8 *s, size_t len)
+{
+    // GBK lead bytes: 0x81-0xFE, trail: 0x40-0xFE
+    // SJIS lead bytes: 0x81-0x9F and 0xE0-0xEF, trail: 0x40-0x7E and 0x80-0xFC
+    // SJIS katakana:   0xA1-0xDF (single-byte)
+    //
+    // Key: lead bytes 0xA0-0xDF are GBK double-byte leads but SJIS single-byte
+    // katakana. Lead bytes 0xF0-0xFE are GBK-only (invalid SJIS lead).
+    // Chinese text heavily uses leads 0xB0-0xF7, which fall in GBK-exclusive zones.
+    int gbkScore = 0, sjisScore = 0;
+    const u8 *end = s + len;
+    while (s < end && *s)
+    {
+        u8 b = *s;
+        if (b < 0x80 || b == 0x7F) { s++; continue; }
+
+        if (s + 1 < end)
+        {
+            u8 trail = s[1];
+            bool isGbkLead = (b >= 0x81 && b <= 0xFE);
+            bool isSjisLead = ((b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xEF));
+
+            bool validGbk  = isGbkLead  && GbkLookup(b, trail);
+            bool validSjis = isSjisLead && SjisLookup(b, trail);
+
+            if (validGbk && !validSjis)
+            {
+                // GBK-exclusive double-byte (e.g. lead 0xA0-0xDF or 0xF0-0xFE)
+                gbkScore += 2;
+                s += 2;
+                continue;
+            }
+            if (validSjis && !validGbk)
+            {
+                sjisScore += 2;
+                s += 2;
+                continue;
+            }
+            if (validGbk && validSjis)
+            {
+                // Ambiguous (lead 0x81-0x9F or 0xE0-0xEF, valid in both)
+                s += 2;
+                continue;
+            }
+        }
+
+        // Single high byte: could be SJIS half-width katakana
+        if (b >= SJIS_KANA_MIN && b <= SJIS_KANA_MAX)
+            sjisScore++;
+        s++;
+    }
+    if (gbkScore > sjisScore) return ENC_GBK;
+    if (sjisScore > gbkScore) return ENC_SJIS;
+    return ENC_SJIS;
+}
+
 static char *ConvertToUtf8(const char *str, size_t byteLen)
 {
+    // Check if the input is already valid UTF-8.
+    // On Linux the i18n strings are generated as UTF-8 at build time,
+    // so we must not re-interpret them as Shift-JIS / GBK.
+    {
+        const u8 *s = (const u8 *)str;
+        const u8 *end = s + byteLen;
+        bool validUtf8 = true;
+        bool hasMultibyte = false;
+        while (s < end && *s)
+        {
+            u8 b = *s;
+            if (b < 0x80) { s++; continue; }
+            if (b == 0x7F || b == 0x01) { s++; continue; } // game-special markers
+            int need;
+            if      ((b & 0xE0) == 0xC0) need = 1;
+            else if ((b & 0xF0) == 0xE0) need = 2;
+            else if ((b & 0xF8) == 0xF0) need = 3;
+            else { validUtf8 = false; break; }
+            hasMultibyte = true;
+            s++;
+            for (int i = 0; i < need; i++)
+            {
+                if (s >= end || (*s & 0xC0) != 0x80) { validUtf8 = false; break; }
+                s++;
+            }
+            if (!validUtf8) break;
+        }
+        if (validUtf8 && hasMultibyte)
+        {
+            // Already UTF-8 — just handle the 0x7F arrow substitution
+            char *out = (char *)malloc(byteLen * 3 + 1);
+            if (!out) return NULL;
+            char *p = out;
+            s = (const u8 *)str;
+            while (s < end && *s)
+            {
+                if (*s == 0x7F) { p += EncodeUtf8(0x25B6, p); s++; }
+                else if (*s == 0x01) { p += EncodeUtf8(0x266A, p); s++; } // ♪
+                else { *p++ = (char)*s++; }
+            }
+            *p = '\0';
+            return out;
+        }
+    }
+
     // Worst case: each input byte → 3 UTF-8 bytes
     char *out = (char *)malloc(byteLen * 3 + 1);
     if (!out) return NULL;
@@ -186,6 +296,13 @@ static char *ConvertToUtf8(const char *str, size_t byteLen)
             s++;
             continue;
         }
+        // 0x01 = music note marker → render as ♪ (U+266A)
+        if (b == 0x01)
+        {
+            p += EncodeUtf8(0x266A, p);
+            s++;
+            continue;
+        }
 
         // ASCII pass-through
         if (b < 0x80)
@@ -195,38 +312,49 @@ static char *ConvertToUtf8(const char *str, size_t byteLen)
             continue;
         }
 
-#if defined(TH_CHARSET_GBK)
-        // GB18030 4-byte sequence: byte1 0x81-0xFE, byte2 0x30-0x39, byte3 0x81-0xFE, byte4 0x30-0x39
-        if (s + 3 < end && b >= 0x81 && b <= 0xFE &&
-            s[1] >= 0x30 && s[1] <= 0x39 &&
-            s[2] >= 0x81 && s[2] <= 0xFE &&
-            s[3] >= 0x30 && s[3] <= 0x39)
+        // Auto-detect encoding on first non-ASCII string
+        if (g_detectedEncoding == ENC_UNKNOWN)
         {
-            u32 cp = Gb18030FourByteLookup(b, s[1], s[2], s[3]);
-            if (cp) { p += EncodeUtf8(cp, p); s += 4; continue; }
-            s += 4;
-            continue;
+            g_detectedEncoding = DetectEncoding(s, (size_t)(end - s));
+            SDL_Log("TextHelper: auto-detected text encoding: %s",
+                    g_detectedEncoding == ENC_GBK ? "GBK" : "Shift-JIS");
         }
-        // GBK double-byte
-        if (s + 1 < end)
+
+        if (g_detectedEncoding == ENC_GBK)
         {
-            u16 cp = GbkLookup(b, s[1]);
-            if (cp) { p += EncodeUtf8(cp, p); s += 2; continue; }
+            // GB18030 4-byte sequence
+            if (s + 3 < end && b >= 0x81 && b <= 0xFE &&
+                s[1] >= 0x30 && s[1] <= 0x39 &&
+                s[2] >= 0x81 && s[2] <= 0xFE &&
+                s[3] >= 0x30 && s[3] <= 0x39)
+            {
+                u32 cp = Gb18030FourByteLookup(b, s[1], s[2], s[3]);
+                if (cp) { p += EncodeUtf8(cp, p); s += 4; continue; }
+                s += 4;
+                continue;
+            }
+            // GBK double-byte
+            if (s + 1 < end)
+            {
+                u16 cp = GbkLookup(b, s[1]);
+                if (cp) { p += EncodeUtf8(cp, p); s += 2; continue; }
+            }
         }
-#else
-        // Shift-JIS: half-width katakana single-byte (0xA1-0xDF)
-        if (b >= SJIS_KANA_MIN && b <= SJIS_KANA_MAX)
+        else
         {
-            u16 cp = g_sjisKanaToUnicode[b - SJIS_KANA_MIN];
-            if (cp) { p += EncodeUtf8(cp, p); s++; continue; }
+            // Shift-JIS: half-width katakana single-byte (0xA1-0xDF)
+            if (b >= SJIS_KANA_MIN && b <= SJIS_KANA_MAX)
+            {
+                u16 cp = g_sjisKanaToUnicode[b - SJIS_KANA_MIN];
+                if (cp) { p += EncodeUtf8(cp, p); s++; continue; }
+            }
+            // Shift-JIS double-byte
+            if (s + 1 < end)
+            {
+                u16 cp = SjisLookup(b, s[1]);
+                if (cp) { p += EncodeUtf8(cp, p); s += 2; continue; }
+            }
         }
-        // Shift-JIS double-byte
-        if (s + 1 < end)
-        {
-            u16 cp = SjisLookup(b, s[1]);
-            if (cp) { p += EncodeUtf8(cp, p); s += 2; continue; }
-        }
-#endif
         // Unmapped byte: skip
         s++;
     }
@@ -240,28 +368,18 @@ static void EnsureFontLoaded()
     s_fontInitAttempted = true;
 
     // Try system font paths in order of preference.
-    // Font order depends on the build's text encoding:
-    // GBK builds need Chinese fonts first, Shift-JIS builds need Japanese fonts first.
+    // Use fonts with broad CJK coverage (Chinese + Japanese + Korean)
+    // first so a single binary works with both GBK and Shift-JIS data.
     static const char *fontPaths[] = {
 #ifdef _WIN32
-#if defined(TH_CHARSET_GBK)
-        // Fullwidth CJK fonts first - consistent character widths matching original game
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/simsun.ttc",
+        // msyh covers both Chinese and Japanese; best single-font choice
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/msyhbd.ttc",
-        "C:/Windows/Fonts/simkai.ttf",
-        "C:/Windows/Fonts/msgothic.ttc",
-        "C:/Windows/Fonts/YuGothR.ttc",
-#else
-        // Japanese fonts first for Shift-JIS builds
+        "C:/Windows/Fonts/simsun.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/msgothic.ttc",
         "C:/Windows/Fonts/YuGothR.ttc",
         "C:/Windows/Fonts/meiryo.ttc",
-        "C:/Windows/Fonts/msmincho.ttc",
-        "C:/Windows/Fonts/simsun.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
-#endif
         "C:/Windows/Fonts/arial.ttf",
 #elif defined(__APPLE__)
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -283,6 +401,7 @@ static void EnsureFontLoaded()
     {
         if (TryLoadFontFile(fontPaths[i]))
         {
+            s_primaryFontPath = fontPaths[i];
             SDL_Log("TextHelper: loaded font from %s", fontPaths[i]);
             break;
         }
@@ -313,6 +432,9 @@ static void EnsureFontLoaded()
     };
     for (int i = 0; fallbackPaths[i]; i++)
     {
+        // Skip the font already loaded as primary
+        if (s_primaryFontPath && strcmp(fallbackPaths[i], s_primaryFontPath) == 0)
+            continue;
         if (TryLoadFontInto(fallbackPaths[i], &s_fallbackFontInfo, &s_fallbackFontData))
         {
             s_fallbackFontLoaded = true;
@@ -840,7 +962,7 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
         }
     }
 
-    g_Renderer.UpdateTextureSubImage(outTexture, destRect.left, destRect.top, dstW, dstH, dstRGBA);
+    g_Renderer->UpdateTextureSubImage(outTexture, destRect.left, destRect.top, dstW, dstH, dstRGBA);
     free(dstRGBA);
     free(srcRGBA);
     return;

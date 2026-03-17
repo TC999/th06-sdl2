@@ -23,3 +23,5 @@ unique_errors.txt
 # SDL2 build output
 build_sdl2/
 build_linux/
+
+build_linux_gles/

@@ -1115,7 +1115,7 @@ ChainCallbackResult BulletManager::OnDraw(BulletManager *mgr)
     Bullet *curBullet1;
     Bullet *curBullet2;
 
-    g_Renderer.SetDepthFunc(1);
+    g_Renderer->SetDepthFunc(1);
 
     for (curLaser = &mgr->lasers[0], idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->lasers); idx++, curLaser++)
     {
@@ -1271,7 +1271,7 @@ ChainCallbackResult BulletManager::OnDraw(BulletManager *mgr)
         }
     }
 
-    g_Renderer.SetDepthFunc(0);
+    g_Renderer->SetDepthFunc(0);
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

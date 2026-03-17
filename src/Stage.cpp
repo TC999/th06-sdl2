@@ -99,7 +99,7 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
                 stage->skyFog.farPlane = ((f32 *)curInsn->args)[2];
                 if (stage->skyFogInterpDuration == 0)
                 {
-                    g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane,
+                    g_Renderer->SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane,
                                       stage->skyFog.farPlane);
                 }
                 stage->instructionIndex++;
@@ -194,7 +194,7 @@ ChainCallbackResult Stage::OnUpdate(Stage *stage)
             stage->skyFog.farPlane =
                 (stage->skyFogInterpFinal.farPlane - stage->skyFogInterpInitial.farPlane) * skyFogInterpRatio +
                 stage->skyFogInterpInitial.farPlane;
-            g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
+            g_Renderer->SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
             if ((ZunBool)(stage->skyFogInterpTimer.current >= stage->skyFogInterpDuration))
             {
                 stage->skyFogInterpDuration = 0;
@@ -224,7 +224,7 @@ ChainCallbackResult Stage::OnDrawHighPrio(Stage *stage)
     {
         stage->skyFogNeedsSetup = 0;
     }
-    g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
+    g_Renderer->SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
     if (stage->spellcardState <= RUNNING)
     {
         if (!g_Gui.IsStageFinished())
@@ -270,10 +270,10 @@ ChainCallbackResult Stage::OnDrawLowPrio(Stage *stage)
     g_Supervisor.viewport.MinZ = 0.0;
     g_Supervisor.viewport.MaxZ = 0.5;
     GameManager::SetupCameraStageBackground(0);
-    g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
+    g_Renderer->SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
                            g_Supervisor.viewport.Width, g_Supervisor.viewport.Height,
                            g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
-    g_Renderer.SetFog(1, stage->skyFog.color, 1000.0f, 2000.0f);
+    g_Renderer->SetFog(1, stage->skyFog.color, 1000.0f, 2000.0f);
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -319,7 +319,7 @@ ZunResult Stage::AddedCallback(Stage *stage)
     facingDirTimer->InitializeForPopup();
     stage->unpauseFlag = 0;
 
-    g_Renderer.SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
+    g_Renderer->SetFog(1, stage->skyFog.color, stage->skyFog.nearPlane, stage->skyFog.farPlane);
     return ZUN_SUCCESS;
 }
 

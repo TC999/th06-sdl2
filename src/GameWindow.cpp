@@ -1,6 +1,7 @@
 #include "GameWindow.hpp"
 #include "AnmManager.hpp"
 #include "GameErrorContext.hpp"
+#include "RendererGLES.hpp"
 #include "ScreenEffect.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
@@ -10,6 +11,7 @@
 #include "sdl2_renderer.hpp"
 #include "thprac_gui_integration.h"
 #include <cmath>
+#include <cstdio>
 
 namespace th06
 {
@@ -22,6 +24,75 @@ DIFFABLE_STATIC(f64, g_LastFrameTime)
 static double GetFrameTime() {
     float speed = THPrac::THPracGetSpeedMultiplier();
     return (speed > 0.01f) ? (FRAME_TIME / speed) : FRAME_TIME;
+}
+
+static bool g_PendingWindowModeChange = false;
+static bool g_PendingWindowModeWindowed = false;
+static bool g_PendingRestart = false;
+
+static void ApplyPendingWindowMode()
+{
+    if (!g_PendingWindowModeChange)
+        return;
+    g_PendingWindowModeChange = false;
+    bool windowed = g_PendingWindowModeWindowed;
+
+    SDL_Window *win = g_GameWindow.sdlWindow;
+
+    if (windowed)
+    {
+        SDL_SetWindowBordered(win, SDL_TRUE);
+        SDL_SetWindowSize(win, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
+        SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        g_GameWindow.screenWidth = 0;
+        g_GameWindow.screenHeight = 0;
+        SDL_ShowCursor(SDL_ENABLE);
+    }
+    else
+    {
+        SDL_DisplayMode dm;
+        SDL_GetDesktopDisplayMode(0, &dm);
+        SDL_SetWindowBordered(win, SDL_FALSE);
+        SDL_SetWindowPosition(win, 0, 0);
+        SDL_SetWindowSize(win, dm.w + 1, dm.h);
+        g_GameWindow.screenWidth = dm.w;
+        g_GameWindow.screenHeight = dm.h;
+        SDL_ShowCursor(SDL_DISABLE);
+    }
+
+    SDL_PumpEvents();
+    SDL_GL_SetSwapInterval(windowed ? 1 : 0);
+
+    // Set real screen dimensions directly — don't rely on SDL_GL_GetDrawableSize
+    // which may not be up to date yet on Windows after an async resize.
+    if (windowed)
+    {
+        g_Renderer->realScreenWidth = GAME_WINDOW_WIDTH;
+        g_Renderer->realScreenHeight = GAME_WINDOW_HEIGHT;
+    }
+    else
+    {
+        // Use the known display resolution (match the borderless window we just created)
+        SDL_DisplayMode dm;
+        SDL_GetDesktopDisplayMode(0, &dm);
+        g_Renderer->realScreenWidth = dm.w + 1;
+        g_Renderer->realScreenHeight = dm.h;
+    }
+
+    // Lightweight resize: only recreate FBO and update screen dimensions.
+    g_Renderer->ResizeTarget();
+
+    // Reset AnmManager caches so next draw call re-applies all state
+    if (g_AnmManager != NULL)
+    {
+        g_AnmManager->currentBlendMode = 0xff;
+        g_AnmManager->currentColorOp = 0xff;
+        g_AnmManager->currentVertexShader = 0xff;
+        g_AnmManager->currentTexture = 0;
+    }
+    g_Stage.skyFogNeedsSetup = 1;
+
+    UpdateWindowTitle();
 }
 
 #pragma var_order(res, viewport, slowdown, local_34, delta, curtime)
@@ -39,6 +110,14 @@ RenderResult GameWindow::Render()
         return RENDER_RESULT_KEEP_RUNNING;
     }
 
+    if (g_PendingRestart)
+    {
+        g_PendingRestart = false;
+        return RENDER_RESULT_RESTART;
+    }
+
+    ApplyPendingWindowMode();
+
     if (this->curFrame == 0)
     {
     LOOP_USING_GOTO_BECAUSE_WHY_NOT:
@@ -52,23 +131,23 @@ RenderResult GameWindow::Render()
                 viewport.Height = 480;
                 viewport.MinZ = 0.0;
                 viewport.MaxZ = 1.0;
-                g_Renderer.SetViewport(viewport.X, viewport.Y, viewport.Width, viewport.Height, viewport.MinZ, viewport.MaxZ);
-                g_Renderer.Clear(g_Stage.skyFog.color, 1, 1);
-                g_Renderer.SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
+                g_Renderer->SetViewport(viewport.X, viewport.Y, viewport.Width, viewport.Height, viewport.MinZ, viewport.MaxZ);
+                g_Renderer->Clear(g_Stage.skyFog.color, 1, 1);
+                g_Renderer->SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
                                        g_Supervisor.viewport.Width, g_Supervisor.viewport.Height,
                                        g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
             }
-            g_Renderer.BeginScene();
+            g_Renderer->BeginScene();
             g_Chain.RunDrawChain();
-            g_Renderer.EndScene();
-            g_Renderer.SetTexture(0);
+            g_Renderer->EndScene();
+            g_Renderer->SetTexture(0);
         }
 
         g_Supervisor.viewport.X = 0;
         g_Supervisor.viewport.Y = 0;
         g_Supervisor.viewport.Width = 640;
         g_Supervisor.viewport.Height = 480;
-        g_Renderer.SetViewport(0, 0, 640, 480);
+        g_Renderer->SetViewport(0, 0, 640, 480);
         res = g_Chain.RunCalcChain();
         THPrac::THPracGuiUpdate();
         g_SoundPlayer.PlaySounds();
@@ -163,7 +242,7 @@ void GameWindow::Present()
 {
     i32 unused;
 
-    g_Renderer.EndFrame();
+    g_Renderer->EndFrame();
 
     if (g_GameWindow.screenWidth != 0)
     {
@@ -188,7 +267,7 @@ void GameWindow::Present()
     }
 
     // Begin next frame (binds FBO)
-    g_Renderer.BeginFrame();
+    g_Renderer->BeginFrame();
     return;
 }
 
@@ -217,6 +296,21 @@ void GameWindow::CreateGameWindow(void *unused)
     SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+#if defined(TH06_USE_GLES)
+#ifdef __ANDROID__
+    // On Android, request a real GLES 2.0 context.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#else
+    // On desktop (Windows/Linux), request a GL 2.0+ compatibility context
+    // so we can use the same shader code (attribute/varying/texture2D).
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
+#endif
 
     if (g_Supervisor.cfg.windowed == 0)
     {
@@ -307,7 +401,10 @@ i32 GameWindow::InitD3dRendering(void)
 
     SDL_GL_SetSwapInterval(g_Supervisor.cfg.windowed ? 1 : 0);
 
-    g_Renderer.Init(g_GameWindow.sdlWindow, glCtx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
+    // Select renderer based on persisted config (unk[0]: 0=GLES, 1=GL)
+    g_Renderer = (g_Supervisor.cfg.unk[0] == 1) ? GetRendererGL() : GetRendererGLES();
+    g_Renderer->Init(g_GameWindow.sdlWindow, glCtx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
+    UpdateWindowTitle();
 
     THPrac::THPracGuiInit(g_GameWindow.sdlWindow, glCtx);
 
@@ -332,8 +429,8 @@ i32 GameWindow::InitD3dRendering(void)
     D3DXMatrixLookAtLH(&g_Supervisor.viewMatrix, &eye, &at, &up);
     D3DXMatrixPerspectiveFovLH(&g_Supervisor.projectionMatrix, field_of_view_y, aspect_ratio, 100.0, 10000.0);
 
-    g_Renderer.viewMatrix = g_Supervisor.viewMatrix;
-    g_Renderer.projectionMatrix = g_Supervisor.projectionMatrix;
+    g_Renderer->viewMatrix = g_Supervisor.viewMatrix;
+    g_Renderer->projectionMatrix = g_Supervisor.projectionMatrix;
 
     g_Supervisor.viewport.X = 0;
     g_Supervisor.viewport.Y = 0;
@@ -353,62 +450,7 @@ i32 GameWindow::InitD3dRendering(void)
 #pragma var_order(fogVal, fogDensity, anm1, anm2, anm3, anm4)
 void GameWindow::InitD3dDevice(void)
 {
-    if (((g_Supervisor.cfg.opts >> GCOS_TURN_OFF_DEPTH_TEST) & 1) == 0)
-    {
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LEQUAL);
-    }
-    else
-    {
-        glDisable(GL_DEPTH_TEST);
-        glDepthFunc(GL_ALWAYS);
-    }
-
-    glDisable(GL_LIGHTING);
-    glDisable(GL_CULL_FACE);
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    if (((g_Supervisor.cfg.opts >> GCOS_SUPPRESS_USE_OF_GOROUD_SHADING) & 1) == 0)
-    {
-        glShadeModel(GL_SMOOTH);
-    }
-    else
-    {
-        glShadeModel(GL_FLAT);
-    }
-
-    glEnable(GL_ALPHA_TEST);
-    glAlphaFunc(GL_GEQUAL, 4.0f / 255.0f);
-
-    if (((g_Supervisor.cfg.opts >> GCOS_DONT_USE_FOG) & 1) == 0)
-    {
-        glEnable(GL_FOG);
-        g_Renderer.fogEnabled = 1;
-    }
-    else
-    {
-        glDisable(GL_FOG);
-        g_Renderer.fogEnabled = 0;
-    }
-    glFogi(GL_FOG_MODE, GL_LINEAR);
-    f32 fogColor[4] = {0.627f, 0.627f, 0.627f, 1.0f};
-    glFogfv(GL_FOG_COLOR, fogColor);
-    glFogf(GL_FOG_START, 1000.0f);
-    glFogf(GL_FOG_END, 5000.0f);
-    glFogf(GL_FOG_DENSITY, 1.0f);
-
-    g_Renderer.fogColor = 0xffa0a0a0;
-    g_Renderer.fogStart = 1000.0f;
-    g_Renderer.fogEnd = 5000.0f;
-
-    glEnable(GL_TEXTURE_2D);
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    g_Renderer->InitDevice(g_Supervisor.cfg.opts);
 
     if (g_AnmManager != NULL)
     {
@@ -421,4 +463,66 @@ void GameWindow::InitD3dDevice(void)
 
     return;
 }
+
+bool IsUsingGLES()
+{
+    return g_Renderer == GetRendererGLES();
+}
+
+void UpdateWindowTitle()
+{
+    const char *glVer = (const char *)glGetString(GL_VERSION);
+    const char *glRen = (const char *)glGetString(GL_RENDERER);
+    const char *backendName = IsUsingGLES() ? "GLES (Shader)" : "GL (Fixed-Function)";
+    char title[256];
+    snprintf(title, sizeof(title), "Touhou 06 [%s | %s | %s]",
+             backendName,
+             glVer ? glVer : "?",
+             glRen ? glRen : "?");
+    SDL_SetWindowTitle(g_GameWindow.sdlWindow, title);
+}
+
+void SwitchRenderer(bool useGLES)
+{
+    IRenderer *newRenderer = useGLES ? GetRendererGLES() : GetRendererGL();
+    if (newRenderer == g_Renderer)
+        return;
+
+    SDL_Window *win = g_GameWindow.sdlWindow;
+    SDL_GLContext ctx = g_Renderer->glContext;
+
+    g_Renderer = newRenderer;
+    g_Renderer->Init(win, ctx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
+    g_Renderer->InitDevice(g_Supervisor.cfg.opts);
+
+    // Re-apply transforms
+    g_Renderer->viewMatrix = g_Supervisor.viewMatrix;
+    g_Renderer->projectionMatrix = g_Supervisor.projectionMatrix;
+    g_Renderer->SetViewTransform(&g_Supervisor.viewMatrix);
+    g_Renderer->SetProjectionTransform(&g_Supervisor.projectionMatrix);
+
+    // Reset AnmManager caches so next draw call re-applies all state
+    if (g_AnmManager != NULL)
+    {
+        g_AnmManager->currentBlendMode = 0xff;
+        g_AnmManager->currentColorOp = 0xff;
+        g_AnmManager->currentVertexShader = 0xff;
+        g_AnmManager->currentTexture = 0;
+    }
+    g_Stage.skyFogNeedsSetup = 1;
+
+    UpdateWindowTitle();
+}
+
+void SetWindowMode(bool windowed)
+{
+    g_PendingWindowModeChange = true;
+    g_PendingWindowModeWindowed = windowed;
+}
+
+void RequestRestart()
+{
+    g_PendingRestart = true;
+}
+
 }; // namespace th06
