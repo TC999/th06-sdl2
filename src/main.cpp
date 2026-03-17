@@ -8,6 +8,7 @@
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GameWindow.hpp"
+#include "IRenderer.hpp"
 #include "MidiOutput.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
@@ -15,6 +16,7 @@
 #include "TextHelper.hpp"
 #include "ZunResult.hpp"
 #include "i18n.hpp"
+#include "thprac_gui_integration.h"
 #include "utils.hpp"
 
 using namespace th06;
@@ -84,6 +86,16 @@ stop:
 
     delete g_AnmManager;
     g_AnmManager = NULL;
+
+    // Clean up GL resources while the context is still valid.
+    THPrac::THPracGuiShutdown();
+    {
+        SDL_GLContext ctx = g_Renderer ? g_Renderer->glContext : nullptr;
+        if (g_Renderer)
+            g_Renderer->Release();
+        if (ctx)
+            SDL_GL_DeleteContext(ctx);
+    }
 
     SDL_DestroyWindow(g_GameWindow.sdlWindow);
     g_GameWindow.sdlWindow = NULL;

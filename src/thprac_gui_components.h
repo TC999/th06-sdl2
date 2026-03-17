@@ -111,6 +111,7 @@ namespace Gui {
         bool mPosFlag = true;
         bool mFocus = false;
         Viewport* mViewport = nullptr;
+        int mGuiGeneration = -1;
 
     private:
         locale_t mLocale;

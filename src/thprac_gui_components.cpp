@@ -8,6 +8,8 @@
 
 namespace THPrac
 {
+    extern int GameGuiGeneration;
+
     int rotation_start_index;
     int scale_start_index;
     void ImRotateStart()
@@ -70,6 +72,15 @@ namespace THPrac
             {
                 OnPreUpdate();
 
+                // Detect ImGui context recreation (e.g. after game restart)
+                // and re-apply stored size/pos/locale to the new context.
+                if (mGuiGeneration != GameGuiGeneration) {
+                    mGuiGeneration = GameGuiGeneration;
+                    mSizeFlag = true;
+                    mPosFlag = true;
+                    mLocale = (locale_t)-1;
+                }
+
                 if (mLocale != LocaleGet()) {
                     mLocale = LocaleGet();
                     OnLocaleChange();
@@ -106,11 +117,10 @@ namespace THPrac
                         styleCount++;
                     }
                     if (mSizeFlag) {
-                        ImGui::SetNextWindowSize(mSize, ImGuiCond_Always); // ImGuiCond_FirstUseEver
+                        ImGui::SetNextWindowSize(mSize, ImGuiCond_Always);
                         mSizeFlag = false;
                     }
                     if (mPosFlag) {
-
                         ImGui::SetNextWindowPos(mPos, ImGuiCond_Always);
                         mPosFlag = false;
                     }

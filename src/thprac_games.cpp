@@ -3,8 +3,13 @@
 #include "thprac_games.h"
 #include <cstring>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_sdl.h>
+#if defined(TH06_USE_GLES)
+#include <imgui_impl_opengl3.h>
+#else
 #include <imgui_impl_opengl2.h>
+#endif
 #include <SDL.h>
 
 namespace THPrac {
@@ -12,6 +17,7 @@ namespace THPrac {
 // Global state
 AdvancedGameOptions g_adv_igi_options;
 int GameGuiProgress = 0;
+int GameGuiGeneration = 0;
 bool g_forceRenderCursor = false;
 FastRetryOpt g_fast_re_opt;
 
@@ -61,7 +67,11 @@ void GameGuiBegin(game_gui_impl /*impl*/, bool game_nav)
         Gui::GuiNavFocus::GlobalDisable(true);
     }
 
+#if defined(TH06_USE_GLES)
+    ImGui_ImplOpenGL3_NewFrame();
+#else
     ImGui_ImplOpenGL2_NewFrame();
+#endif
     ImGui_ImplSDL2_NewFrame(s_guiWindow);
     // Override display size to game's logical resolution (640x480).
     // ImGui_ImplSDL2_NewFrame sets it to the actual window size, which
@@ -109,8 +119,21 @@ void GameGuiRender(game_gui_impl /*impl*/)
 {
     if (GameGuiProgress != 2)
         return;
+    // Safety: only call ImGui::Render() if EndFrame() was properly called
+    // for this frame. On a fresh/recreated context (FrameCountEnded=-1,
+    // FrameCount=0), Render() would call EndFrame() → End() and crash
+    // dereferencing a NULL CurrentWindow.
+    ImGuiContext* ctx = ImGui::GetCurrentContext();
+    if (!ctx || ctx->FrameCountEnded != ctx->FrameCount) {
+        GameGuiProgress = 0;
+        return;
+    }
     ImGui::Render();
+#if defined(TH06_USE_GLES)
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#else
     ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+#endif
     GameGuiProgress = 0;
 }
 

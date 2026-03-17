@@ -19,6 +19,9 @@ void THPracGuiUpdate();
 // Call in EndFrame after FBO blit, before SDL_GL_SwapWindow (submits draw data to GPU).
 void THPracGuiRender();
 
+// Shut down ImGui backends and destroy context (call before GL context destruction).
+void THPracGuiShutdown();
+
 // Returns true after THPracGuiInit has completed.
 bool THPracGuiIsReady();
 

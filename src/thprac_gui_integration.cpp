@@ -7,13 +7,18 @@
 #include "thprac_games.h"
 #include <imgui.h>
 #include <imgui_impl_sdl.h>
+#if defined(TH06_USE_GLES)
+#include <imgui_impl_opengl3.h>
+#else
 #include <imgui_impl_opengl2.h>
+#endif
 #include <SDL.h>
 #include <cstdio>
 
 namespace THPrac {
 
 extern void TH06Init();
+extern void TH06Reset();
 
 static bool s_initialized = false;
 
@@ -32,7 +37,11 @@ void THPracGuiInit(SDL_Window* window, void* glContext)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     ImGui_ImplSDL2_InitForOpenGL(window, glContext);
+#if defined(TH06_USE_GLES)
+    ImGui_ImplOpenGL3_Init();
+#else
     ImGui_ImplOpenGL2_Init();
+#endif
 
     // Load a CJK-capable font for Chinese/Japanese locale strings.
     // Try system fonts in order; fall back to ImGui's default ASCII font.
@@ -106,6 +115,28 @@ void THPracGuiRender()
 bool THPracGuiIsReady()
 {
     return s_initialized;
+}
+
+void THPracGuiShutdown()
+{
+    if (!s_initialized)
+        return;
+
+    // Reset frame state machine so stale progress doesn't leak across restart
+    GameGuiProgress = 0;
+    // Bump generation so GameGuiWnd instances re-apply size/pos/locale
+    GameGuiGeneration++;
+
+#if defined(TH06_USE_GLES)
+    ImGui_ImplOpenGL3_Shutdown();
+#else
+    ImGui_ImplOpenGL2_Shutdown();
+#endif
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+    SetGuiWindow(nullptr);
+    TH06Reset();
+    s_initialized = false;
 }
 
 } // namespace THPrac

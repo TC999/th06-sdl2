@@ -1,4 +1,4 @@
-﻿#include "thprac_games.h"
+#include "thprac_games.h"
 #include "thprac_games_dx8.h"
 
 // __declspec(noinline) is MSVC-only; map to GCC attribute on other compilers
@@ -31,6 +31,9 @@
 #include "Rng.hpp"
 #include "Stage.hpp"
 #include "sdl2_renderer.hpp"
+#include "IRenderer.hpp"
+#include "Supervisor.hpp"
+#include "FileSystem.hpp"
 
 // extern "C" globals from other TUs (DIFFABLE_STATIC)
 extern "C" { extern i32 g_PlayerShot; }
@@ -84,6 +87,7 @@ typedef unsigned char byte;
 #define VK_LEFT   0x25
 #define VK_RIGHT  0x27
 #define VK_LSHIFT 0xA0
+#define VK_OEM_3  0xC0
 #endif
 
 // timeGetTime and SDL provided by sdl2_compat.hpp via thprac_bridge.h
@@ -1973,6 +1977,304 @@ namespace TH06 {
 
     };
 
+    class THFirstRunWnd : public Gui::GameGuiWnd {
+        SINGLETON(THFirstRunWnd)
+        bool mChecked;
+
+        THFirstRunWnd() noexcept
+        {
+            mChecked = false;
+            SetWndFlag(ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+            SetFade(0.95f, 0.8f);
+            OnLocaleChange();
+        }
+
+    public:
+        __declspec(noinline) static bool StaticUpdate()
+        {
+            auto& wnd = THFirstRunWnd::singleton();
+            if (!wnd.mChecked) {
+                wnd.mChecked = true;
+                // unk[1] == 0 means first-run prompt not yet shown.
+                // LoadConfig writes defaults with unk[1]=0 on first run.
+                if (th06::g_Supervisor.cfg.unk[1] == 0) {
+                    wnd.Open();
+                }
+            }
+            wnd.Update();
+            return wnd.IsOpen();
+        }
+
+    protected:
+        void OnLocaleChange() override
+        {
+            SetTitle(S(TH06_FIRSTRUN_TITLE));
+            SetSizeRel(0.5f, 0.3f);
+            AutoPos(0.5f, 0.5f);
+            SetItemWidthRel(0.0f);
+        }
+
+        void OnContentUpdate() override
+        {
+            ImGui::TextWrapped("%s", S(TH06_FIRSTRUN_MSG));
+            ImGui::Separator();
+
+            float btnW = ImGui::GetContentRegionAvail().x * 0.45f;
+            float spacing = ImGui::GetContentRegionAvail().x - btnW * 2.0f;
+
+            if (ImGui::Button(S(TH06_FIRSTRUN_FULLSCREEN), ImVec2(btnW, 0.f))) {
+                th06::g_Supervisor.cfg.windowed = false;
+                th06::g_Supervisor.cfg.unk[1] = 1; // mark first-run prompt done
+                th06::FileSystem::WriteDataToFile((char*)"th06.cfg", &th06::g_Supervisor.cfg, sizeof(th06::g_Supervisor.cfg));
+                th06::SetWindowMode(false);
+                Close();
+            }
+            ImGui::SameLine(0.0f, spacing);
+            if (ImGui::Button(S(TH06_FIRSTRUN_WINDOWED), ImVec2(btnW, 0.f))) {
+                th06::g_Supervisor.cfg.windowed = true;
+                th06::g_Supervisor.cfg.unk[1] = 1; // mark first-run prompt done
+                th06::FileSystem::WriteDataToFile((char*)"th06.cfg", &th06::g_Supervisor.cfg, sizeof(th06::g_Supervisor.cfg));
+                th06::SetWindowMode(true);
+                Close();
+            }
+        }
+    };
+
+    class THConfigWnd : public Gui::GameGuiWnd {
+        SINGLETON(THConfigWnd)
+
+        // Working copy of config, applied on OK
+        bool mOptNoVertexBuf;
+        bool mOptNoFog;
+        bool mOptForce16BitTex;
+        bool mOptNoGouraud;
+        bool mOptNoColorComp;
+        bool mOptRefRasterizer;
+        bool mOptClearBackbuf;
+        bool mOptMinGraphics;
+        bool mOptNoDepthTest;
+        bool mOptForce60FPS;
+        int  mWindowed;       // 0=fullscreen, 1=windowed
+        int  mFrameskip;      // 0,1,2
+        int  mColorMode;      // 0=32bit, 1=16bit
+        int  mPadXAxis;
+        int  mPadYAxis;
+        int  mBackend;        // 0=GLES (shader), 1=GL (fixed-function)
+        int  mOrigBackend;    // backend value at window open time
+        bool mShowSaveMsg;
+        int  mSaveMsgTimer;
+        bool mShowRestartPopup;
+
+        THConfigWnd() noexcept
+        {
+            SetWndFlag(ImGuiWindowFlags_NoCollapse);
+            SetFade(0.95f, 0.8f);
+            OnLocaleChange();
+            LoadFromGame();
+            mShowSaveMsg = false;
+            mSaveMsgTimer = 0;
+            mShowRestartPopup = false;
+            mOrigBackend = mBackend;
+        }
+
+        void LoadFromGame()
+        {
+            auto& cfg = th06::g_Supervisor.cfg;
+            mOptNoVertexBuf   = (cfg.opts >> th06::GCOS_DONT_USE_VERTEX_BUF) & 1;
+            mOptNoFog         = (cfg.opts >> th06::GCOS_DONT_USE_FOG) & 1;
+            mOptForce16BitTex = (cfg.opts >> th06::GCOS_FORCE_16BIT_COLOR_MODE) & 1;
+            mOptNoGouraud     = (cfg.opts >> th06::GCOS_SUPPRESS_USE_OF_GOROUD_SHADING) & 1;
+            mOptNoColorComp   = (cfg.opts >> th06::GCOS_NO_COLOR_COMP) & 1;
+            mOptRefRasterizer = (cfg.opts >> th06::GCOS_REFERENCE_RASTERIZER_MODE) & 1;
+            mOptClearBackbuf  = (cfg.opts >> th06::GCOS_CLEAR_BACKBUFFER_ON_REFRESH) & 1;
+            mOptMinGraphics   = (cfg.opts >> th06::GCOS_DISPLAY_MINIMUM_GRAPHICS) & 1;
+            mOptNoDepthTest   = (cfg.opts >> th06::GCOS_TURN_OFF_DEPTH_TEST) & 1;
+            mOptForce60FPS    = (cfg.opts >> th06::GCOS_FORCE_60FPS) & 1;
+            mWindowed         = cfg.windowed ? 1 : 0;
+            mFrameskip        = cfg.frameskipConfig;
+            if (mFrameskip > 2) mFrameskip = 0;
+            mColorMode        = (cfg.colorMode16bit == 0xFF || cfg.colorMode16bit == 0) ? 0 : 1;
+            mPadXAxis         = cfg.padXAxis;
+            mPadYAxis         = cfg.padYAxis;
+            mBackend          = (cfg.unk[0] == 1) ? 1 : 0;
+            mOrigBackend      = mBackend;
+        }
+
+        void ApplyToGame()
+        {
+            auto& cfg = th06::g_Supervisor.cfg;
+            auto setBit = [&](int shift, bool val) {
+                if (val) cfg.opts |=  (1u << shift);
+                else     cfg.opts &= ~(1u << shift);
+            };
+            setBit(th06::GCOS_DONT_USE_VERTEX_BUF, mOptNoVertexBuf);
+            setBit(th06::GCOS_DONT_USE_FOG, mOptNoFog);
+            setBit(th06::GCOS_FORCE_16BIT_COLOR_MODE, mOptForce16BitTex);
+            setBit(th06::GCOS_SUPPRESS_USE_OF_GOROUD_SHADING, mOptNoGouraud);
+            setBit(th06::GCOS_NO_COLOR_COMP, mOptNoColorComp);
+            setBit(th06::GCOS_REFERENCE_RASTERIZER_MODE, mOptRefRasterizer);
+            setBit(th06::GCOS_CLEAR_BACKBUFFER_ON_REFRESH, mOptClearBackbuf);
+            setBit(th06::GCOS_DISPLAY_MINIMUM_GRAPHICS, mOptMinGraphics);
+            setBit(th06::GCOS_TURN_OFF_DEPTH_TEST, mOptNoDepthTest);
+            setBit(th06::GCOS_FORCE_60FPS, mOptForce60FPS);
+            cfg.windowed = mWindowed ? 1 : 0;
+            cfg.frameskipConfig = (u8)mFrameskip;
+            cfg.colorMode16bit = mColorMode ? 1 : 0;
+            cfg.padXAxis = (i16)std::clamp(mPadXAxis, 1, 1000);
+            cfg.padYAxis = (i16)std::clamp(mPadYAxis, 1, 1000);
+            cfg.unk[0] = (i8)mBackend;
+            // Save to disk
+            th06::FileSystem::WriteDataToFile((char*)"th06.cfg", &cfg, sizeof(cfg));
+        }
+
+    public:
+        __declspec(noinline) static bool StaticUpdate()
+        {
+            auto& wnd = THConfigWnd::singleton();
+            if (Gui::KeyboardInputGetSingle(VK_OEM_3)) {
+                if (wnd.IsOpen()) {
+                    wnd.Close();
+                } else {
+                    wnd.LoadFromGame();
+                    wnd.mShowSaveMsg = false;
+                    wnd.Open();
+                }
+            }
+            wnd.Update();
+            return wnd.IsOpen();
+        }
+
+    protected:
+        void OnLocaleChange() override
+        {
+            SetTitle(S(TH06_CFG_TITLE));
+            SetSizeRel(0.65f, 0.85f);
+            AutoPos(0.5f, 0.5f);
+        }
+
+        void OnContentUpdate() override
+        {
+            ImGui::TextUnformatted(S(TH06_CFG_TITLE));
+            ImGui::Separator();
+
+            // Scrollable content region (leave space for footer buttons)
+            float footerH = ImGui::GetFrameHeightWithSpacing() * 2.f + 8.f;
+            ImGui::BeginChild("cfgScroll", ImVec2(0, -footerH), false);
+
+            // Checkboxes for opts flags
+            ImGui::Checkbox(S(TH06_CFG_NO_VERTEX_BUF), &mOptNoVertexBuf);
+            ImGui::Checkbox(S(TH06_CFG_NO_FOG), &mOptNoFog);
+            ImGui::Checkbox(S(TH06_CFG_FORCE_16BIT_TEX), &mOptForce16BitTex);
+            ImGui::Checkbox(S(TH06_CFG_NO_GOURAUD), &mOptNoGouraud);
+            ImGui::Checkbox(S(TH06_CFG_NO_COLOR_COMP), &mOptNoColorComp);
+            ImGui::Checkbox(S(TH06_CFG_REF_RASTERIZER), &mOptRefRasterizer);
+            ImGui::Checkbox(S(TH06_CFG_CLEAR_BACKBUF), &mOptClearBackbuf);
+            ImGui::Checkbox(S(TH06_CFG_MIN_GRAPHICS), &mOptMinGraphics);
+            ImGui::Checkbox(S(TH06_CFG_NO_DEPTH_TEST), &mOptNoDepthTest);
+            ImGui::Checkbox(S(TH06_CFG_FORCE_60FPS), &mOptForce60FPS);
+
+            ImGui::Separator();
+
+            // Window style
+            ImGui::TextUnformatted(S(TH06_CFG_WINDOW_STYLE));
+            ImGui::SameLine();
+            int prevWindowed = mWindowed;
+            ImGui::RadioButton(S(TH06_CFG_FULLSCREEN), &mWindowed, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_WINDOWED), &mWindowed, 1);
+            if (mWindowed != prevWindowed) {
+                th06::g_Supervisor.cfg.windowed = mWindowed ? 1 : 0;
+                th06::SetWindowMode(mWindowed != 0);
+            }
+
+            // Frame skip
+            ImGui::TextUnformatted(S(TH06_CFG_FRAMESKIP));
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_FRAMESKIP_FULL), &mFrameskip, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_FRAMESKIP_HALF), &mFrameskip, 1);
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_FRAMESKIP_THIRD), &mFrameskip, 2);
+
+            // Color mode
+            ImGui::TextUnformatted(S(TH06_CFG_COLOR_MODE));
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_32BIT), &mColorMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_16BIT), &mColorMode, 1);
+
+            ImGui::Separator();
+
+            // Pad axis
+            ImGui::SetNextItemWidth(120.f);
+            ImGui::InputInt(S(TH06_CFG_PAD_X_SPEED), &mPadXAxis);
+            mPadXAxis = std::clamp(mPadXAxis, 1, 1000);
+            ImGui::SetNextItemWidth(120.f);
+            ImGui::InputInt(S(TH06_CFG_PAD_Y_SPEED), &mPadYAxis);
+            mPadYAxis = std::clamp(mPadYAxis, 1, 1000);
+
+            // Renderer backend
+            ImGui::Separator();
+            ImGui::TextUnformatted(S(TH06_CFG_RENDERER_BACKEND));
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_RENDERER_GLES), &mBackend, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton(S(TH06_CFG_RENDERER_GL), &mBackend, 1);
+
+            ImGui::EndChild(); // end scrollable region
+
+            ImGui::Separator();
+
+            // OK / Cancel
+            if (ImGui::Button(S(TH06_CFG_OK), ImVec2(120.f, 0.f))) {
+                ApplyToGame();
+                mShowSaveMsg = true;
+                mSaveMsgTimer = 180;
+                if (mBackend != mOrigBackend) {
+                    mShowRestartPopup = true;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(S(TH06_CFG_CANCEL), ImVec2(120.f, 0.f))) {
+                Close();
+            }
+
+            // Restart confirmation popup — ID must match between OpenPopup and BeginPopupModal
+            if (mShowRestartPopup) {
+                ImGui::OpenPopup(S(TH06_CFG_RESTART_TITLE));
+            }
+            ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            if (ImGui::BeginPopupModal(S(TH06_CFG_RESTART_TITLE), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextUnformatted(S(TH06_CFG_RESTART_MSG));
+                ImGui::Separator();
+                if (ImGui::Button(S(TH06_CFG_RESTART_YES), ImVec2(140.f, 0.f))) {
+                    // In-process restart: re-creates window and renderer from current config
+                    mShowRestartPopup = false;
+                    ImGui::CloseCurrentPopup();
+                    Close();
+                    th06::RequestRestart();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(S(TH06_CFG_RESTART_NO), ImVec2(140.f, 0.f))) {
+                    mShowRestartPopup = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            // Save confirmation
+            if (mShowSaveMsg && mSaveMsgTimer > 0) {
+                mSaveMsgTimer--;
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "%s", S(TH06_CFG_SAVE_SUCCESS));
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.4f, 1.0f), "%s", S(TH06_CFG_NEED_RESTART));
+            }
+            if (mSaveMsgTimer <= 0) {
+                mShowSaveMsg = false;
+            }
+        }
+    };
+
     // ECL Patch Helper
 
     void ECLJump(ECLHelper& ecl,int32_t time,int32_t pos, int32_t time_jmp,int32_t target)
@@ -3579,7 +3881,7 @@ namespace TH06 {
     })
     PATCH_DY(th06_disable_menu, 0x439ab2, "9090909090")
     EHOOK_DY(th06_update, 0x41caac, 1, {
-        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen());
+        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen() && !THConfigWnd::singleton().IsOpen() && !THFirstRunWnd::singleton().IsOpen());
         
         // Gui components update
         Gui::KeyboardInputUpdate(VK_ESCAPE);
@@ -3613,7 +3915,7 @@ namespace TH06 {
             }
         }
         
-        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen());
+        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() || THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen());
     })
     EHOOK_DY(th06_render, 0x41cb6d, 1, {
         GameGuiRender(IMPL_WIN32_DX8);
@@ -3872,11 +4174,12 @@ namespace TH06 {
         })
     HOOKSET_ENDDEF()
 
+    static bool s_guiCreated = false;
+
      __declspec(noinline) void THGuiCreate()
      {
-         static bool s_created = false;
-         if (s_created) return;
-         s_created = true;
+         if (s_guiCreated) return;
+         s_guiCreated = true;
 
         // GameGuiInit is a no-op — ImGui context initialized by THPracGuiInit
         GameGuiInit(IMPL_WIN32_DX8, 0, 0, // SDL2: device/window addresses unused
@@ -3899,6 +4202,7 @@ namespace TH06 {
         THOverlay::singleton();
         TH06InGameInfo::singleton();
         TH06Save::singleton();
+        THConfigWnd::singleton();
         // Hooks
         EnableAllHooks(THMainHook);
         EnableAllHooks(THInGameInfo);
@@ -3932,7 +4236,7 @@ namespace TH06 {
         if (!ImGui::GetCurrentContext())
             return;
 
-        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen());
+        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen() && !THConfigWnd::singleton().IsOpen() && !THFirstRunWnd::singleton().IsOpen());
 
         // Gui components update
         Gui::KeyboardInputUpdate(VK_ESCAPE);
@@ -3967,7 +4271,7 @@ namespace TH06 {
             }
         }
 
-        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen());
+        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() || THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen());
     }
 
     void THPracRender()
@@ -4189,7 +4493,7 @@ namespace TH06 {
             stg.skyFog = stg.skyFogInterpFinal;
             stg.skyFogInterpDuration = 0;
         }
-        th06::g_Renderer.SetFog(1, stg.skyFog.color, stg.skyFog.nearPlane, stg.skyFog.farPlane);
+        th06::g_Renderer->SetFog(1, stg.skyFog.color, stg.skyFog.nearPlane, stg.skyFog.farPlane);
     }
 
     // Called AFTER EnemyManager::RegisterChain + EclManager::Load.
@@ -4269,6 +4573,11 @@ float THPracGetSpeedMultiplier() { return TH06::g_speed_multiplier; }
 void TH06Init()
 {
     TH06::THGuiCreate();
+}
+
+void TH06Reset()
+{
+    TH06::s_guiCreated = false;
 }
 
 }
