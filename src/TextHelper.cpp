@@ -68,10 +68,9 @@ static bool TryLoadFontFile(const char *path)
 
 // =========================================================================
 // Runtime encoding detection: GBK vs Shift-JIS
-// Detected once from the first non-ASCII, non-UTF-8 string; cached globally.
+// Detected per-string in ConvertToUtf8; never cached globally.
 // =========================================================================
 enum TextEncoding { ENC_UNKNOWN = 0, ENC_GBK = 1, ENC_SJIS = 2 };
-static TextEncoding g_detectedEncoding = ENC_UNKNOWN;
 
 // =========================================================================
 // Cross-platform encoding conversion: GBK / Shift-JIS → UTF-8
@@ -228,99 +227,86 @@ static TextEncoding DetectEncoding(const u8 *s, size_t len)
     }
     if (gbkScore > sjisScore) return ENC_GBK;
     if (sjisScore > gbkScore) return ENC_SJIS;
-    return ENC_SJIS;
+    return ENC_UNKNOWN; // ambiguous — let caller decide
 }
 
 static char *ConvertToUtf8(const char *str, size_t byteLen)
 {
-    // Check if the input is already valid UTF-8.
-    // On Linux the i18n strings are generated as UTF-8 at build time,
-    // so we must not re-interpret them as Shift-JIS / GBK.
+    const u8 *s = (const u8 *)str;
+    const u8 *end = s + byteLen;
+
+    // 1. Check if the input is already valid UTF-8.
+    //    On Linux the i18n strings are generated as UTF-8 at build time,
+    //    so we must not re-interpret them as Shift-JIS / GBK.
     {
-        const u8 *s = (const u8 *)str;
-        const u8 *end = s + byteLen;
+        const u8 *p = s;
         bool validUtf8 = true;
         bool hasMultibyte = false;
-        while (s < end && *s)
+        while (p < end && *p)
         {
-            u8 b = *s;
-            if (b < 0x80) { s++; continue; }
-            if (b == 0x7F || b == 0x01) { s++; continue; } // game-special markers
+            u8 b = *p;
+            if (b < 0x80) { p++; continue; }
+            if (b == 0x7F || b == 0x01) { p++; continue; }
             int need;
-            if      ((b & 0xE0) == 0xC0) need = 1;
-            else if ((b & 0xF0) == 0xE0) need = 2;
-            else if ((b & 0xF8) == 0xF0) need = 3;
+            if      ((b & 0xE0) == 0xC0) { need = 1; }
+            else if ((b & 0xF0) == 0xE0) { need = 2; }
+            else if ((b & 0xF8) == 0xF0) { need = 3; }
             else { validUtf8 = false; break; }
             hasMultibyte = true;
-            s++;
-            for (int i = 0; i < need; i++)
+            p++;
+            if (need == 1 && b <= 0xC1) { validUtf8 = false; break; }
+            if (need >= 1 && (p >= end || (*p & 0xC0) != 0x80)) { validUtf8 = false; break; }
+            if (need == 2 && b == 0xE0 && *p < 0xA0) { validUtf8 = false; break; }
+            if (need == 2 && b == 0xED && *p >= 0xA0) { validUtf8 = false; break; }
+            if (need == 3 && b == 0xF0 && *p < 0x90) { validUtf8 = false; break; }
+            if (need == 3 && b == 0xF4 && *p > 0x8F) { validUtf8 = false; break; }
+            p++;
+            for (int i = 1; i < need; i++)
             {
-                if (s >= end || (*s & 0xC0) != 0x80) { validUtf8 = false; break; }
-                s++;
+                if (p >= end || (*p & 0xC0) != 0x80) { validUtf8 = false; break; }
+                p++;
             }
             if (!validUtf8) break;
         }
         if (validUtf8 && hasMultibyte)
         {
-            // Already UTF-8 — just handle the 0x7F arrow substitution
             char *out = (char *)malloc(byteLen * 3 + 1);
             if (!out) return NULL;
-            char *p = out;
-            s = (const u8 *)str;
-            while (s < end && *s)
+            char *op = out;
+            p = s;
+            while (p < end && *p)
             {
-                if (*s == 0x7F) { p += EncodeUtf8(0x25B6, p); s++; }
-                else if (*s == 0x01) { p += EncodeUtf8(0x266A, p); s++; } // ♪
-                else { *p++ = (char)*s++; }
+                if (*p == 0x7F) { op += EncodeUtf8(0x25B6, op); p++; }
+                else if (*p == 0x01) { op += EncodeUtf8(0x266A, op); p++; }
+                else { *op++ = (char)*p++; }
             }
-            *p = '\0';
+            *op = '\0';
             return out;
         }
     }
 
-    // Worst case: each input byte → 3 UTF-8 bytes
+    // 2. Detect encoding for THIS string (local, not global).
+    //    Previous bug: a global g_detectedEncoding persisted across calls,
+    //    so if any earlier text was detected as GBK, all subsequent
+    //    ambiguous SJIS strings were also decoded as GBK → garbled text.
+    TextEncoding enc = DetectEncoding(s, byteLen);
+    if (enc == ENC_UNKNOWN)
+        enc = ENC_SJIS; // TH06 is a Japanese game; default to Shift-JIS
+
+    // 3. Decode using the per-string encoding
     char *out = (char *)malloc(byteLen * 3 + 1);
     if (!out) return NULL;
     char *p = out;
-    const u8 *s = (const u8 *)str;
-    const u8 *end = s + byteLen;
 
     while (s < end && *s)
     {
         u8 b = *s;
 
-        // 0x7F = TEXT_RIGHT_ARROW in game code → render as ▶ (U+25B6)
-        if (b == 0x7F)
-        {
-            p += EncodeUtf8(0x25B6, p);
-            s++;
-            continue;
-        }
-        // 0x01 = music note marker → render as ♪ (U+266A)
-        if (b == 0x01)
-        {
-            p += EncodeUtf8(0x266A, p);
-            s++;
-            continue;
-        }
+        if (b == 0x7F) { p += EncodeUtf8(0x25B6, p); s++; continue; }
+        if (b == 0x01) { p += EncodeUtf8(0x266A, p); s++; continue; }
+        if (b < 0x80)  { *p++ = (char)b; s++; continue; }
 
-        // ASCII pass-through
-        if (b < 0x80)
-        {
-            *p++ = (char)b;
-            s++;
-            continue;
-        }
-
-        // Auto-detect encoding on first non-ASCII string
-        if (g_detectedEncoding == ENC_UNKNOWN)
-        {
-            g_detectedEncoding = DetectEncoding(s, (size_t)(end - s));
-            SDL_Log("TextHelper: auto-detected text encoding: %s",
-                    g_detectedEncoding == ENC_GBK ? "GBK" : "Shift-JIS");
-        }
-
-        if (g_detectedEncoding == ENC_GBK)
+        if (enc == ENC_GBK)
         {
             // GB18030 4-byte sequence
             if (s + 3 < end && b >= 0x81 && b <= 0xFE &&
@@ -477,12 +463,12 @@ static u32 DecodeUtf8(const char *&p)
 // Render a single glyph into an A8R8G8B8 buffer using stb_truetype
 // =========================================================================
 static void RenderGlyphToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
-                               i32 px, i32 py, float scale,
+                               i32 px, i32 py, float scaleX, float scaleY,
                                int glyphIndex, u32 argbColor,
                                const stbtt_fontinfo *font)
 {
     int x0, y0, x1, y1;
-    stbtt_GetGlyphBitmapBox(font, glyphIndex, scale, scale, &x0, &y0, &x1, &y1);
+    stbtt_GetGlyphBitmapBox(font, glyphIndex, scaleX, scaleY, &x0, &y0, &x1, &y1);
 
     int gw = x1 - x0;
     int gh = y1 - y0;
@@ -490,7 +476,7 @@ static void RenderGlyphToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
 
     u8 *glyphBitmap = (u8 *)calloc(gw * gh, 1);
     if (!glyphBitmap) return;
-    stbtt_MakeGlyphBitmap(font, glyphBitmap, gw, gh, gw, scale, scale, glyphIndex);
+    stbtt_MakeGlyphBitmap(font, glyphBitmap, gw, gh, gw, scaleX, scaleY, glyphIndex);
 
     u8 cr = (argbColor >> 16) & 0xFF;
     u8 cg = (argbColor >> 8) & 0xFF;
@@ -531,21 +517,27 @@ static void RenderGlyphToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
 // Render a string (as UTF-8) onto an A8R8G8B8 pixel buffer at given position
 // =========================================================================
 static void RenderUtf8StringToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
-                                    const char *utf8, float pixelHeight,
+                                    const char *utf8, float pixelHeight, float pixelWidth,
                                     i32 startX, i32 startY, u32 argbColor)
 {
     if (!s_fontLoaded || !utf8 || !*utf8) return;
 
-    float scale = stbtt_ScaleForPixelHeight(&s_fontInfo, pixelHeight);
+    float scaleY = stbtt_ScaleForPixelHeight(&s_fontInfo, pixelHeight);
+    // Use em-based scaling for horizontal advance: this ensures 1em = pixelWidth
+    // pixels, matching GDI's CreateFont(nWidth) behavior. ScaleForPixelHeight maps
+    // ascent-descent (which is larger than 1em) to pixelHeight, making horizontal
+    // advances too narrow for CJK — the root cause of the "大银河" gap issue.
+    float scaleX = stbtt_ScaleForMappingEmToPixels(&s_fontInfo, pixelWidth);
     int ascent, descent, lineGap;
     stbtt_GetFontVMetrics(&s_fontInfo, &ascent, &descent, &lineGap);
-    int baseline = startY + (int)(ascent * scale);
+    int baseline = startY + (int)(ascent * scaleY);
 
-    float fallbackScale = 0;
+    float fallbackScaleY = 0, fallbackScaleX = 0;
     int fallbackAscent = 0;
     if (s_fallbackFontLoaded)
     {
-        fallbackScale = stbtt_ScaleForPixelHeight(&s_fallbackFontInfo, pixelHeight);
+        fallbackScaleY = stbtt_ScaleForPixelHeight(&s_fallbackFontInfo, pixelHeight);
+        fallbackScaleX = stbtt_ScaleForMappingEmToPixels(&s_fallbackFontInfo, pixelWidth);
         int fd, fl;
         stbtt_GetFontVMetrics(&s_fallbackFontInfo, &fallbackAscent, &fd, &fl);
     }
@@ -559,7 +551,8 @@ static void RenderUtf8StringToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
         if (cp == 0 || cp == '\n') break;
 
         const stbtt_fontinfo *useFont = &s_fontInfo;
-        float useScale = scale;
+        float useScaleX = scaleX;
+        float useScaleY = scaleY;
         int glyphIndex = stbtt_FindGlyphIndex(&s_fontInfo, cp);
         if (glyphIndex == 0 && cp != ' ' && s_fallbackFontLoaded)
         {
@@ -568,7 +561,8 @@ static void RenderUtf8StringToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
             {
                 glyphIndex = fbGlyph;
                 useFont = &s_fallbackFontInfo;
-                useScale = fallbackScale;
+                useScaleX = fallbackScaleX;
+                useScaleY = fallbackScaleY;
             }
         }
         if (glyphIndex == 0 && cp != ' ')
@@ -579,19 +573,19 @@ static void RenderUtf8StringToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
         if (prevCp)
         {
             int kern = stbtt_GetCodepointKernAdvance(&s_fontInfo, prevCp, cp);
-            xpos += kern * scale;
+            xpos += kern * scaleX;
         }
 
         int renderBaseline = (useFont == &s_fallbackFontInfo)
-            ? startY + (int)(fallbackAscent * fallbackScale)
+            ? startY + (int)(fallbackAscent * fallbackScaleY)
             : baseline;
 
         RenderGlyphToARGB(dst, dstW, dstH, dstPitch,
-                          (int)xpos, renderBaseline, useScale, glyphIndex, argbColor, useFont);
+                          (int)xpos, renderBaseline, useScaleX, useScaleY, glyphIndex, argbColor, useFont);
 
         int advanceWidth, leftSideBearing;
         stbtt_GetGlyphHMetrics(useFont, glyphIndex, &advanceWidth, &leftSideBearing);
-        xpos += advanceWidth * useScale;
+        xpos += advanceWidth * useScaleX;
         prevCp = cp;
     }
 }
@@ -887,16 +881,21 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
         // Convert multi-byte string (Shift-JIS / GBK / UTF-8) to UTF-8
         char *utf8str = ConvertToUtf8(string, textLen + 1);
 
-        // Render at 2x scale (matching original GDI behavior that used fontHeight*2)
-        float pixelHeight = (float)(fontHeight * 2);
+        // Render at 2x scale with 30% vertical enlargement.
+        // pixelHeight controls vertical size, pixelWidth controls horizontal
+        // advance (via em-based scaling in RenderUtf8StringToARGB).
+        float pixelHeight = (float)(fontHeight * 2) * 1.3f;
+        float pixelWidth  = (float)(fontWidth * 2);
 
-        // ZunColor is ARGB u32 (same as D3DCOLOR)
-        // stb_truetype renders alpha bitmaps; we composite with the requested color.
-        // Shadow: render offset text first (shadow behind main text)
+        // Center text vertically in srcRect when text is taller than srcRect
+        i32 srcRectH = fontHeight * 2 - 2;
+        float offsetY = ((float)srcRectH - pixelHeight) * 0.5f;
+        if (offsetY > 0) offsetY = 0; // only shift up when text overflows
+        i32 textY = (i32)offsetY;
+
         u32 shadowARGB = shadowColor;
         u32 textARGB = textColor;
 
-        // The staging buffer is A8R8G8B8 (g_TextBufferSurface->format)
         u8 *pixels = g_TextBufferSurface->pixels;
         i32 bufW = g_TextBufferSurface->width;
         i32 bufH = g_TextBufferSurface->height;
@@ -905,12 +904,12 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
         if (shadowColor != COLOR_WHITE)
         {
             RenderUtf8StringToARGB(pixels, bufW, bufH, pitch,
-                                   utf8str, pixelHeight,
-                                   xPos * 2 + 3, 2, shadowARGB);
+                                   utf8str, pixelHeight, pixelWidth,
+                                   xPos * 2 + 3, textY + 2, shadowARGB);
         }
         RenderUtf8StringToARGB(pixels, bufW, bufH, pitch,
-                               utf8str, pixelHeight,
-                               xPos * 2, 0, textARGB);
+                               utf8str, pixelHeight, pixelWidth,
+                               xPos * 2, textY, textARGB);
 
         free(utf8str);
     }
@@ -947,16 +946,37 @@ void TextHelper::RenderTextToTexture(i32 xPos, i32 yPos, i32 spriteWidth, i32 sp
     u8 *srcRGBA = (u8 *)calloc(srcW * srcH * 4, 1);
     ConvertSurfaceToRGBA(g_TextBufferSurface, srcRGBA, srcRect.left, srcRect.top, srcW, srcH);
 
+    // Box-filter (area averaging) downscale — averages all source pixels that
+    // contribute to each destination pixel. Preserves thin font strokes that
+    // point sampling would drop, producing smooth anti-aliased text.
     u8 *dstRGBA = (u8 *)calloc(dstW * dstH * 4, 1);
     for (i32 row = 0; row < dstH; row++)
     {
-        i32 sy = row * srcH / dstH;
+        i32 sy0 = row * srcH / dstH;
+        i32 sy1 = (row + 1) * srcH / dstH;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        if (sy1 > srcH) sy1 = srcH;
         for (i32 col = 0; col < dstW; col++)
         {
-            i32 sx = col * srcW / dstW;
-            u8 *sp = srcRGBA + (sy * srcW + sx) * 4;
+            i32 sx0 = col * srcW / dstW;
+            i32 sx1 = (col + 1) * srcW / dstW;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            if (sx1 > srcW) sx1 = srcW;
+            i32 count = (sx1 - sx0) * (sy1 - sy0);
+            i32 sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;
+            for (i32 sy = sy0; sy < sy1; sy++)
+            {
+                for (i32 sx = sx0; sx < sx1; sx++)
+                {
+                    u8 *sp = srcRGBA + (sy * srcW + sx) * 4;
+                    sum0 += sp[0]; sum1 += sp[1]; sum2 += sp[2]; sum3 += sp[3];
+                }
+            }
             u8 *dp = dstRGBA + (row * dstW + col) * 4;
-            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+            dp[0] = (u8)(sum0 / count);
+            dp[1] = (u8)(sum1 / count);
+            dp[2] = (u8)(sum2 / count);
+            dp[3] = (u8)(sum3 / count);
         }
     }
 
