@@ -16,30 +16,36 @@ The original project reconstructs the game source code from the binary to achiev
 
 ### Features
 
-- **SDL2 + OpenGL** rendering backend (replacing Direct3D 8)
+- **SDL2 + OpenGL / OpenGL ES 2.0** rendering backend (replacing Direct3D 8)
+- **OpenGL ES (GLES) renderer** — dedicated `RendererGLES` backend with FBO-based fullscreen scaling
 - **SDL2_mixer** for audio playback (replacing DirectSound)
 - **SDL2_image** for texture loading
+- **Runtime encoding detection** — automatically detects GBK (Chinese) and Shift-JIS (Japanese) game data, no recompilation needed
+- **thprac integration** — built-in practice mode overlay (stage select, practice tools)
 - **CMake** build system
-- Windows x86/x64 support (other platforms planned)
+- **Cross-platform**: Windows (x86/x64), Linux (x86/x64, GLES), Android (WIP)
 
 ### Requirements
 
 - CMake >= 3.20
-- MSVC (Visual Studio 2019+) or compatible C++17 compiler
+- MSVC (Visual Studio 2019+), GCC 13+, or compatible C++17 compiler
 - Python 3 (for `i18n.hpp` generation)
 - Original game data files (`東方紅魔郷.exe` v1.02h)
 
 ### Building
 
 ```bash
-# Configure (Win32)
-cmake -B build_sdl2 -A Win32
+# Windows (Win32, with GLES renderer)
+cmake -B build_sdl2 -A Win32 -DUSE_GLES=ON
+cmake --build build_sdl2 --config Release
 
-# Build
-cmake --build build_sdl2 --config Release --target th06
+# Linux (32-bit GLES)
+PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig \
+cmake -B build_linux_gles -DCMAKE_BUILD_TYPE=Release -DUSE_GLES=ON
+cmake --build build_linux_gles
 ```
 
-SDL2 libraries are bundled in `3rdparty/` and linked automatically.
+SDL2 libraries are bundled in `3rdparty/` for Windows and linked automatically. On Linux, install SDL2/SDL2_image/SDL2_mixer via your package manager.
 
 ### Running
 
@@ -53,18 +59,25 @@ cd <path-to-game-data>
 ### Project Structure
 
 ```
-CMakeLists.txt              # SDL2 build system
+CMakeLists.txt              # SDL2 build system (USE_GLES option)
 3rdparty/
   SDL2/                     # SDL2 development libraries
   SDL2_image/               # SDL2_image development libraries
   SDL2_mixer/               # SDL2_mixer development libraries
-  imgui/                    # Dear ImGui (debug overlay)
+  imgui/                    # Dear ImGui (thprac overlay)
+  Detours/                  # Microsoft Detours (hook library)
+  rapidjson/                # JSON parser
 src/
-  sdl2_renderer.cpp/.hpp    # OpenGL rendering backend
-  sdl2_compat.hpp           # SDL2/D3D8 compatibility layer
+  sdl2_renderer.cpp/.hpp    # Desktop OpenGL rendering backend
+  RendererGLES.cpp/.hpp     # OpenGL ES 2.0 rendering backend
+  IRenderer.hpp             # Abstract renderer interface
+  TextHelper.cpp            # Text rendering (stb_truetype, runtime encoding)
+  GameWindow.cpp            # SDL2 window management & frame timing
+  thprac_*.cpp              # thprac practice mode integration
   *.cpp / *.hpp             # Game source (ported from D3D8)
-scripts/                    # Original build & tooling scripts
+scripts/                    # Build & i18n generation scripts
 config/                     # Decompilation mapping data
+android/                    # Android build (Gradle + NDK, WIP)
 ```
 
 ### Credits
@@ -87,30 +100,36 @@ config/                     # Decompilation mapping data
 
 ### 特性
 
-- **SDL2 + OpenGL** 渲染后端（替代 Direct3D 8）
+- **SDL2 + OpenGL / OpenGL ES 2.0** 渲染后端（替代 Direct3D 8）
+- **OpenGL ES (GLES) 渲染器** — 独立的 `RendererGLES` 后端，支持 FBO 全屏缩放
 - **SDL2_mixer** 音频播放（替代 DirectSound）
 - **SDL2_image** 纹理加载
+- **运行时编码自动检测** — 自动识别 GBK（中文版）和 Shift-JIS（日文版）游戏数据，无需重新编译
+- **thprac 集成** — 内置练习模式覆盖层（关卡选择、练习工具）
 - **CMake** 构建系统
-- 已支持 Windows x86/x64（其他平台计划中）
+- **跨平台**：Windows (x86/x64)、Linux (x86/x64, GLES)、Android（开发中）
 
 ### 环境要求
 
 - CMake >= 3.20
-- MSVC（Visual Studio 2019+）或兼容的 C++17 编译器
+- MSVC（Visual Studio 2019+）、GCC 13+ 或兼容的 C++17 编译器
 - Python 3（用于生成 `i18n.hpp`）
 - 原版游戏数据文件（`東方紅魔郷.exe` v1.02h）
 
 ### 构建
 
 ```bash
-# 配置（Win32）
-cmake -B build_sdl2 -A Win32
+# Windows（Win32，启用 GLES 渲染器）
+cmake -B build_sdl2 -A Win32 -DUSE_GLES=ON
+cmake --build build_sdl2 --config Release
 
-# 编译
-cmake --build build_sdl2 --config Release --target th06
+# Linux（32 位 GLES）
+PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig \
+cmake -B build_linux_gles -DCMAKE_BUILD_TYPE=Release -DUSE_GLES=ON
+cmake --build build_linux_gles
 ```
 
-SDL2 库已内置于 `3rdparty/` 目录，自动链接。
+Windows 下 SDL2 库已内置于 `3rdparty/` 目录，自动链接。Linux 下请通过包管理器安装 SDL2/SDL2_image/SDL2_mixer。
 
 ### 运行
 
@@ -124,18 +143,25 @@ cd <游戏数据路径>
 ### 项目结构
 
 ```
-CMakeLists.txt              # SDL2 构建系统
+CMakeLists.txt              # SDL2 构建系统（USE_GLES 选项）
 3rdparty/
   SDL2/                     # SDL2 开发库
   SDL2_image/               # SDL2_image 开发库
   SDL2_mixer/               # SDL2_mixer 开发库
-  imgui/                    # Dear ImGui（调试覆盖层）
+  imgui/                    # Dear ImGui（thprac 覆盖层）
+  Detours/                  # Microsoft Detours（Hook 库）
+  rapidjson/                # JSON 解析器
 src/
-  sdl2_renderer.cpp/.hpp    # OpenGL 渲染后端
-  sdl2_compat.hpp           # SDL2/D3D8 兼容层
+  sdl2_renderer.cpp/.hpp    # 桌面 OpenGL 渲染后端
+  RendererGLES.cpp/.hpp     # OpenGL ES 2.0 渲染后端
+  IRenderer.hpp             # 抽象渲染器接口
+  TextHelper.cpp            # 文字渲染（stb_truetype，运行时编码检测）
+  GameWindow.cpp            # SDL2 窗口管理与帧计时
+  thprac_*.cpp              # thprac 练习模式集成
   *.cpp / *.hpp             # 游戏源码（从 D3D8 移植）
-scripts/                    # 原始构建和工具脚本
+scripts/                    # 构建与 i18n 生成脚本
 config/                     # 反编译映射数据
+android/                    # Android 构建（Gradle + NDK，开发中）
 ```
 
 ### 致谢
