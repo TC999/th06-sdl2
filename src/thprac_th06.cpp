@@ -1752,7 +1752,9 @@ namespace TH06 {
                             if (ImGui::BeginTabItem(tabs_player[pl])) {
                                 // time
                                 { char _tid[128]; snprintf(_tid, sizeof(_tid), "%s%stimetable", tabs_diff[diff], tabs_player[pl]);
-                                ImGui::BeginTable(_tid, 4, ImGuiTableFlags_::ImGuiTableFlags_Resizable); }
+                                if (ImGui::BeginTable(_tid, 4,
+                                    ImGuiTableFlags_::ImGuiTableFlags_Resizable |
+                                    ImGuiTableFlags_::ImGuiTableFlags_SizingStretchSame)) {
                                 ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_TOT));
                                 ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CUR));
                                 ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CHARACTER_TOT));
@@ -1800,14 +1802,17 @@ namespace TH06 {
                                 ImGui::TextWrapped("(%lld %s)", gametime_all, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
 
                                 ImGui::EndTable();
+                                } }
                                 // spell capture
                                 { char _sid[128]; snprintf(_sid, sizeof(_sid), "%s%ssptable", tabs_diff[diff], tabs_player[pl]);
-                                ImGui::BeginTable(_sid, 5, ImGuiTableFlags_::ImGuiTableFlags_Resizable); }
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_SPELL_NAME), 0, 100.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_TOT), 0, 50.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_TOT), 0, 30.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_CUR), 0, 50.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_CUR), 0, 30.0f);
+                                if (ImGui::BeginTable(_sid, 5,
+                                    ImGuiTableFlags_::ImGuiTableFlags_Resizable |
+                                    ImGuiTableFlags_::ImGuiTableFlags_SizingFixedFit)) {
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_SPELL_NAME), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_TOT), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 50.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_TOT), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_CUR), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 50.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_CUR), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 30.0f);
                                 ImGui::TableHeadersRow();
 
                                 for (int spell = 0; spell < 65; spell++) {
@@ -1838,6 +1843,7 @@ namespace TH06 {
                                     }
                                 }
                                 ImGui::EndTable();
+                                } }
                                 ImGui::EndTabItem();
                             }
                         }
