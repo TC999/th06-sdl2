@@ -36,12 +36,19 @@
 namespace th06
 {
 DIFFABLE_STATIC(Supervisor, g_Supervisor)
-DIFFABLE_STATIC(ControllerMapping, g_ControllerMapping)
+DIFFABLE_STATIC_ASSIGN(ControllerMapping, g_ControllerMapping) = {0, 1, 0, -1, -1, -1, -1, -1, -1};
 DIFFABLE_STATIC(SoftSurface *, g_TextBufferSurface)
 DIFFABLE_STATIC(u16, g_LastFrameInput);
 DIFFABLE_STATIC(u16, g_CurFrameInput);
 DIFFABLE_STATIC(u16, g_IsEigthFrameOfHeldInput);
 DIFFABLE_STATIC(u16, g_NumOfFramesInputsWereHeld);
+
+static bool IsUninitializedControllerMapping(const ControllerMapping &mapping)
+{
+    return mapping.shootButton == 0 && mapping.bombButton == 0 && mapping.focusButton == 0 &&
+           mapping.menuButton == 0 && mapping.upButton == 0 && mapping.downButton == 0 &&
+           mapping.leftButton == 0 && mapping.rightButton == 0 && mapping.skipButton == 0;
+}
 
 ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
 {
@@ -672,6 +679,10 @@ ZunResult Supervisor::LoadConfig(char *path)
     else
     {
         g_Supervisor.cfg = *data;
+        if (IsUninitializedControllerMapping(g_Supervisor.cfg.controllerMapping))
+        {
+            g_Supervisor.cfg.controllerMapping = g_ControllerMapping;
+        }
         // SDL2: skip colorMode16bit validation (16-bit mode doesn't exist in GL)
         if ((g_Supervisor.cfg.lifeCount >= 5) || (g_Supervisor.cfg.bombCount >= 4) ||
             (g_Supervisor.cfg.musicMode >= 3) ||

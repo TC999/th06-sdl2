@@ -43,7 +43,9 @@ u16 GetControllerInput(u16 buttons);
 u8 *GetControllerState();
 u16 GetInput(void);
 void ResetKeyboard(void);
+void ResetInputState(void);
 void InitSDLController(void);
+void RefreshSDLController(void);
 void CloseSDLController(void);
 }; // namespace Controller
 }; // namespace th06

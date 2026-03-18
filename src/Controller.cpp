@@ -4,7 +4,10 @@
 #include "Supervisor.hpp"
 #include "diffbuild.hpp"
 #include "i18n.hpp"
+#include "thprac_gui_input.h"
 #include "utils.hpp"
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace th06
@@ -16,23 +19,260 @@ static SDL_Joystick *g_SDLJoystick = NULL;
 static i32 g_SDLJoystickNumButtons = 0;
 static i32 g_SDLJoystickNumAxes = 0;
 
-u16 Controller::GetJoystickCaps(void)
+#ifdef __ANDROID__
+static bool IsIgnoredAndroidJoystick(i32 joystickIndex)
 {
-    if (SDL_NumJoysticks() < 1)
+    const char *joystickName = SDL_JoystickNameForIndex(joystickIndex);
+    return joystickName != NULL && std::strcmp(joystickName, "Android Accelerometer") == 0;
+}
+#endif
+
+static void UpdateJoystickCaps()
+{
+    if (g_SDLJoystick != NULL)
     {
-        GameErrorContext::Log(&g_GameErrorContext, TH_ERR_NO_PAD_FOUND);
-        return 1;
+        g_SDLJoystickNumButtons = SDL_JoystickNumButtons(g_SDLJoystick);
+        g_SDLJoystickNumAxes = SDL_JoystickNumAxes(g_SDLJoystick);
+    }
+    else
+    {
+        g_SDLJoystickNumButtons = 0;
+        g_SDLJoystickNumAxes = 0;
+    }
+}
+
+static bool HasAttachedJoystick()
+{
+    if (g_SDLController != NULL)
+    {
+        return SDL_GameControllerGetAttached(g_SDLController) == SDL_TRUE;
     }
 
-    g_SDLJoystick = SDL_JoystickOpen(0);
+    if (g_SDLJoystick != NULL)
+    {
+        return SDL_JoystickGetAttached(g_SDLJoystick) == SDL_TRUE;
+    }
+
+    return false;
+}
+
+static void OpenPrimaryJoystick()
+{
+    i32 joystickCount = SDL_NumJoysticks();
+
+    for (i32 i = 0; i < joystickCount; i++)
+    {
+#ifdef __ANDROID__
+        if (IsIgnoredAndroidJoystick(i))
+        {
+            continue;
+        }
+#endif
+        if (!SDL_IsGameController(i))
+        {
+            continue;
+        }
+
+        g_SDLController = SDL_GameControllerOpen(i);
+        if (g_SDLController != NULL)
+        {
+            g_SDLJoystick = SDL_GameControllerGetJoystick(g_SDLController);
+            UpdateJoystickCaps();
+            return;
+        }
+    }
+
+    for (i32 i = 0; i < joystickCount; i++)
+    {
+ #ifdef __ANDROID__
+        if (IsIgnoredAndroidJoystick(i))
+        {
+            continue;
+        }
+ #endif
+        g_SDLJoystick = SDL_JoystickOpen(i);
+        if (g_SDLJoystick != NULL)
+        {
+            break;
+        }
+    }
+
+    UpdateJoystickCaps();
+}
+
+static bool EnsureJoystickAttached()
+{
+    if (HasAttachedJoystick())
+    {
+        UpdateJoystickCaps();
+        return true;
+    }
+
+    if (g_SDLController != NULL || g_SDLJoystick != NULL)
+    {
+        Controller::CloseSDLController();
+    }
+
+    if (SDL_NumJoysticks() <= 0)
+    {
+        return false;
+    }
+
+    OpenPrimaryJoystick();
+    return g_SDLJoystick != NULL;
+}
+
+static i16 AxisThresholdFromConfig(i16 axisConfig)
+{
+    i32 clampedConfig = axisConfig > 0 ? axisConfig : 600;
+    clampedConfig = std::clamp(clampedConfig, 1, 1000);
+    return (i16)((clampedConfig * 32767) / 1000);
+}
+
+#ifdef __ANDROID__
+struct AndroidControllerDiagnostics
+{
+    u32 joyButtons;
+    i16 axisX;
+    i16 axisY;
+    i16 axisThresholdX;
+    i16 axisThresholdY;
+    i32 numButtons;
+    i32 numAxes;
+    bool joystickAttached;
+    char joystickName[96];
+};
+
+struct AndroidInputSnapshot
+{
+    u16 keyboardButtons;
+    u16 finalButtons;
+    i16 shootButton;
+    i16 bombButton;
+    i16 focusButton;
+    i16 menuButton;
+    i16 upButton;
+    i16 downButton;
+    i16 leftButton;
+    i16 rightButton;
+    i16 skipButton;
+    AndroidControllerDiagnostics controller;
+};
+
+static AndroidControllerDiagnostics g_AndroidControllerDiagnostics = {};
+
+static void ResetAndroidControllerDiagnostics()
+{
+    std::memset(&g_AndroidControllerDiagnostics, 0, sizeof(g_AndroidControllerDiagnostics));
+    g_AndroidControllerDiagnostics.axisThresholdX = AxisThresholdFromConfig(g_Supervisor.cfg.padXAxis);
+    g_AndroidControllerDiagnostics.axisThresholdY = AxisThresholdFromConfig(g_Supervisor.cfg.padYAxis);
+    std::snprintf(g_AndroidControllerDiagnostics.joystickName, sizeof(g_AndroidControllerDiagnostics.joystickName),
+                  "<none>");
+}
+
+static void AppendButtonName(char *buffer, size_t size, size_t *offset, bool pressed, const char *name)
+{
+    if (!pressed || *offset >= size)
+    {
+        return;
+    }
+
+    int written =
+        std::snprintf(buffer + *offset, size - *offset, *offset == 0 ? "%s" : "|%s", name);
+    if (written < 0)
+    {
+        return;
+    }
+
+    size_t consumed = static_cast<size_t>(written);
+    *offset = consumed >= size - *offset ? size - 1 : *offset + consumed;
+}
+
+static void DescribeTouhouButtons(u16 buttons, char *buffer, size_t size)
+{
+    size_t offset = 0;
+
+    if (size == 0)
+    {
+        return;
+    }
+
+    buffer[0] = '\0';
+
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_SHOOT) != 0, "shoot");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_BOMB) != 0, "bomb");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_FOCUS) != 0, "focus");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_MENU) != 0, "menu");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_UP) != 0, "up");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_DOWN) != 0, "down");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_LEFT) != 0, "left");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_RIGHT) != 0, "right");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_SKIP) != 0, "skip");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_Q) != 0, "q");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_S) != 0, "s");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_HOME) != 0, "home");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_ENTER) != 0, "enter");
+
+    if (offset == 0)
+    {
+        std::snprintf(buffer, size, "none");
+    }
+}
+
+static void LogAndroidInputSnapshot(u16 keyboardButtons, u16 finalButtons)
+{
+    AndroidInputSnapshot snapshot = {};
+    static AndroidInputSnapshot previousSnapshot = {};
+    static bool hasPreviousSnapshot = false;
+
+    snapshot.keyboardButtons = keyboardButtons;
+    snapshot.finalButtons = finalButtons;
+    snapshot.shootButton = g_Supervisor.cfg.controllerMapping.shootButton;
+    snapshot.bombButton = g_Supervisor.cfg.controllerMapping.bombButton;
+    snapshot.focusButton = g_Supervisor.cfg.controllerMapping.focusButton;
+    snapshot.menuButton = g_Supervisor.cfg.controllerMapping.menuButton;
+    snapshot.upButton = g_Supervisor.cfg.controllerMapping.upButton;
+    snapshot.downButton = g_Supervisor.cfg.controllerMapping.downButton;
+    snapshot.leftButton = g_Supervisor.cfg.controllerMapping.leftButton;
+    snapshot.rightButton = g_Supervisor.cfg.controllerMapping.rightButton;
+    snapshot.skipButton = g_Supervisor.cfg.controllerMapping.skipButton;
+    snapshot.controller = g_AndroidControllerDiagnostics;
+
+    if (hasPreviousSnapshot && std::memcmp(&previousSnapshot, &snapshot, sizeof(snapshot)) == 0)
+    {
+        return;
+    }
+
+    previousSnapshot = snapshot;
+    hasPreviousSnapshot = true;
+
+    char keyboardDesc[128];
+    char finalDesc[128];
+    DescribeTouhouButtons(snapshot.keyboardButtons, keyboardDesc, sizeof(keyboardDesc));
+    DescribeTouhouButtons(snapshot.finalButtons, finalDesc, sizeof(finalDesc));
+
+    SDL_Log(
+        "[input/native] keyboard=0x%04x(%s) joyButtons=0x%08x axis=(%d,%d) threshold=(%d,%d) attached=%d joy=%s "
+        "caps={buttons:%d axes:%d} mapping={sh:%d bm:%d fc:%d mn:%d up:%d dn:%d lt:%d rt:%d sk:%d} "
+        "final=0x%04x(%s)",
+        snapshot.keyboardButtons, keyboardDesc, snapshot.controller.joyButtons, snapshot.controller.axisX,
+        snapshot.controller.axisY, snapshot.controller.axisThresholdX, snapshot.controller.axisThresholdY,
+        snapshot.controller.joystickAttached ? 1 : 0, snapshot.controller.joystickName,
+        snapshot.controller.numButtons, snapshot.controller.numAxes, snapshot.shootButton, snapshot.bombButton,
+        snapshot.focusButton, snapshot.menuButton, snapshot.upButton, snapshot.downButton, snapshot.leftButton,
+        snapshot.rightButton, snapshot.skipButton, snapshot.finalButtons, finalDesc);
+}
+#endif
+
+u16 Controller::GetJoystickCaps(void)
+{
+    RefreshSDLController();
     if (g_SDLJoystick == NULL)
     {
         GameErrorContext::Log(&g_GameErrorContext, TH_ERR_NO_PAD_FOUND);
         return 1;
     }
 
-    g_SDLJoystickNumButtons = SDL_JoystickNumButtons(g_SDLJoystick);
-    g_SDLJoystickNumAxes = SDL_JoystickNumAxes(g_SDLJoystick);
     return 0;
 }
 
@@ -43,14 +283,17 @@ u16 Controller::GetControllerInput(u16 buttons)
     u32 ac;
     u32 joyButtons;
     i16 axisX, axisY;
-    i32 axisThreshold;
+    i16 axisThresholdX;
+    i16 axisThresholdY;
 
-    if (g_SDLJoystick == NULL)
+    axisX = 0;
+    axisY = 0;
+#ifdef __ANDROID__
+    ResetAndroidControllerDiagnostics();
+#endif
+
+    if (!EnsureJoystickAttached())
     {
-        if (g_SDLJoystickNumButtons == 0)
-        {
-            return buttons;
-        }
         return buttons;
     }
 
@@ -64,6 +307,19 @@ u16 Controller::GetControllerInput(u16 buttons)
             joyButtons |= (1 << i);
         }
     }
+
+#ifdef __ANDROID__
+    g_AndroidControllerDiagnostics.joystickAttached = true;
+    g_AndroidControllerDiagnostics.numButtons = g_SDLJoystickNumButtons;
+    g_AndroidControllerDiagnostics.numAxes = g_SDLJoystickNumAxes;
+    const char *joystickName = SDL_JoystickName(g_SDLJoystick);
+    if (joystickName != NULL)
+    {
+        std::snprintf(g_AndroidControllerDiagnostics.joystickName,
+                      sizeof(g_AndroidControllerDiagnostics.joystickName), "%s", joystickName);
+    }
+    g_AndroidControllerDiagnostics.joyButtons = joyButtons;
+#endif
 
     ac = SetButtonFromControllerInputs(&buttons, g_Supervisor.cfg.controllerMapping.shootButton, TH_BUTTON_SHOOT,
                                        joyButtons);
@@ -115,23 +371,33 @@ u16 Controller::GetControllerInput(u16 buttons)
     SetButtonFromControllerInputs(&buttons, g_Supervisor.cfg.controllerMapping.skipButton, TH_BUTTON_SKIP,
                                   joyButtons);
 
-    axisThreshold = 16384;
+    axisThresholdX = AxisThresholdFromConfig(g_Supervisor.cfg.padXAxis);
+    axisThresholdY = AxisThresholdFromConfig(g_Supervisor.cfg.padYAxis);
+#ifdef __ANDROID__
+    g_AndroidControllerDiagnostics.axisThresholdX = axisThresholdX;
+    g_AndroidControllerDiagnostics.axisThresholdY = axisThresholdY;
+#endif
     if (g_SDLJoystickNumAxes >= 1)
     {
         axisX = SDL_JoystickGetAxis(g_SDLJoystick, 0);
-        if (axisX > axisThreshold)
+        if (axisX > axisThresholdX)
             buttons |= TH_BUTTON_RIGHT;
-        if (axisX < -axisThreshold)
+        if (axisX < -axisThresholdX)
             buttons |= TH_BUTTON_LEFT;
     }
     if (g_SDLJoystickNumAxes >= 2)
     {
         axisY = SDL_JoystickGetAxis(g_SDLJoystick, 1);
-        if (axisY > axisThreshold)
+        if (axisY > axisThresholdY)
             buttons |= TH_BUTTON_DOWN;
-        if (axisY < -axisThreshold)
+        if (axisY < -axisThresholdY)
             buttons |= TH_BUTTON_UP;
     }
+
+#ifdef __ANDROID__
+    g_AndroidControllerDiagnostics.axisX = axisX;
+    g_AndroidControllerDiagnostics.axisY = axisY;
+#endif
 
     return buttons;
 }
@@ -158,7 +424,7 @@ DIFFABLE_STATIC_ARRAY(u8, (32 * 4), g_ControllerData)
 u8 *th06::Controller::GetControllerState()
 {
     memset(&g_ControllerData, 0, sizeof(g_ControllerData));
-    if (g_SDLJoystick == NULL)
+    if (!EnsureJoystickAttached())
     {
         return g_ControllerData;
     }
@@ -179,6 +445,7 @@ u16 Controller::GetInput(void)
 {
     const u8 *keyboardState;
     u16 buttons;
+    u16 keyboardButtons;
 
     buttons = 0;
     keyboardState = SDL_GetKeyboardState(NULL);
@@ -207,37 +474,53 @@ u16 Controller::GetInput(void)
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_S, SDL_SCANCODE_S);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_ENTER, SDL_SCANCODE_RETURN);
 
-    return Controller::GetControllerInput(buttons);
+    keyboardButtons = buttons;
+    buttons = Controller::GetControllerInput(buttons);
+
+#ifdef __ANDROID__
+    LogAndroidInputSnapshot(keyboardButtons, buttons);
+#endif
+
+    return buttons;
 }
 
 void Controller::ResetKeyboard(void)
 {
+    SDL_ResetKeyboard();
+    SDL_FlushEvents(SDL_KEYDOWN, SDL_KEYUP);
     SDL_PumpEvents();
+    THPrac::Gui::ResetKeyboardState();
+}
+
+void Controller::ResetInputState(void)
+{
+    ResetKeyboard();
+    g_FocusButtonConflictState = 0;
+    g_LastFrameInput = 0;
+    g_CurFrameInput = 0;
+    g_IsEigthFrameOfHeldInput = 0;
+    g_NumOfFramesInputsWereHeld = 0;
+#ifdef __ANDROID__
+    SDL_Log("[input/native] ResetInputState");
+#endif
 }
 
 void Controller::InitSDLController(void)
 {
-    if (SDL_NumJoysticks() > 0)
+    if (HasAttachedJoystick())
     {
-        if (SDL_IsGameController(0))
-        {
-            g_SDLController = SDL_GameControllerOpen(0);
-            if (g_SDLController != NULL)
-            {
-                g_SDLJoystick = SDL_GameControllerGetJoystick(g_SDLController);
-            }
-        }
-        else
-        {
-            g_SDLJoystick = SDL_JoystickOpen(0);
-        }
-
-        if (g_SDLJoystick != NULL)
-        {
-            g_SDLJoystickNumButtons = SDL_JoystickNumButtons(g_SDLJoystick);
-            g_SDLJoystickNumAxes = SDL_JoystickNumAxes(g_SDLJoystick);
-        }
+        UpdateJoystickCaps();
+        return;
     }
+
+    CloseSDLController();
+    OpenPrimaryJoystick();
+}
+
+void Controller::RefreshSDLController(void)
+{
+    CloseSDLController();
+    OpenPrimaryJoystick();
 }
 
 void Controller::CloseSDLController(void)
@@ -253,7 +536,6 @@ void Controller::CloseSDLController(void)
         SDL_JoystickClose(g_SDLJoystick);
         g_SDLJoystick = NULL;
     }
-    g_SDLJoystickNumButtons = 0;
-    g_SDLJoystickNumAxes = 0;
+    UpdateJoystickCaps();
 }
 }; // namespace th06

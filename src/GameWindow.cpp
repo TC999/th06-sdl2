@@ -36,6 +36,64 @@ static bool g_PendingWindowModeChange = false;
 static bool g_PendingWindowModeWindowed = false;
 static bool g_PendingRestart = false;
 
+#ifdef __ANDROID__
+static void LogAndroidInputEvent(const SDL_Event &event)
+{
+    switch (event.type)
+    {
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        SDL_Log("[input/sdl] key %s scancode=%s(%d) sym=%s(%d) repeat=%d state=%d",
+                event.type == SDL_KEYDOWN ? "down" : "up", SDL_GetScancodeName(event.key.keysym.scancode),
+                event.key.keysym.scancode, SDL_GetKeyName(event.key.keysym.sym), event.key.keysym.sym,
+                event.key.repeat, event.key.state);
+        break;
+    case SDL_TEXTINPUT:
+        SDL_Log("[input/sdl] text \"%s\"", event.text.text);
+        break;
+    case SDL_WINDOWEVENT:
+        if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
+            event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+        {
+            SDL_Log("[input/sdl] window event=%d", event.window.event);
+        }
+        break;
+    case SDL_APP_WILLENTERBACKGROUND:
+    case SDL_APP_DIDENTERBACKGROUND:
+    case SDL_APP_WILLENTERFOREGROUND:
+    case SDL_APP_DIDENTERFOREGROUND:
+        SDL_Log("[input/sdl] app event type=%u", event.type);
+        break;
+    case SDL_JOYDEVICEADDED:
+    case SDL_JOYDEVICEREMOVED:
+        SDL_Log("[input/sdl] joy device type=%u which=%d", event.type, event.jdevice.which);
+        break;
+    case SDL_CONTROLLERDEVICEADDED:
+    case SDL_CONTROLLERDEVICEREMOVED:
+        SDL_Log("[input/sdl] controller device type=%u which=%d", event.type, event.cdevice.which);
+        break;
+    case SDL_JOYBUTTONDOWN:
+    case SDL_JOYBUTTONUP:
+        SDL_Log("[input/sdl] joy button %s which=%d button=%d state=%d",
+                event.type == SDL_JOYBUTTONDOWN ? "down" : "up", event.jbutton.which, event.jbutton.button,
+                event.jbutton.state);
+        break;
+    case SDL_JOYHATMOTION:
+        SDL_Log("[input/sdl] joy hat which=%d hat=%d value=%d", event.jhat.which, event.jhat.hat,
+                event.jhat.value);
+        break;
+    case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERBUTTONUP:
+        SDL_Log("[input/sdl] controller button %s which=%d button=%d state=%d",
+                event.type == SDL_CONTROLLERBUTTONDOWN ? "down" : "up", event.cbutton.which,
+                event.cbutton.button, event.cbutton.state);
+        break;
+    default:
+        break;
+    }
+}
+#endif
+
 static void ApplyPendingWindowMode()
 {
     if (!g_PendingWindowModeChange)
@@ -286,6 +344,9 @@ void GameWindow::Present()
 
 i32 GameWindow::InitD3dInterface(void)
 {
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) < 0)
     {
         GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_D3D_ERR_COULD_NOT_CREATE_OBJ);
@@ -364,6 +425,9 @@ void GameWindow_ProcessEvents()
     SDL_Event event;
     while (SDL_PollEvent(&event))
     {
+#ifdef __ANDROID__
+        LogAndroidInputEvent(event);
+#endif
         THPrac::THPracGuiProcessEvent(&event);
         switch (event.type)
         {
@@ -375,12 +439,31 @@ void GameWindow_ProcessEvents()
             {
                 g_GameWindow.lastActiveAppValue = 1;
                 g_GameWindow.isAppActive = 0;
+                Controller::ResetInputState();
             }
             else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
             {
                 g_GameWindow.lastActiveAppValue = 0;
                 g_GameWindow.isAppActive = 1;
+                Controller::ResetInputState();
             }
+            break;
+        case SDL_APP_WILLENTERBACKGROUND:
+        case SDL_APP_DIDENTERBACKGROUND:
+            g_GameWindow.lastActiveAppValue = 0;
+            g_GameWindow.isAppActive = 1;
+            Controller::ResetInputState();
+            break;
+        case SDL_APP_WILLENTERFOREGROUND:
+        case SDL_APP_DIDENTERFOREGROUND:
+            Controller::ResetInputState();
+            break;
+        case SDL_JOYDEVICEADDED:
+        case SDL_JOYDEVICEREMOVED:
+        case SDL_CONTROLLERDEVICEADDED:
+        case SDL_CONTROLLERDEVICEREMOVED:
+            Controller::RefreshSDLController();
+            Controller::ResetInputState();
             break;
         default:
             break;

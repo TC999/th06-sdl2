@@ -124,6 +124,12 @@ bool KeyboardInputGetRaw(int v_key)
     return state[sc] != 0;
 }
 
+void ResetKeyboardState()
+{
+    memset(s_prev_keys, 0, sizeof(s_prev_keys));
+    memset(s_curr_keys, 0, sizeof(s_curr_keys));
+}
+
 bool InGameInputGetConfirm()
 {
     return InGameInputGet(VK_RETURN);

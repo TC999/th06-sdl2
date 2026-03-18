@@ -23,6 +23,7 @@ namespace Gui {
     int  KeyboardInputGet(int v_key);
     bool KeyboardInputGetSingle(int v_key);
     bool KeyboardInputGetRaw(int v_key);
+    void ResetKeyboardState();
 
     bool InGameInputGetConfirm();
 
