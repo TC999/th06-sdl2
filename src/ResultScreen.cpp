@@ -15,6 +15,7 @@
 #include "i18n.hpp"
 #include "utils.hpp"
 #include "sdl2_renderer.hpp"
+#include <cstring>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -583,7 +584,7 @@ i32 ResultScreen::HandleResultKeyboard()
         this->hscr.difficulty = this->diffSelected;
         this->hscr.score = g_GameManager.score;
         this->hscr.base.version = 16;
-        this->hscr.base.magic = *(i32 *)"HSCR";
+        this->hscr.base.magic = HSCR_MAGIC;
 
         if (g_GameManager.isGameCompleted == 0)
         {
@@ -914,7 +915,7 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
             }
 #endif
             (this->defaultReplay).score = g_GameManager.score;
-            if (*(i32 *)&this->replays[this->cursor].magic != *(i32 *)&"T6RP" ||
+            if (memcmp(this->replays[this->cursor].magic, "T6RP", 4) != 0 ||
                 this->replays[this->cursor].version != GAME_VERSION)
             {
                 sprite = &this->unk_40[0];
@@ -2038,7 +2039,7 @@ ChainCallbackResult th06::ResultScreen::OnDraw(ResultScreen *resultScreen)
                 name[resultScreen->cursor >= 8 ? 7 : resultScreen->cursor] = '_';
                 g_AsciiManager.AddFormatText(spritePos.AsD3dXVec(), "      %8s", &name);
             }
-            else if (*(i32 *)&resultScreen->replays[row].magic != *(i32 *)"T6RP" ||
+            else if (memcmp(resultScreen->replays[row].magic, "T6RP", 4) != 0 ||
                      resultScreen->replays[row].version != GAME_VERSION)
             {
                 g_AsciiManager.AddFormatText(spritePos.AsD3dXVec(), "No.%.2d -------- --/--/-- -------         0",

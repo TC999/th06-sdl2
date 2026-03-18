@@ -211,8 +211,8 @@ ZunResult SoundPlayer::LoadPos(char *path)
         return ZUN_ERROR;
     }
     bgmFile = this->backgroundMusic->m_pWaveFile;
-    loopEnd = *(i32 *)(fileData + 4) * 4;
-    loopStart = *(i32 *)(fileData) * 4;
+    loopEnd = utils::ReadUnaligned<i32>(fileData + 4) * 4;
+    loopStart = utils::ReadUnaligned<i32>(fileData) * 4;
     bgmFile->m_loopStartPoint = loopStart;
     bgmFile->m_loopEndPoint = loopEnd;
     free(fileData);
@@ -271,7 +271,7 @@ WAVEFORMATEX *SoundPlayer::GetWavFormatData(u8 *soundData, char *formatString, i
 {
     while (fileSizeExcludingFormat > 0)
     {
-        *formatSize = *(i32 *)(soundData + 4);
+        *formatSize = utils::ReadUnaligned<i32>(soundData + 4);
         if (strncmp((char *)soundData, formatString, 4) == 0)
         {
             return (WAVEFORMATEX *)(soundData + 8);
@@ -309,7 +309,7 @@ ZunResult SoundPlayer::LoadSound(i32 idx, char *path)
         free(soundFileData);
         return ZUN_ERROR;
     }
-    fileSize = *(i32 *)(soundFileData + 4) + 8;
+    fileSize = utils::ReadUnaligned<i32>(soundFileData + 4) + 8;
     SDL_RWops *rw = SDL_RWFromMem(soundFileData, fileSize);
     if (rw == NULL)
     {

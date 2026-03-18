@@ -3,6 +3,7 @@
 #include "ZunMath.hpp"
 #include "ZunResult.hpp"
 #include "inttypes.hpp"
+#include <cstring>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 #define ARRAY_SIZE_SIGNED(x) ((i32)sizeof(x) / (i32)sizeof(x[0]))
@@ -21,6 +22,13 @@ namespace th06
 {
 namespace utils
 {
+template <typename T> inline T ReadUnaligned(const void *src)
+{
+    T value;
+    memcpy(&value, src, sizeof(value));
+    return value;
+}
+
 ZunResult CheckForRunningGameInstance(void);
 void DebugPrint(const char *fmt, ...);
 void DebugPrint2(const char *fmt, ...);

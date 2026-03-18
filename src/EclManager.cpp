@@ -13,6 +13,8 @@
 #include "Stage.hpp"
 #include "utils.hpp"
 #include "thprac_th06.h"
+#include <cstddef>
+#include <vector>
 
 namespace th06
 {
@@ -84,7 +86,10 @@ ZunResult EclManager::CallEclSub(EnemyEclContext *ctx, i16 subId)
 ZunResult EclManager::RunEcl(Enemy *enemy)
 {
     EclRawInstr *instruction;
+    EclRawInstr *rawInstruction;
     EclRawInstrArgs *args;
+    const u8 *rawInstructionBytes;
+    i16 rawOffsetToNext;
     ZunVec3 local_8;
     i32 local_14, local_24, local_28, local_2c, *local_3c, *local_40, local_44, local_48, local_68, local_74, csum,
         scoreIncrease, local_84, local_88, local_8c, local_b8, local_c0;
@@ -99,16 +104,47 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
     D3DXVECTOR3 local_98;
     EclRawInstrEnemyCreateArgs local_b0;
     Enemy *local_b4;
+    std::vector<u8> alignedInstructionStorage;
+
+    auto updateRawInstructionMetadata = [&]() -> ZunResult {
+        rawInstructionBytes = reinterpret_cast<const u8 *>(rawInstruction);
+        rawOffsetToNext = utils::ReadUnaligned<i16>(rawInstructionBytes + offsetof(EclRawInstr, offsetToNext));
+        if (rawOffsetToNext <= 0)
+        {
+            return ZUN_ERROR;
+        }
+        return ZUN_SUCCESS;
+    };
+    auto loadAlignedInstruction = [&]() -> ZunResult {
+        if (updateRawInstructionMetadata() != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+
+        alignedInstructionStorage.resize((size_t)(u16)rawOffsetToNext);
+        memcpy(alignedInstructionStorage.data(), rawInstructionBytes, alignedInstructionStorage.size());
+        instruction = reinterpret_cast<EclRawInstr *>(alignedInstructionStorage.data());
+        args = &instruction->args;
+        return ZUN_SUCCESS;
+    };
 
     for (;;)
     {
-        instruction = enemy->currentContext.currentInstr;
+        rawInstruction = enemy->currentContext.currentInstr;
+        if (updateRawInstructionMetadata() != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
         if (0 <= enemy->runInterrupt)
         {
             goto HANDLE_INTERRUPT;
         }
 
     YOLO:
+        if (loadAlignedInstruction() != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
         if ((ZunBool)(enemy->currentContext.time.current == instruction->time))
         {
             if (!(instruction->skipForDifficulty & (1 << g_GameManager.difficulty)))
@@ -116,7 +152,6 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                 goto NEXT_INSN;
             }
 
-            args = &instruction->args;
             switch (instruction->opCode)
             {
             case ECL_OPCODE_UNIMP:
@@ -130,7 +165,7 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
             case ECL_OPCODE_JUMP:
             HANDLE_JUMP:
                 enemy->currentContext.time.current = instruction->args.jump.time;
-                instruction = (EclRawInstr *)((int)instruction + args->jump.offset);
+                rawInstruction = reinterpret_cast<EclRawInstr *>(const_cast<u8 *>(rawInstructionBytes + args->jump.offset));
                 goto YOLO;
             case ECL_OPCODE_SETINT:
             case ECL_OPCODE_SETFLOAT:
@@ -243,7 +278,8 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
             case ECL_OPCODE_CALL:
             HANDLE_CALL:
                 local_14 = instruction->args.call.eclSub;
-                enemy->currentContext.currentInstr = (EclRawInstr *)((u8 *)instruction + instruction->offsetToNext);
+                enemy->currentContext.currentInstr =
+                    reinterpret_cast<EclRawInstr *>(const_cast<u8 *>(rawInstructionBytes + rawOffsetToNext));
                 if (enemy->flags.unk14 == 0)
                 {
                     memcpy(&enemy->savedContextStack[enemy->stackDepth], &enemy->currentContext,
@@ -685,7 +721,8 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
             case ECL_OPCODE_ENEMYINTERRUPT:
                 enemy->runInterrupt = instruction->args.setInt;
             HANDLE_INTERRUPT:
-                enemy->currentContext.currentInstr = (EclRawInstr *)((u8 *)instruction + instruction->offsetToNext);
+                enemy->currentContext.currentInstr =
+                    reinterpret_cast<EclRawInstr *>(const_cast<u8 *>(rawInstructionBytes + rawOffsetToNext));
                 if (enemy->flags.unk14 == 0)
                 {
                     memcpy(&enemy->savedContextStack[enemy->stackDepth], &enemy->currentContext,
@@ -922,7 +959,7 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                 break;
             }
         NEXT_INSN:
-            instruction = (EclRawInstr *)((u8 *)instruction + instruction->offsetToNext);
+            rawInstruction = reinterpret_cast<EclRawInstr *>(const_cast<u8 *>(rawInstructionBytes + rawOffsetToNext));
             goto YOLO;
         }
         else
@@ -1033,7 +1070,7 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                     enemy->currentContext.funcSetFunc(enemy, NULL);
                 }
             }
-            enemy->currentContext.currentInstr = instruction;
+            enemy->currentContext.currentInstr = rawInstruction;
             enemy->currentContext.time.Tick();
             return ZUN_SUCCESS;
         }

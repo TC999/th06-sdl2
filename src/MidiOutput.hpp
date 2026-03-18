@@ -139,14 +139,8 @@ struct MidiOutput : MidiTimer
 
     static u32 Ntohl(u32 val)
     {
-        u8 tmp[4];
-
-        tmp[0] = ((u8 *)&val)[3];
-        tmp[1] = ((u8 *)&val)[2];
-        tmp[2] = ((u8 *)&val)[1];
-        tmp[3] = ((u8 *)&val)[0];
-
-        return *(const u32 *)tmp;
+        const u8 *bytes = (const u8 *)&val;
+        return ((u32)bytes[3] << 24) | ((u32)bytes[2] << 16) | ((u32)bytes[1] << 8) | (u32)bytes[0];
     }
 
     void *midiHeaders[32];

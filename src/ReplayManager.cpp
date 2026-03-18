@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <time.h>
+#include <cstring>
 
 #include "Controller.hpp"
 #include "FileSystem.hpp"
@@ -34,7 +35,7 @@ ZunResult ReplayManager::ValidateReplayData(ReplayData *data, i32 fileSize)
     }
 
     /* "T6RP" magic bytes */
-    if (*(i32 *)decryptedData->magic != *(i32 *)"T6RP")
+    if (memcmp(decryptedData->magic, "T6RP", 4) != 0)
     {
         return ZUN_ERROR;
     }

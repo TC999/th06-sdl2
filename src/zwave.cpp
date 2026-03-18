@@ -204,10 +204,10 @@ static u8 *FindChunk(u8 *data, u32 dataSize, const char *id, u32 *outSize)
     {
         if (memcmp(data, id, 4) == 0)
         {
-            *outSize = *(u32 *)(data + 4);
+            *outSize = utils::ReadUnaligned<u32>(data + 4);
             return data + 8;
         }
-        u32 chunkSize = *(u32 *)(data + 4);
+        u32 chunkSize = utils::ReadUnaligned<u32>(data + 4);
         data += 8 + chunkSize;
     }
     return NULL;
@@ -269,7 +269,7 @@ HRESULT CWaveFile::Open(char *strFileName, WAVEFORMATEX *pwfx, DWORD dwFlags)
         return -1;
     }
 
-    u32 riffSize = *(u32 *)(m_fileData + 4);
+    u32 riffSize = utils::ReadUnaligned<u32>(m_fileData + 4);
     u8 *chunks = m_fileData + 12;
     u32 chunksSize = riffSize - 4;
 

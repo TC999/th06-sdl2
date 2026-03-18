@@ -90,12 +90,8 @@ u32 MidiTimer::DefaultTimerCallback(u32 interval, void *param)
 
 u16 MidiOutput::Ntohs(u16 val)
 {
-    u8 tmp[2];
-
-    tmp[0] = ((u8 *)&val)[1];
-    tmp[1] = ((u8 *)&val)[0];
-
-    return *(const u16 *)(&tmp);
+    const u8 *bytes = (const u8 *)&val;
+    return (u16)(((u16)bytes[1] << 8) | (u16)bytes[0]);
 }
 
 u32 MidiOutput::SkipVariableLength(u8 **curTrackDataCursor)
@@ -231,7 +227,7 @@ ZunResult MidiOutput::ParseFile(i32 fileIdx)
 
     // Get a pointer to the end of the header chunk
     currentCursor += sizeof(hdrRaw);
-    hdrLength = MidiOutput::Ntohl(*(u32 *)(hdrRaw + 4));
+    hdrLength = MidiOutput::Ntohl(utils::ReadUnaligned<u32>(hdrRaw + 4));
 
     endOfHeaderPointer = currentCursor;
     currentCursor += hdrLength;
@@ -242,13 +238,13 @@ ZunResult MidiOutput::ParseFile(i32 fileIdx)
     //  sequence
     //  2: the file contains one or more sequentially independent single-track
     //  patterns
-    this->format = MidiOutput::Ntohs(*(u16 *)endOfHeaderPointer);
+    this->format = MidiOutput::Ntohs(utils::ReadUnaligned<u16>(endOfHeaderPointer));
 
     // Read the divisions in this track. Note that this doesn't appear to support
     // "negative SMPTE format", which happens when the MSB is set.
-    this->divisions = MidiOutput::Ntohs(*(u16 *)(endOfHeaderPointer + 4));
+    this->divisions = MidiOutput::Ntohs(utils::ReadUnaligned<u16>(endOfHeaderPointer + 4));
     // Read the number of tracks in this midi file.
-    this->numTracks = MidiOutput::Ntohs(*(u16 *)(endOfHeaderPointer + 2));
+    this->numTracks = MidiOutput::Ntohs(utils::ReadUnaligned<u16>(endOfHeaderPointer + 2));
 
     // Allocate this->divisions * 32 bytes.
     this->tracks = (MidiTrack *)ZunMemory::Alloc(sizeof(MidiTrack) * this->numTracks);
@@ -261,7 +257,7 @@ ZunResult MidiOutput::ParseFile(i32 fileIdx)
         // Read a track (MTrk) chunk.
         //
         // First, read the length of the chunk
-        trackLength = MidiOutput::Ntohl(*(u32 *)(currentCursorTrack + 4));
+        trackLength = MidiOutput::Ntohl(utils::ReadUnaligned<u32>(currentCursorTrack + 4));
         this->tracks[trackIdx].trackLength = trackLength;
         this->tracks[trackIdx].trackData = (u8 *)ZunMemory::Alloc(trackLength);
         this->tracks[trackIdx].trackPlaying = 1;

@@ -846,20 +846,38 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
     i32 local_34;
     i32 local_38;
     f32 local_3c;
+    const u8 *curInstrArgs;
 
     if (vm->currentInstruction == NULL)
     {
         return 1;
     }
 
+    auto instructionTime = [](AnmRawInstr *instr) -> i16 { return utils::ReadUnaligned<i16>(instr); };
+    auto instructionOpcode = [](AnmRawInstr *instr) -> u8 { return reinterpret_cast<const u8 *>(instr)[2]; };
+    auto instructionArgsCount = [](AnmRawInstr *instr) -> u8 { return reinterpret_cast<const u8 *>(instr)[3]; };
+    auto instructionArgs = [](AnmRawInstr *instr) -> const u8 * { return reinterpret_cast<const u8 *>(instr) + 4; };
+    auto nextInstruction = [&](AnmRawInstr *instr) -> AnmRawInstr * {
+        return reinterpret_cast<AnmRawInstr *>(
+            const_cast<u8 *>(instructionArgs(instr) + instructionArgsCount(instr)));
+    };
+    auto readArgU32 = [](const u8 *args, u32 index) -> u32 {
+        return utils::ReadUnaligned<u32>(args + index * sizeof(u32));
+    };
+    auto readArgF32 = [](const u8 *args, u32 index) -> f32 {
+        return utils::ReadUnaligned<f32>(args + index * sizeof(u32));
+    };
+
     if (vm->pendingInterrupt != 0)
     {
         goto yolo;
     }
 
-    while (curInstr = vm->currentInstruction, curInstr->time <= vm->currentTimeInScript.AsFrames())
+    while (curInstr = vm->currentInstruction, instructionTime(curInstr) <= vm->currentTimeInScript.AsFrames())
     {
-        switch (curInstr->opcode)
+        curInstrArgs = instructionArgs(curInstr);
+
+        switch (instructionOpcode(curInstr))
         {
         case AnmOpcode_Exit:
             vm->flags.isVisible = 0;
@@ -868,73 +886,68 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
             return 1;
         case AnmOpcode_SetActiveSprite:
             vm->flags.isVisible = 1;
-            this->SetActiveSprite(vm, curInstr->args[0] + this->spriteIndices[vm->anmFileIndex]);
+            this->SetActiveSprite(vm, readArgU32(curInstrArgs, 0) + this->spriteIndices[vm->anmFileIndex]);
             vm->timeOfLastSpriteSet = vm->currentTimeInScript.AsFrames();
             break;
         case AnmOpcode_SetRandomSprite:
             vm->flags.isVisible = 1;
-            local_c = &curInstr->args[0];
-            this->SetActiveSprite(vm, local_c[0] + g_Rng.GetRandomU16InRange(local_c[1]) +
+            this->SetActiveSprite(vm, readArgU32(curInstrArgs, 0) + g_Rng.GetRandomU16InRange(readArgU32(curInstrArgs, 1)) +
                                           this->spriteIndices[vm->anmFileIndex]);
             vm->timeOfLastSpriteSet = vm->currentTimeInScript.AsFrames();
             break;
         case AnmOpcode_SetScale:
-            vm->scaleX = *(f32 *)&curInstr->args[0];
-            vm->scaleY = *(f32 *)&curInstr->args[1];
+            vm->scaleX = readArgF32(curInstrArgs, 0);
+            vm->scaleY = readArgF32(curInstrArgs, 1);
             break;
         case AnmOpcode_SetAlpha:
-            COLOR_SET_COMPONENT(vm->color, COLOR_ALPHA_BYTE_IDX, curInstr->args[0] & 0xff);
+            COLOR_SET_COMPONENT(vm->color, COLOR_ALPHA_BYTE_IDX, readArgU32(curInstrArgs, 0) & 0xff);
             break;
         case AnmOpcode_SetColor:
-            vm->color = COLOR_COMBINE_ALPHA(curInstr->args[0], vm->color);
+            vm->color = COLOR_COMBINE_ALPHA(readArgU32(curInstrArgs, 0), vm->color);
             break;
         case AnmOpcode_Jump:
-            vm->currentInstruction = (AnmRawInstr *)((i32)vm->beginingOfScript->args + curInstr->args[0] - 4);
-            vm->currentTimeInScript.current = vm->currentInstruction->time;
+            vm->currentInstruction = reinterpret_cast<AnmRawInstr *>(
+                const_cast<u8 *>(reinterpret_cast<const u8 *>(vm->beginingOfScript) + readArgU32(curInstrArgs, 0)));
+            vm->currentTimeInScript.current = instructionTime(vm->currentInstruction);
             continue;
         case AnmOpcode_FlipX:
             vm->flags.flip ^= 1;
             vm->scaleX *= -1.f;
             break;
         case AnmOpcode_UsePosOffset:
-            vm->flags.usePosOffset = curInstr->args[0];
+            vm->flags.usePosOffset = readArgU32(curInstrArgs, 0);
             break;
         case AnmOpcode_FlipY:
             vm->flags.flip ^= 2;
             vm->scaleY *= -1.f;
             break;
         case AnmOpcode_SetRotation:
-            local_10 = (f32 *)&curInstr->args[0];
-            vm->rotation.x = *local_10++;
-            vm->rotation.y = *local_10++;
-            vm->rotation.z = *local_10;
+            vm->rotation.x = readArgF32(curInstrArgs, 0);
+            vm->rotation.y = readArgF32(curInstrArgs, 1);
+            vm->rotation.z = readArgF32(curInstrArgs, 2);
             break;
         case AnmOpcode_SetAngleVel:
-            local_14 = (f32 *)&curInstr->args[0];
-            vm->angleVel.x = *local_14++;
-            vm->angleVel.y = *local_14++;
-            vm->angleVel.z = *local_14;
+            vm->angleVel.x = readArgF32(curInstrArgs, 0);
+            vm->angleVel.y = readArgF32(curInstrArgs, 1);
+            vm->angleVel.z = readArgF32(curInstrArgs, 2);
             break;
         case AnmOpcode_SetScaleSpeed:
-            local_18 = (f32 *)&curInstr->args[0];
-            vm->scaleInterpFinalX = *local_18++;
-            vm->scaleInterpFinalY = *local_18;
+            vm->scaleInterpFinalX = readArgF32(curInstrArgs, 0);
+            vm->scaleInterpFinalY = readArgF32(curInstrArgs, 1);
             vm->scaleInterpEndTime = 0;
             break;
         case AnmOpcode_ScaleTime:
-            local_1c = (f32 *)&curInstr->args[0];
-            vm->scaleInterpFinalX = *local_1c++;
-            vm->scaleInterpFinalY = *local_1c++;
-            vm->scaleInterpEndTime = *(u16 *)local_1c;
+            vm->scaleInterpFinalX = readArgF32(curInstrArgs, 0);
+            vm->scaleInterpFinalY = readArgF32(curInstrArgs, 1);
+            vm->scaleInterpEndTime = utils::ReadUnaligned<u16>(curInstrArgs + sizeof(f32) * 2);
             vm->scaleInterpTime.InitializeForPopup();
             vm->scaleInterpInitialX = vm->scaleX;
             vm->scaleInterpInitialY = vm->scaleY;
             break;
         case AnmOpcode_Fade:
-            local_20 = (u32 *)&curInstr->args[0];
             vm->alphaInterpInitial = vm->color;
-            vm->alphaInterpFinal = COLOR_SET_ALPHA2(vm->color, local_20[0]);
-            vm->alphaInterpEndTime = local_20[1];
+            vm->alphaInterpFinal = COLOR_SET_ALPHA2(vm->color, readArgU32(curInstrArgs, 0));
+            vm->alphaInterpEndTime = readArgU32(curInstrArgs, 1);
             vm->alphaInterpTime.InitializeForPopup();
             break;
         case AnmOpcode_SetBlendAdditive:
@@ -946,13 +959,13 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
         case AnmOpcode_SetPosition:
             if (vm->flags.usePosOffset == 0)
             {
-                vm->pos =
-                    D3DXVECTOR3(*(f32 *)&curInstr->args[0], *(f32 *)&curInstr->args[1], *(f32 *)&curInstr->args[2]);
+                vm->pos = D3DXVECTOR3(readArgF32(curInstrArgs, 0), readArgF32(curInstrArgs, 1),
+                                      readArgF32(curInstrArgs, 2));
             }
             else
             {
-                vm->posOffset =
-                    D3DXVECTOR3(*(f32 *)&curInstr->args[0], *(f32 *)&curInstr->args[1], *(f32 *)&curInstr->args[2]);
+                vm->posOffset = D3DXVECTOR3(readArgF32(curInstrArgs, 0), readArgF32(curInstrArgs, 1),
+                                            readArgF32(curInstrArgs, 2));
             }
             break;
         case AnmOpcode_PosTimeAccel:
@@ -972,9 +985,9 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
             {
                 memcpy(vm->posInterpInitial, vm->posOffset, sizeof(D3DXVECTOR3));
             }
-            vm->posInterpFinal =
-                D3DXVECTOR3(*(f32 *)&curInstr->args[0], *(f32 *)&curInstr->args[1], *(f32 *)&curInstr->args[2]);
-            vm->posInterpEndTime = curInstr->args[3];
+            vm->posInterpFinal = D3DXVECTOR3(readArgF32(curInstrArgs, 0), readArgF32(curInstrArgs, 1),
+                                             readArgF32(curInstrArgs, 2));
+            vm->posInterpEndTime = readArgU32(curInstrArgs, 3);
             vm->posInterpTime.InitializeForPopup();
             break;
         case AnmOpcode_StopHide:
@@ -989,19 +1002,21 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
         yolo:
             nextInstr = NULL;
             curInstr = vm->beginingOfScript;
-            while ((curInstr->opcode != AnmOpcode_InterruptLabel || vm->pendingInterrupt != curInstr->args[0]) &&
-                   curInstr->opcode != AnmOpcode_Exit && curInstr->opcode != AnmOpcode_ExitHide)
+            while ((instructionOpcode(curInstr) != AnmOpcode_InterruptLabel ||
+                    vm->pendingInterrupt != readArgU32(instructionArgs(curInstr), 0)) &&
+                   instructionOpcode(curInstr) != AnmOpcode_Exit && instructionOpcode(curInstr) != AnmOpcode_ExitHide)
             {
-                if (curInstr->opcode == AnmOpcode_InterruptLabel && curInstr->args[0] == 0xffffffff)
+                if (instructionOpcode(curInstr) == AnmOpcode_InterruptLabel &&
+                    readArgU32(instructionArgs(curInstr), 0) == 0xffffffff)
                 {
                     nextInstr = curInstr;
                 }
-                curInstr = (AnmRawInstr *)((i32)curInstr->args + curInstr->argsCount);
+                curInstr = nextInstruction(curInstr);
             }
 
             vm->pendingInterrupt = 0;
             vm->flags.isStopped = 0;
-            if (curInstr->opcode != AnmOpcode_InterruptLabel)
+            if (instructionOpcode(curInstr) != AnmOpcode_InterruptLabel)
             {
                 if (nextInstr == NULL)
                 {
@@ -1011,22 +1026,22 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
                 curInstr = nextInstr;
             }
 
-            curInstr = (AnmRawInstr *)((i32)curInstr->args + curInstr->argsCount);
+            curInstr = nextInstruction(curInstr);
             vm->currentInstruction = curInstr;
-            vm->currentTimeInScript.SetCurrent(vm->currentInstruction->time);
+            vm->currentTimeInScript.SetCurrent(instructionTime(vm->currentInstruction));
             vm->flags.isVisible = 1;
             continue;
         case AnmOpcode_SetVisibility:
-            vm->flags.isVisible = curInstr->args[0];
+            vm->flags.isVisible = readArgU32(curInstrArgs, 0);
             break;
         case AnmOpcode_AnchorTopLeft:
             vm->flags.anchor = AnmVmAnchor_TopLeft;
             break;
         case AnmOpcode_SetAutoRotate:
-            vm->autoRotate = curInstr->args[0];
+            vm->autoRotate = readArgU32(curInstrArgs, 0);
             break;
         case AnmOpcode_UVScrollX:
-            vm->uvScrollPos.x += *(f32 *)&curInstr->args[0];
+            vm->uvScrollPos.x += readArgF32(curInstrArgs, 0);
             if (vm->uvScrollPos.x >= 1.0f)
             {
                 vm->uvScrollPos.x -= 1.0f;
@@ -1037,7 +1052,7 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
             }
             break;
         case AnmOpcode_UVScrollY:
-            vm->uvScrollPos.y += *(f32 *)&curInstr->args[0];
+            vm->uvScrollPos.y += readArgF32(curInstrArgs, 0);
             if (vm->uvScrollPos.y >= 1.0f)
             {
                 vm->uvScrollPos.y -= 1.0f;
@@ -1048,14 +1063,14 @@ i32 AnmManager::ExecuteScript(AnmVm *vm)
             }
             break;
         case AnmOpcode_SetZWriteDisable:
-            vm->flags.zWriteDisable = curInstr->args[0];
+            vm->flags.zWriteDisable = readArgU32(curInstrArgs, 0);
             break;
         case AnmOpcode_Nop:
         case AnmOpcode_InterruptLabel:
         default:
             break;
         }
-        vm->currentInstruction = (AnmRawInstr *)((u32)curInstr->args + curInstr->argsCount);
+        vm->currentInstruction = nextInstruction(curInstr);
     }
 
 stop:

@@ -9,6 +9,7 @@
 #include "diffbuild.hpp"
 #include "inttypes.hpp"
 #include "sdl2_compat.hpp"
+#include <cstring>
 
 namespace th06
 {
@@ -55,9 +56,11 @@ struct EclTimelineInstrArgs
     u16 ushortVar2;
     u32 uintVar4;
 
-    D3DXVECTOR3 *Var1AsVec()
+    D3DXVECTOR3 ReadVar1AsVec() const
     {
-        return (D3DXVECTOR3 *)&this->uintVar1;
+        D3DXVECTOR3 vec;
+        memcpy(&vec, &this->uintVar1, sizeof(vec));
+        return vec;
     }
 };
 

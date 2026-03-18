@@ -530,6 +530,13 @@ void GuiImpl::MsgRead(i32 msgIdx)
 ZunResult GuiImpl::RunMsg()
 {
     MsgRawInstrArgs *args;
+    auto msgTime = [](MsgRawInstr *instr) -> u16 { return utils::ReadUnaligned<u16>(instr); };
+    auto msgOpcode = [](MsgRawInstr *instr) -> u8 { return reinterpret_cast<const u8 *>(instr)[2]; };
+    auto msgArgSize = [](MsgRawInstr *instr) -> u8 { return reinterpret_cast<const u8 *>(instr)[3]; };
+    auto msgArgs = [](MsgRawInstr *instr) -> const u8 * { return reinterpret_cast<const u8 *>(instr) + 4; };
+    auto nextMsgInstr = [&](MsgRawInstr *instr) -> MsgRawInstr * {
+        return reinterpret_cast<MsgRawInstr *>(const_cast<u8 *>(msgArgs(instr) + msgArgSize(instr)));
+    };
 
     if (this->msg.currentMsgIdx < 0)
     {
@@ -541,52 +548,62 @@ ZunResult GuiImpl::RunMsg()
     }
     if (this->msg.dialogueSkippable && IS_PRESSED(TH_BUTTON_SKIP))
     {
-        this->msg.timer.SetCurrent(this->msg.currentInstr->time);
+        this->msg.timer.SetCurrent(msgTime(this->msg.currentInstr));
     }
-    while ((i32)(this->msg.timer.current >= this->msg.currentInstr->time))
+    while ((i32)(this->msg.timer.current >= msgTime(this->msg.currentInstr)))
     {
-        switch (this->msg.currentInstr->opcode)
+        const u8 *curArgs = msgArgs(this->msg.currentInstr);
+
+        switch (msgOpcode(this->msg.currentInstr))
         {
         case MSG_OPCODE_MSGDELETE:
             this->msg.currentMsgIdx = 0xffffffff;
             return ZUN_ERROR;
         case MSG_OPCODE_PORTRAITANMSCRIPT:
-            args = &this->msg.currentInstr->args;
+        {
+            i16 portraitIdx = utils::ReadUnaligned<i16>(curArgs);
+            i16 anmScriptIdx = utils::ReadUnaligned<i16>(curArgs + sizeof(i16));
+
             g_AnmManager->SetAndExecuteScriptIdx(
-                &this->msg.portraits[args->portraitAnmScript.portraitIdx],
-                args->portraitAnmScript.anmScriptIdx +
-                    (args->portraitAnmScript.portraitIdx == 0 ? ANM_SCRIPT_FACE_START : ANM_SCRIPT_FACE_START + 2));
+                &this->msg.portraits[portraitIdx],
+                anmScriptIdx + (portraitIdx == 0 ? ANM_SCRIPT_FACE_START : ANM_SCRIPT_FACE_START + 2));
             break;
+        }
         case MSG_OPCODE_PORTRAITANMSPRITE:
-            args = &this->msg.currentInstr->args;
+        {
+            i16 portraitIdx = utils::ReadUnaligned<i16>(curArgs);
+            i16 anmScriptIdx = utils::ReadUnaligned<i16>(curArgs + sizeof(i16));
+
             g_AnmManager->SetActiveSprite(
-                &this->msg.portraits[args->portraitAnmScript.portraitIdx],
-                args->portraitAnmScript.anmScriptIdx +
-                    (args->portraitAnmScript.portraitIdx == 0 ? ANM_SCRIPT_FACE_START : ANM_SCRIPT_FACE_START + 8));
+                &this->msg.portraits[portraitIdx],
+                anmScriptIdx + (portraitIdx == 0 ? ANM_SCRIPT_FACE_START : ANM_SCRIPT_FACE_START + 8));
             break;
+        }
         case MSG_OPCODE_TEXTDIALOGUE:
-            args = &this->msg.currentInstr->args;
-            if (args->text.textLine == 0 && 0 <= this->msg.dialogueLines[1].anmFileIndex)
+        {
+            i16 textColor = utils::ReadUnaligned<i16>(curArgs);
+            i16 textLine = utils::ReadUnaligned<i16>(curArgs + sizeof(i16));
+            char *text = reinterpret_cast<char *>(const_cast<u8 *>(curArgs + sizeof(i16) * 2));
+
+            if (textLine == 0 && 0 <= this->msg.dialogueLines[1].anmFileIndex)
             {
                 AnmManager::DrawVmTextFmt(g_AnmManager, &this->msg.dialogueLines[1],
-                                          this->msg.textColorsA[args->text.textColor],
-                                          this->msg.textColorsB[args->text.textColor], " ");
+                                          this->msg.textColorsA[textColor], this->msg.textColorsB[textColor], " ");
             }
-            g_AnmManager->SetAndExecuteScriptIdx(&this->msg.dialogueLines[args->text.textLine],
-                                                 0x702 + args->text.textLine);
-            this->msg.dialogueLines[args->text.textLine].fontWidth =
-                this->msg.dialogueLines[args->text.textLine].fontHeight = this->msg.fontSize;
-            AnmManager::DrawVmTextFmt(g_AnmManager, &this->msg.dialogueLines[args->text.textLine],
-                                      this->msg.textColorsA[args->text.textColor],
-                                      this->msg.textColorsB[args->text.textColor], args->text.text);
+            g_AnmManager->SetAndExecuteScriptIdx(&this->msg.dialogueLines[textLine], 0x702 + textLine);
+            this->msg.dialogueLines[textLine].fontWidth = this->msg.dialogueLines[textLine].fontHeight =
+                this->msg.fontSize;
+            AnmManager::DrawVmTextFmt(g_AnmManager, &this->msg.dialogueLines[textLine], this->msg.textColorsA[textColor],
+                                      this->msg.textColorsB[textColor], text);
             this->msg.framesElapsedDuringPause = 0;
             break;
+        }
         case MSG_OPCODE_WAIT:
             if (!this->msg.dialogueSkippable || !IS_PRESSED(TH_BUTTON_SKIP))
             {
                 if (!WAS_PRESSED(TH_BUTTON_SHOOT) || this->msg.framesElapsedDuringPause < 8)
                 {
-                    if (this->msg.framesElapsedDuringPause >= this->msg.currentInstr->args.wait)
+                    if (this->msg.framesElapsedDuringPause >= utils::ReadUnaligned<i32>(curArgs))
                     {
                         break;
                     }
@@ -596,37 +613,48 @@ ZunResult GuiImpl::RunMsg()
             }
             break;
         case MSG_OPCODE_ANMINTERRUPT:
-            args = &this->msg.currentInstr->args;
-            if (args->anmInterrupt.unk1 < 2)
+        {
+            i16 targetIdx = utils::ReadUnaligned<i16>(curArgs);
+            u8 interruptId = curArgs[sizeof(i16)];
+
+            if (targetIdx < 2)
             {
-                this->msg.portraits[args->anmInterrupt.unk1].pendingInterrupt = args->anmInterrupt.unk2;
+                this->msg.portraits[targetIdx].pendingInterrupt = interruptId;
             }
             else
             {
-                this->msg.dialogueLines[args->anmInterrupt.unk1 - 2].pendingInterrupt = args->anmInterrupt.unk2;
+                this->msg.dialogueLines[targetIdx - 2].pendingInterrupt = interruptId;
             }
             break;
+        }
         case MSG_OPCODE_ECLRESUME:
             this->msg.ignoreWaitCounter += 1;
             break;
         case MSG_OPCODE_MUSIC:
+        {
+            i32 musicIdx = utils::ReadUnaligned<i32>(curArgs);
+
             g_AnmManager->SetAndExecuteScriptIdx(&this->songNameSprite, 0x701);
             this->songNameSprite.fontWidth = 16;
             this->songNameSprite.fontHeight = 16;
             AnmManager::DrawStringFormat(g_AnmManager, &this->songNameSprite, COLOR_RGB(COLOR_LIGHTCYAN),
                                          COLOR_RGB(COLOR_BLACK), TH_SONG_NAME,
-                                         g_Stage.stdData->songNames[this->msg.currentInstr->args.music]);
-            g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[this->msg.currentInstr->args.music]);
+                                         g_Stage.stdData->songNames[musicIdx]);
+            g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[musicIdx]);
             break;
+        }
         case MSG_OPCODE_TEXTINTRO:
-            args = &this->msg.currentInstr->args;
-            g_AnmManager->SetAndExecuteScriptIdx(&this->msg.introLines[args->text.textLine],
-                                                 args->text.textLine + 0x704);
-            AnmManager::DrawStringFormat(g_AnmManager, &this->msg.introLines[args->text.textLine],
-                                         this->msg.textColorsA[args->text.textColor],
-                                         this->msg.textColorsB[args->text.textColor], args->text.text);
+        {
+            i16 textColor = utils::ReadUnaligned<i16>(curArgs);
+            i16 textLine = utils::ReadUnaligned<i16>(curArgs + sizeof(i16));
+            char *text = reinterpret_cast<char *>(const_cast<u8 *>(curArgs + sizeof(i16) * 2));
+
+            g_AnmManager->SetAndExecuteScriptIdx(&this->msg.introLines[textLine], textLine + 0x704);
+            AnmManager::DrawStringFormat(g_AnmManager, &this->msg.introLines[textLine], this->msg.textColorsA[textColor],
+                                         this->msg.textColorsB[textColor], text);
             this->msg.framesElapsedDuringPause = 0;
             break;
+        }
         case MSG_OPCODE_STAGERESULTS:
             this->finishedStage = 1;
             if (g_GameManager.currentStage < 6)
@@ -676,11 +704,10 @@ ZunResult GuiImpl::RunMsg()
             }
             goto SKIP_TIME_INCREMENT;
         case MSG_OPCODE_WAITSKIPPABLE:
-            this->msg.dialogueSkippable = this->msg.currentInstr->args.dialogueSkippable;
+            this->msg.dialogueSkippable = utils::ReadUnaligned<i32>(curArgs);
             break;
         }
-        this->msg.currentInstr =
-            (MsgRawInstr *)(((i32) & this->msg.currentInstr->args) + this->msg.currentInstr->argSize);
+        this->msg.currentInstr = nextMsgInstr(this->msg.currentInstr);
     }
     this->msg.timer.NextTick();
 SKIP_TIME_INCREMENT:

@@ -36,6 +36,15 @@ DIFFABLE_STATIC(f32, g_PlayerAngle);
 DIFFABLE_STATIC_ARRAY(f32, 6, g_StarAngleTable);
 DIFFABLE_STATIC(D3DXVECTOR3, g_EnemyPosVector);
 DIFFABLE_STATIC(D3DXVECTOR3, g_PlayerPosVector);
+DIFFABLE_STATIC_ARRAY(i32, 16, g_EclLiteralValues);
+DIFFABLE_STATIC(i32, g_EclLiteralValueCursor);
+
+static i32 *StoreLiteralValue(i32 value)
+{
+    i32 slot = g_EclLiteralValueCursor++ & 0xf;
+    g_EclLiteralValues[slot] = value;
+    return &g_EclLiteralValues[slot];
+}
 
 #pragma var_order(alu, angle)
 void MoveDirTime(Enemy *enemy, EclRawInstr *instr)
@@ -99,10 +108,12 @@ void MoveTime(Enemy *enemy, EclRawInstr *instr)
 
 i32 *GetVar(Enemy *enemy, EclVarId *eclVarId, EclValueType *valueType)
 {
+    EclVarId resolvedVarId = utils::ReadUnaligned<EclVarId>(eclVarId);
+
     if (valueType != NULL)
         *valueType = ECL_VALUE_TYPE_UNDEFINED;
 
-    switch (*eclVarId)
+    switch (resolvedVarId)
     {
     case ECL_VAR_I32_0:
         if (valueType != NULL)
@@ -235,21 +246,14 @@ i32 *GetVar(Enemy *enemy, EclVarId *eclVarId, EclValueType *valueType)
             *valueType = ECL_VALUE_TYPE_INT;
         return &g_PlayerShot;
     }
-    return (i32 *)eclVarId;
+    return StoreLiteralValue((i32)resolvedVarId);
 }
 
 f32 *GetVarFloat(Enemy *enemy, f32 *eclVarId, EclValueType *valueType)
 {
-    i32 varId = *eclVarId;
+    i32 varId = utils::ReadUnaligned<i32>(eclVarId);
     i32 *res = GetVar(enemy, (EclVarId *)&varId, valueType);
-    if (res == &varId)
-    {
-        return eclVarId;
-    }
-    else
-    {
-        return (f32 *)res;
-    }
+    return (f32 *)res;
 }
 
 #pragma var_order(lhsPtr, rhsPtr, lhsType)

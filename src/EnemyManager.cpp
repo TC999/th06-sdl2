@@ -107,7 +107,7 @@ Enemy *EnemyManager::SpawnEnemy(i32 eclSubId, D3DXVECTOR3 *pos, i16 life, i16 it
         if (0 <= life)
             newEnemy->life = life;
 
-        newEnemy->position = *pos;
+        memcpy(&newEnemy->position, pos, sizeof(newEnemy->position));
         g_EclManager.CallEclSub(&newEnemy->currentContext, eclSubId);
         g_EclManager.RunEcl(newEnemy);
         newEnemy->color = newEnemy->primaryVm.color;
@@ -180,60 +180,71 @@ void EnemyManager::RunEclTimeline()
             case 0:
                 if (!g_Gui.BossPresent())
                 {
-                    args1 = &this->timelineInstr->args;
-                    this->SpawnEnemy(this->timelineInstr->arg0, args1->Var1AsVec(), args1->ushortVar1,
-                                     args1->ushortVar2, args1->uintVar4);
+                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    i16 spawnLife = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar1);
+                    i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
+                    i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
+
+                    this->SpawnEnemy(this->timelineInstr->arg0, &spawnPos, spawnLife, spawnItemDrop, spawnScore);
                 }
                 break;
             case 1:
                 if (!g_Gui.BossPresent())
                 {
-                    this->SpawnEnemy(this->timelineInstr->arg0, this->timelineInstr->args.Var1AsVec(), -1, ITEM_NO_ITEM,
-                                     -1);
+                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+
+                    this->SpawnEnemy(this->timelineInstr->arg0, &spawnPos, -1, ITEM_NO_ITEM, -1);
                 }
                 break;
             case 2:
                 if (!g_Gui.BossPresent())
                 {
-                    args2 = &this->timelineInstr->args;
-                    spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, args2->Var1AsVec(), args2->ushortVar1,
-                                                    args2->ushortVar2, args2->uintVar4);
+                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    i16 spawnLife = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar1);
+                    i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
+                    i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
+
+                    spawnedEnemy =
+                        this->SpawnEnemy(this->timelineInstr->arg0, &spawnPos, spawnLife, spawnItemDrop, spawnScore);
                     spawnedEnemy->flags.unk4 = 1;
                 }
                 break;
             case 3:
                 if (!g_Gui.BossPresent())
                 {
-                    spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, this->timelineInstr->args.Var1AsVec(),
-                                                    -1, ITEM_NO_ITEM, -1);
+                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+
+                    spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, &spawnPos, -1, ITEM_NO_ITEM, -1);
                     spawnedEnemy->flags.unk4 = 1;
                 }
                 break;
             case 4:
                 if (!g_Gui.BossPresent())
                 {
-                    args3 = &this->timelineInstr->args;
-                    pos1 = *args3->Var1AsVec();
-                    if (args3->Var1AsVec()->x <= -990.0f)
+                    i16 spawnLife = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar1);
+                    i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
+                    i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
+
+                    pos1 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    if (pos1.x <= -990.0f)
                     {
                         pos1.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
                     }
-                    if (args3->Var1AsVec()->y <= -990.0f)
+                    if (pos1.y <= -990.0f)
                     {
                         pos1.y = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.y);
                     }
-                    if (args3->Var1AsVec()->z <= -990.0f)
+                    if (pos1.z <= -990.0f)
                     {
                         pos1.z = g_Rng.GetRandomF32InRange(800.0f);
                     }
-                    this->SpawnEnemy(this->timelineInstr->arg0, &pos1, args3->ushortVar1, args3->ushortVar2,
-                                     args3->uintVar4);
+                    this->SpawnEnemy(this->timelineInstr->arg0, &pos1, spawnLife, spawnItemDrop, spawnScore);
                 }
                 break;
             case 5:
                 if (!g_Gui.BossPresent())
                 {
-                    pos2 = *this->timelineInstr->args.Var1AsVec();
+                    pos2 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
                     if (pos2.x <= -990.0f)
                     {
                         pos2.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
@@ -252,29 +263,32 @@ void EnemyManager::RunEclTimeline()
             case 6:
                 if (!g_Gui.BossPresent())
                 {
-                    args4 = &this->timelineInstr->args;
-                    pos3 = *args4->Var1AsVec();
-                    if (args4->Var1AsVec()->x <= -990.0f)
+                    i16 spawnLife = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar1);
+                    i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
+                    i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
+
+                    pos3 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    if (pos3.x <= -990.0f)
                     {
                         pos3.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
                     }
-                    if (args4->Var1AsVec()->y <= -990.0f)
+                    if (pos3.y <= -990.0f)
                     {
                         pos3.y = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.y);
                     }
-                    if (args4->Var1AsVec()->z <= -990.0f)
+                    if (pos3.z <= -990.0f)
                     {
                         pos3.z = g_Rng.GetRandomF32InRange(800.0f);
                     }
-                    spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, &pos3, args4->ushortVar1,
-                                                    args4->ushortVar2, args4->uintVar4);
+                    spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, &pos3, spawnLife, spawnItemDrop,
+                                                    spawnScore);
                     spawnedEnemy->flags.unk4 = 1;
                 }
                 break;
             case 7:
                 if (!g_Gui.BossPresent())
                 {
-                    pos4 = *this->timelineInstr->args.Var1AsVec();
+                    pos4 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
                     if (pos4.x <= -990.0f)
                     {
                         pos4.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
@@ -310,8 +324,13 @@ void EnemyManager::RunEclTimeline()
                 }
                 break;
             case 10:
-                this->bosses[this->timelineInstr->args.uintVar1]->runInterrupt = this->timelineInstr->args.uintVar2;
+            {
+                u32 bossIdx = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar1);
+                i32 interruptId = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar2);
+
+                this->bosses[bossIdx]->runInterrupt = interruptId;
                 break;
+            }
             case 0xb:
                 g_GameManager.currentPower = this->timelineInstr->arg0;
                 break;
