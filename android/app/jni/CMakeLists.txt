@@ -141,6 +141,10 @@ target_compile_definitions(main PRIVATE
     TH06_ANDROID=1
 )
 
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(main PRIVATE TH06_ECL_TRACE=1)
+endif()
+
 # Clang flags matching the main CMakeLists.txt GCC/Clang section
 target_compile_options(main PRIVATE
     -fpermissive             # Allow MSVC-compatible syntax (extra qualification, etc.)

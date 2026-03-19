@@ -10,6 +10,7 @@
 #include "Rng.hpp"
 #include "ZunBool.hpp"
 #include "utils.hpp"
+#include <cstddef>
 
 namespace th06
 {
@@ -36,74 +37,146 @@ DIFFABLE_STATIC(f32, g_PlayerAngle);
 DIFFABLE_STATIC_ARRAY(f32, 6, g_StarAngleTable);
 DIFFABLE_STATIC(D3DXVECTOR3, g_EnemyPosVector);
 DIFFABLE_STATIC(D3DXVECTOR3, g_PlayerPosVector);
-DIFFABLE_STATIC_ARRAY(i32, 16, g_EclLiteralValues);
-DIFFABLE_STATIC(i32, g_EclLiteralValueCursor);
+DIFFABLE_STATIC_ARRAY_ASSIGN(i32, 16, g_EclLiteralInts) = {};
+DIFFABLE_STATIC_ARRAY_ASSIGN(f32, 16, g_EclLiteralFloats) = {};
+DIFFABLE_STATIC(i32, g_EclLiteralIntCursor);
+DIFFABLE_STATIC(i32, g_EclLiteralFloatCursor);
 
-static i32 *StoreLiteralValue(i32 value)
+static inline bool IsAlignedForWord(const void *ptr)
 {
-    i32 slot = g_EclLiteralValueCursor++ & 0xf;
-    g_EclLiteralValues[slot] = value;
-    return &g_EclLiteralValues[slot];
+    return (reinterpret_cast<size_t>(ptr) & (alignof(i32) - 1)) == 0;
+}
+
+static inline i32 *StoreLiteralInt(i32 value)
+{
+    i32 *slot = &g_EclLiteralInts[g_EclLiteralIntCursor];
+    *slot = value;
+    g_EclLiteralIntCursor = (g_EclLiteralIntCursor + 1) % ARRAY_SIZE_SIGNED(g_EclLiteralInts);
+    return slot;
+}
+
+static inline f32 *StoreLiteralFloat(f32 value)
+{
+    f32 *slot = &g_EclLiteralFloats[g_EclLiteralFloatCursor];
+    *slot = value;
+    g_EclLiteralFloatCursor = (g_EclLiteralFloatCursor + 1) % ARRAY_SIZE_SIGNED(g_EclLiteralFloats);
+    return slot;
+}
+
+#define RAW_ECL_ARG_PTR(type, args_type, member)                                                                              \
+    reinterpret_cast<type *>(const_cast<u8 *>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, args) +            \
+                                              offsetof(args_type, member)))
+
+static inline i32 ReadExInstrI32Param(const EclRawInstr *instr)
+{
+    return utils::ReadUnaligned<i32>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, args) +
+                                     offsetof(EclRawInstrExInstrArgs, i32Param));
+}
+
+static inline u8 ReadExInstrU8Param(const EclRawInstr *instr)
+{
+    return utils::ReadUnaligned<u8>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, args) +
+                                    offsetof(EclRawInstrExInstrArgs, u8Param));
 }
 
 #pragma var_order(alu, angle)
 void MoveDirTime(Enemy *enemy, EclRawInstr *instr)
 {
-    EclRawInstrAluArgs *alu;
     f32 angle;
+    f32 speed;
+    i32 time;
 
-    alu = &instr->args.alu;
-    angle = *GetVarFloat(enemy, &alu->arg1.f32, NULL);
+    angle = *GetVarFloat(enemy, RAW_ECL_ARG_PTR(f32, EclRawInstrAluArgs, arg1.f32), NULL);
+    speed = utils::ReadUnaligned<f32>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, args) +
+                                      offsetof(EclRawInstrAluArgs, arg2.f32));
+    time = utils::ReadUnaligned<i32>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, args) +
+                                     offsetof(EclRawInstrAluArgs, res));
 
-    enemy->moveInterp.x = cosf(angle) * alu->arg2.f32 * alu->res / 2.0f;
-    enemy->moveInterp.y = sinf(angle) * alu->arg2.f32 * alu->res / 2.0f;
+    enemy->moveInterp.x = cosf(angle) * speed * time / 2.0f;
+    enemy->moveInterp.y = sinf(angle) * speed * time / 2.0f;
     enemy->moveInterp.z = 0.0f;
 
     enemy->moveInterpStartPos = enemy->position;
-    enemy->moveInterpStartTime = alu->res;
+    enemy->moveInterpStartTime = time;
 
     enemy->moveInterpTimer.SetCurrent(enemy->moveInterpStartTime);
 
     enemy->flags.unk1 = 2;
+#if defined(DEBUG) || defined(TH06_ECL_TRACE)
+    if (enemy->flags.isBoss && g_EnemyManager.spellcardInfo.isActive)
+    {
+        const i16 opCode =
+            utils::ReadUnaligned<i16>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, opCode));
+        SDL_Log("[spell/ecl/detail] boss=%d spell=%d sub=%u time=%d op=%d angle=%f speed=%f duration=%d interp=(%f,%f,%f)",
+                enemy->bossId, g_EnemyManager.spellcardInfo.idx, enemy->currentContext.subId,
+                enemy->currentContext.time.current, opCode, angle, speed, time, enemy->moveInterp.x,
+                enemy->moveInterp.y, enemy->moveInterp.z);
+    }
+#endif
 }
 
 void MovePosTime(Enemy *enemy, EclRawInstr *instr)
 {
     D3DXVECTOR3 newPos;
-    EclRawInstrAluArgs *alu = &instr->args.alu;
+    i32 time;
 
-    newPos.x = *GetVarFloat(enemy, &alu->arg1.f32, NULL);
-    newPos.y = *GetVarFloat(enemy, &alu->arg2.f32, NULL);
-    newPos.z = *GetVarFloat(enemy, &alu->arg3.f32, NULL);
+    newPos.x = *GetVarFloat(enemy, RAW_ECL_ARG_PTR(f32, EclRawInstrAluArgs, arg1.f32), NULL);
+    newPos.y = *GetVarFloat(enemy, RAW_ECL_ARG_PTR(f32, EclRawInstrAluArgs, arg2.f32), NULL);
+    newPos.z = *GetVarFloat(enemy, RAW_ECL_ARG_PTR(f32, EclRawInstrAluArgs, arg3.f32), NULL);
+    time = utils::ReadUnaligned<i32>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, args) +
+                                     offsetof(EclRawInstrAluArgs, res));
 
     enemy->moveInterp = newPos - enemy->position;
     enemy->moveInterpStartPos = enemy->position;
-    enemy->moveInterpStartTime = alu->res;
+    enemy->moveInterpStartTime = time;
 
     enemy->moveInterpTimer.SetCurrent(enemy->moveInterpStartTime);
 
     enemy->flags.unk1 = 2;
     enemy->axisSpeed = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
+#if defined(DEBUG) || defined(TH06_ECL_TRACE)
+    if (enemy->flags.isBoss && g_EnemyManager.spellcardInfo.isActive)
+    {
+        const i16 opCode =
+            utils::ReadUnaligned<i16>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, opCode));
+        SDL_Log("[spell/ecl/detail] boss=%d spell=%d sub=%u time=%d op=%d pos=(%f,%f,%f) duration=%d interp=(%f,%f,%f)",
+                enemy->bossId, g_EnemyManager.spellcardInfo.idx, enemy->currentContext.subId,
+                enemy->currentContext.time.current, opCode, newPos.x, newPos.y, newPos.z, time, enemy->moveInterp.x,
+                enemy->moveInterp.y, enemy->moveInterp.z);
+    }
+#endif
 }
 
 void MoveTime(Enemy *enemy, EclRawInstr *instr)
 {
-    EclRawInstrAluArgs *alu;
     f32 angle;
+    i32 time;
 
-    alu = &instr->args.alu;
     angle = *GetVarFloat(enemy, &enemy->angle, NULL);
+    time = utils::ReadUnaligned<i32>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, args) +
+                                     offsetof(EclRawInstrAluArgs, res));
 
-    enemy->moveInterp.x = cosf(angle) * enemy->speed * alu->res / 2.0f;
-    enemy->moveInterp.y = sinf(angle) * enemy->speed * alu->res / 2.0f;
+    enemy->moveInterp.x = cosf(angle) * enemy->speed * time / 2.0f;
+    enemy->moveInterp.y = sinf(angle) * enemy->speed * time / 2.0f;
     enemy->moveInterp.z = 0.0f;
 
     enemy->moveInterpStartPos = enemy->position;
-    enemy->moveInterpStartTime = alu->res;
+    enemy->moveInterpStartTime = time;
 
     enemy->moveInterpTimer.SetCurrent(enemy->moveInterpStartTime);
 
     enemy->flags.unk1 = 2;
+#if defined(DEBUG) || defined(TH06_ECL_TRACE)
+    if (enemy->flags.isBoss && g_EnemyManager.spellcardInfo.isActive)
+    {
+        const i16 opCode =
+            utils::ReadUnaligned<i16>(reinterpret_cast<const u8 *>(instr) + offsetof(EclRawInstr, opCode));
+        SDL_Log("[spell/ecl/detail] boss=%d spell=%d sub=%u time=%d op=%d angle=%f speed=%f duration=%d interp=(%f,%f,%f)",
+                enemy->bossId, g_EnemyManager.spellcardInfo.idx, enemy->currentContext.subId,
+                enemy->currentContext.time.current, opCode, angle, enemy->speed, time, enemy->moveInterp.x,
+                enemy->moveInterp.y, enemy->moveInterp.z);
+    }
+#endif
 }
 
 i32 *GetVar(Enemy *enemy, EclVarId *eclVarId, EclValueType *valueType)
@@ -246,14 +319,32 @@ i32 *GetVar(Enemy *enemy, EclVarId *eclVarId, EclValueType *valueType)
             *valueType = ECL_VALUE_TYPE_INT;
         return &g_PlayerShot;
     }
-    return StoreLiteralValue((i32)resolvedVarId);
+    if (IsAlignedForWord(eclVarId))
+    {
+        return (i32 *)eclVarId;
+    }
+
+    return StoreLiteralInt(utils::ReadUnaligned<i32>(eclVarId));
 }
 
 f32 *GetVarFloat(Enemy *enemy, f32 *eclVarId, EclValueType *valueType)
 {
-    i32 varId = utils::ReadUnaligned<i32>(eclVarId);
+    f32 literalValue = utils::ReadUnaligned<f32>(eclVarId);
+    i32 varId = (i32)literalValue;
     i32 *res = GetVar(enemy, (EclVarId *)&varId, valueType);
-    return (f32 *)res;
+    if (res == &varId)
+    {
+        if (IsAlignedForWord(eclVarId))
+        {
+            return eclVarId;
+        }
+
+        return StoreLiteralFloat(literalValue);
+    }
+    else
+    {
+        return (f32 *)res;
+    }
 }
 
 #pragma var_order(lhsPtr, rhsPtr, lhsType)
@@ -430,7 +521,7 @@ void ExInsCirnoRainbowBallJank(Enemy *enemy, EclRawInstr *instr)
     D3DXVECTOR3 velocityVector;
 
     currentBullet = g_BulletManager.bullets;
-    effectIndex = instr->args.exInstr.i32Param;
+    effectIndex = ReadExInstrI32Param(instr);
 
     g_EffectManager.SpawnParticles(PARTICLE_EFFECT_UNK_12, &enemy->position, 1, COLOR_WHITE);
     for (i = 0; i < ARRAY_SIZE_SIGNED(g_BulletManager.bullets); i++, currentBullet++)
@@ -472,7 +563,7 @@ void ExInsShootAtRandomArea(Enemy *enemy, EclRawInstr *instr)
 {
     f32 bulletSpeed;
 
-    bulletSpeed = instr->args.exInstr.i32Param;
+    bulletSpeed = ReadExInstrI32Param(instr);
     enemy->bulletProps.position = enemy->position + enemy->shootOffset;
     enemy->bulletProps.position.x =
         (g_Rng.GetRandomF32ZeroToOne() * bulletSpeed + (enemy->position).x) - bulletSpeed / 2.0f;
@@ -563,10 +654,10 @@ void ExInsStage56Func4(Enemy *enemy, EclRawInstr *instr)
     i32 i;
     ZunVec2 playerBulletOffset;
 
-    if (instr->args.exInstr.i32Param < 2)
+    if (ReadExInstrI32Param(instr) < 2)
     {
         g_EffectManager.SpawnParticles(PARTICLE_EFFECT_UNK_12, &enemy->position, 1, COLOR_WHITE);
-        g_GameManager.isTimeStopped = instr->args.exInstr.u8Param;
+        g_GameManager.isTimeStopped = ReadExInstrU8Param(instr);
     }
     else
     {
@@ -813,7 +904,7 @@ void ExInsStage6Func7(Enemy *enemy, EclRawInstr *instr)
 
     D3DXVECTOR3 positionVectors[8];
 
-    attackType = instr->args.exInstr.i32Param;
+    attackType = ReadExInstrI32Param(instr);
     randomAngleModifier = g_Rng.GetRandomF32ZeroToOne() * (ZUN_PI * 2);
 
     for (outerLoopCount = 0; outerLoopCount < 2; outerLoopCount++)
@@ -1097,7 +1188,7 @@ void ExInsStageXFunc13(Enemy *enemy, EclRawInstr *instr)
     i32 i;
     i32 numPatterns;
 
-    numPatterns = instr->args.exInstr.i32Param;
+    numPatterns = ReadExInstrI32Param(instr);
     basePatternAngle = enemy->currentContext.float2;
     if (enemy->currentContext.var3 % 6 == 0)
     {
@@ -1225,7 +1316,7 @@ void ExInsStageXFunc16(Enemy *enemy, EclRawInstr *instr)
         remainingLife = 0;
     }
 
-    if (instr->args.exInstr.i32Param == 0)
+    if (ReadExInstrI32Param(instr) == 0)
     {
         enemy->currentContext.float3 = 2.0f - (remainingLife * 1.0f) / 6000.0f;
         enemy->currentContext.var5 = (remainingLife * 240) / 6000 + 40;
