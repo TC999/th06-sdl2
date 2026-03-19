@@ -22,11 +22,37 @@ namespace th06
 
 struct RendererGLES : public IRenderer
 {
+    enum Flush2DReason
+    {
+        Flush2D_Unknown = 0,
+        Flush2D_State,
+        Flush2D_Capacity,
+        Flush2D_LeavePass,
+        Flush2D_Surface,
+        Flush2D_ImmediateFallback,
+        Flush2D_Count
+    };
+
+    enum Flush3DReason
+    {
+        Flush3D_Unknown = 0,
+        Flush3D_State,
+        Flush3D_Capacity,
+        Flush3D_Begin2D,
+        Flush3D_BeginFrame,
+        Flush3D_ViewportOrClear,
+        Flush3D_FallbackImmediate,
+        Flush3D_BlitOrReadback,
+        Flush3D_EndFrame,
+        Flush3D_Count
+    };
+
     // Shader program
     GLuint shaderProgram;
     GLint loc_a_Position;
     GLint loc_a_Color;
     GLint loc_a_TexCoord;
+    GLint loc_a_FogFactor;
     GLint loc_u_MVP;
     GLint loc_u_TexMatrix;
     GLint loc_u_ModelView;
@@ -38,6 +64,7 @@ struct RendererGLES : public IRenderer
     GLint loc_u_FogStart;
     GLint loc_u_FogEnd;
     GLint loc_u_FogColor;
+    GLint loc_u_UseVertexFog;
 
     // CPU-side matrix state (replaces GL matrix stack)
     D3DXMATRIX modelviewMatrix;   // view * world
@@ -66,32 +93,80 @@ struct RendererGLES : public IRenderer
     GLuint quadIBO;       // static IBO: 6 indices per quad
     std::vector<BatchVertex> batchBuffer; // CPU staging: 4 verts per quad
     i32 batchQuadCount;
+    struct Batch3DVertex {
+        f32 x, y, z, w;   // clip-space position
+        u8 r, g, b, a;    // normalized color
+        f32 u, v;
+        f32 fogFactor;
+    };
+    static const i32 BATCH3D_MAX_QUADS = 2048;
+    GLuint batch3DVBO;
+    std::vector<Batch3DVertex> batch3DBuffer;
+    i32 batch3DQuadCount;
+    bool usingVertexFog;
+
     bool in2DPass;        // true while 2D ortho state is active
     bool mvpDirty;        // true when MVP uniform needs re-upload
     bool fogDirty;        // true when fog uniforms need re-upload
 
     // Saved 3D state for pass-level Enter/Leave
-    i32 saved3D_fog;
     GLint saved3D_scissor[4];
-    D3DXMATRIX saved3D_texMatrix;
+    bool saved3D_depthTestEnabled;
+    GLboolean saved3D_depthMask;
+    f32 viewportMinZ;
+    f32 viewportMaxZ;
 
     // Reusable CPU-side interleaved vertex staging buffer (3D draws)
     std::vector<f32> drawScratch;
     bool attribsEnabled;
+    bool fogAttribEnabled;
 
     // Per-frame debug stats
     struct FrameStats {
-        i32 drawCalls;
-        i32 batchFlushes;
-        i32 quadsBatched;
-        i32 vertexCount;
-        void Reset() { drawCalls = batchFlushes = quadsBatched = vertexCount = 0; }
-    } stats;
+        u32 frames;
+        u32 drawCalls;
+        u32 immediate2DDraws;
+        u32 immediate3DDraws;
+        u32 batch2DFlushes;
+        u32 batch3DFlushes;
+        u32 batch2DQuads;
+        u32 batch3DQuads;
+        u32 batch3DRejectedTexMatrix;
+        u32 vertexCount;
+        u32 textureBinds;
+        u32 bufferUploads;
+        u64 bufferUploadBytes;
+        u32 textureUploads;
+        u64 textureUploadBytes;
+        u32 fboBlits;
+        u32 readbacks;
+        u32 viewportChanges;
+        u32 blendChanges;
+        u32 colorOpChanges;
+        u32 textureStageChanges;
+        u32 fogChanges;
+        u32 zwriteChanges;
+        u32 depthFuncChanges;
+        u32 pass2DEnters;
+        u32 pass2DLeaves;
+        u32 flush2DByReason[Flush2D_Count];
+        u32 flush3DByReason[Flush3D_Count];
+        double renderCpuMs;
+
+        void Reset();
+        void Accumulate(const FrameStats &other);
+    } stats, statsInterval;
+    u64 frameBeginCounter;
+    double perfCounterToMs;
+    u32 statsLastLogTicks;
 
     // Internal batch helpers
     void Enter2DPass();
     void Leave2DPass();
-    void FlushBatch();
+    void FlushBatch(Flush2DReason reason = Flush2D_Unknown);
+    void Flush3DBatch(Flush3DReason reason = Flush3D_Unknown);
+    bool CanBatch3DQuad() const;
+    void FinishFrameStats();
 
     // --- IRenderer interface ---
     void Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h) override;

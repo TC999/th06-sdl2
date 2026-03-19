@@ -14,9 +14,10 @@ namespace th06
 // Outputs:  v_Color, v_TexCoord, v_FogFactor
 
 static const char *kGLES_VertexShader = R"glsl(
-attribute vec3 a_Position;
+attribute vec4 a_Position;
 attribute vec4 a_Color;
 attribute vec2 a_TexCoord;
+attribute float a_FogFactor;
 
 uniform mat4 u_MVP;
 uniform mat4 u_TexMatrix;
@@ -26,6 +27,7 @@ uniform int  u_FogEnabled;
 uniform float u_FogStart;
 uniform float u_FogEnd;
 uniform mat4 u_ModelView;
+uniform int u_UseVertexFog;
 
 varying vec4 v_Color;
 varying vec2 v_TexCoord;
@@ -33,14 +35,18 @@ varying float v_FogFactor;
 
 void main()
 {
-    gl_Position = u_MVP * vec4(a_Position, 1.0);
+    gl_Position = u_MVP * a_Position;
     v_Color     = a_Color;
     v_TexCoord  = (u_TexMatrix * vec4(a_TexCoord, 0.0, 1.0)).xy;
 
-    // Linear fog: factor = (end - |eye_z|) / (end - start), clamped [0,1]
-    if (u_FogEnabled != 0)
+    if (u_UseVertexFog != 0)
     {
-        float eyeZ = -(u_ModelView * vec4(a_Position, 1.0)).z;
+        v_FogFactor = a_FogFactor;
+    }
+    // Linear fog: factor = (end - |eye_z|) / (end - start), clamped [0,1]
+    else if (u_FogEnabled != 0)
+    {
+        float eyeZ = -(u_ModelView * a_Position).z;
         v_FogFactor = clamp((u_FogEnd - eyeZ) / (u_FogEnd - u_FogStart), 0.0, 1.0);
     }
     else
