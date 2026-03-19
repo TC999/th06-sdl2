@@ -43,6 +43,7 @@ typedef void   (APIENTRY *PFN_glGenBuffers)(GLsizei, GLuint *);
 typedef void   (APIENTRY *PFN_glDeleteBuffers)(GLsizei, const GLuint *);
 typedef void   (APIENTRY *PFN_glBindBuffer)(GLenum, GLuint);
 typedef void   (APIENTRY *PFN_glBufferData)(GLenum, GLsizeiptr, const void *, GLenum);
+typedef void   (APIENTRY *PFN_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void *);
 // FBO (core in GL 3.0 / GLES 2.0, ARB extension on GL 2.x desktop)
 typedef void   (APIENTRY *PFN_glGenFramebuffers)(GLsizei, GLuint *);
 typedef void   (APIENTRY *PFN_glDeleteFramebuffers)(GLsizei, const GLuint *);
@@ -81,6 +82,7 @@ static PFN_glGenBuffers              pglGenBuffers;
 static PFN_glDeleteBuffers           pglDeleteBuffers;
 static PFN_glBindBuffer              pglBindBuffer;
 static PFN_glBufferData              pglBufferData;
+static PFN_glBufferSubData           pglBufferSubData;
 static PFN_glGenFramebuffers         pglGenFramebuffers;
 static PFN_glDeleteFramebuffers      pglDeleteFramebuffers;
 static PFN_glBindFramebuffer         pglBindFramebuffer;
@@ -100,6 +102,8 @@ static PFN_glCheckFramebufferStatus  pglCheckFramebufferStatus;
 #define GL_FRAMEBUFFER_COMPLETE       0x8CD5
 #define GL_FRAMEBUFFER_BINDING        0x8CA6
 #define GL_ARRAY_BUFFER               0x8892
+#define GL_ELEMENT_ARRAY_BUFFER       0x8893
+#define GL_STATIC_DRAW                0x88E4
 #define GL_STREAM_DRAW                0x88E0
 #define GL_FRAGMENT_SHADER            0x8B30
 #define GL_VERTEX_SHADER              0x8B31
@@ -136,6 +140,7 @@ static bool LoadGLES2Functions()
     LOAD(glDeleteBuffers);
     LOAD(glBindBuffer);
     LOAD(glBufferData);
+    LOAD(glBufferSubData);
 #undef LOAD
     // FBO — try core names first, then ARB suffix
 #define LOADFBO(name) p##name = (PFN_##name)SDL_GL_GetProcAddress(#name); \
@@ -292,9 +297,37 @@ void RendererGLES::Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h)
     pglUniform1i(this->loc_u_TextureEnabled, 1);
     pglUniform1i(this->loc_u_ColorOp, 0);
 
-    // Create dynamic VBO
+    // Create dynamic VBO (for 3D draws & fallback)
     pglGenBuffers(1, &this->vbo);
     this->attribsEnabled = false;
+
+    // Create batch VBO + static quad IBO for 2D batching
+    pglGenBuffers(1, &this->batchVBO);
+    pglGenBuffers(1, &this->quadIBO);
+    {
+        u16 indices[BATCH_MAX_QUADS * 6];
+        for (i32 i = 0; i < BATCH_MAX_QUADS; i++)
+        {
+            u16 base = (u16)(i * 4);
+            indices[i * 6 + 0] = base + 0;
+            indices[i * 6 + 1] = base + 1;
+            indices[i * 6 + 2] = base + 2;
+            indices[i * 6 + 3] = base + 2;
+            indices[i * 6 + 4] = base + 1;
+            indices[i * 6 + 5] = base + 3;
+        }
+        pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->quadIBO);
+        pglBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                      (GLsizeiptr)(BATCH_MAX_QUADS * 6 * sizeof(u16)),
+                      indices, GL_STATIC_DRAW);
+        pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    }
+    this->batchBuffer.reserve(BATCH_MAX_QUADS * 4);
+    this->batchQuadCount = 0;
+    this->in2DPass = false;
+    this->mvpDirty = true;
+    this->fogDirty = true;
+    this->stats.Reset();
 
     // Enable core GL state (no fixed-function)
     glEnable(GL_BLEND);
@@ -421,6 +454,16 @@ void RendererGLES::Release()
     {
         pglDeleteBuffers(1, &this->vbo);
         this->vbo = 0;
+    }
+    if (this->batchVBO != 0)
+    {
+        pglDeleteBuffers(1, &this->batchVBO);
+        this->batchVBO = 0;
+    }
+    if (this->quadIBO != 0)
+    {
+        pglDeleteBuffers(1, &this->quadIBO);
+        this->quadIBO = 0;
     }
     if (this->shaderProgram != 0)
     {
@@ -558,6 +601,7 @@ void RendererGLES::SetBlendMode(u8 mode)
 {
     if (mode == this->currentBlendMode)
         return;
+    if (this->in2DPass) FlushBatch();
     this->currentBlendMode = mode;
     if (mode == BLEND_MODE_ADD)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -569,6 +613,7 @@ void RendererGLES::SetColorOp(u8 colorOp)
 {
     if (colorOp == this->currentColorOp)
         return;
+    if (this->in2DPass) FlushBatch();
     this->currentColorOp = colorOp;
     pglUniform1i(this->loc_u_ColorOp, colorOp);
 }
@@ -577,6 +622,7 @@ void RendererGLES::SetTexture(u32 tex)
 {
     if (tex == this->currentTexture)
         return;
+    if (this->in2DPass) FlushBatch();
     this->currentTexture = tex;
     if (tex != 0)
     {
@@ -607,8 +653,11 @@ void RendererGLES::SetZWriteDisable(u8 disable)
 {
     if (disable == this->currentZWriteDisable)
         return;
+    if (this->in2DPass) FlushBatch();
     this->currentZWriteDisable = disable;
-    glDepthMask(disable ? GL_FALSE : GL_TRUE);
+    // Depth mask is disabled during 2D pass; applied on Leave2DPass
+    if (!this->in2DPass)
+        glDepthMask(disable ? GL_FALSE : GL_TRUE);
 }
 
 void RendererGLES::SetDepthFunc(i32 alwaysPass)
@@ -628,13 +677,20 @@ void RendererGLES::SetDestBlendOne()
 
 void RendererGLES::SetTextureStageSelectDiffuse()
 {
-    this->textureEnabled = 0;
-    pglUniform1i(this->loc_u_TextureEnabled, 0);
+    if (this->textureEnabled)
+    {
+        if (this->in2DPass) FlushBatch();
+        this->textureEnabled = 0;
+        pglUniform1i(this->loc_u_TextureEnabled, 0);
+    }
     this->currentTexture = 0;
 }
 
 void RendererGLES::SetTextureStageModulateTexture()
 {
+    if (this->textureEnabled)
+        return;
+    if (this->in2DPass) FlushBatch();
     this->textureEnabled = 1;
     pglUniform1i(this->loc_u_TextureEnabled, 1);
 }
@@ -645,6 +701,7 @@ void RendererGLES::SetFog(i32 enable, D3DCOLOR color, f32 start, f32 end)
     this->fogColor = color;
     this->fogStart = start;
     this->fogEnd = end;
+    this->fogDirty = true;
     pglUniform1i(this->loc_u_FogEnabled, enable);
     if (enable)
     {
@@ -664,17 +721,20 @@ void RendererGLES::SetViewTransform(const D3DXMATRIX *matrix)
 {
     this->viewMatrix = *matrix;
     D3DXMatrixMultiply(&this->modelviewMatrix, &this->worldMatrix, &this->viewMatrix);
+    this->mvpDirty = true;
 }
 
 void RendererGLES::SetProjectionTransform(const D3DXMATRIX *matrix)
 {
     this->projectionMatrix = *matrix;
+    this->mvpDirty = true;
 }
 
 void RendererGLES::SetWorldTransform(const D3DXMATRIX *matrix)
 {
     this->worldMatrix = *matrix;
     D3DXMatrixMultiply(&this->modelviewMatrix, matrix, &this->viewMatrix);
+    this->mvpDirty = true;
 }
 
 void RendererGLES::SetTextureTransform(const D3DXMATRIX *matrix)
@@ -688,14 +748,17 @@ void RendererGLES::SetTextureTransform(const D3DXMATRIX *matrix)
 // =========================================================================
 void RendererGLES::UploadMVP()
 {
+    if (!this->mvpDirty) return;
     D3DXMATRIX mvp;
     D3DXMatrixMultiply(&mvp, &this->modelviewMatrix, &this->projectionMatrix);
     pglUniformMatrix4fv(this->loc_u_MVP, 1, GL_FALSE, &mvp.m[0][0]);
     pglUniformMatrix4fv(this->loc_u_ModelView, 1, GL_FALSE, &this->modelviewMatrix.m[0][0]);
+    this->mvpDirty = false;
 }
 
 void RendererGLES::UploadUniforms()
 {
+    if (!this->fogDirty) return;
     pglUniform1i(this->loc_u_FogEnabled, this->fogEnabled);
     pglUniform1f(this->loc_u_FogStart, this->fogStart);
     pglUniform1f(this->loc_u_FogEnd, this->fogEnd);
@@ -704,6 +767,104 @@ void RendererGLES::UploadUniforms()
                  D3DCOLOR_G(this->fogColor) / 255.0f,
                  D3DCOLOR_B(this->fogColor) / 255.0f,
                  D3DCOLOR_A(this->fogColor) / 255.0f);
+    this->fogDirty = false;
+}
+
+// =========================================================================
+// 2D Batch System — pass-level state + append-only quad batching
+// =========================================================================
+void RendererGLES::Enter2DPass()
+{
+    if (this->in2DPass) return;
+
+    // Save 3D state once
+    this->saved3D_fog = this->fogEnabled;
+    glGetIntegerv(GL_SCISSOR_BOX, this->saved3D_scissor);
+    this->saved3D_texMatrix = this->textureMatrix;
+
+    // Set 2D ortho state
+    glViewport(0, 0, this->screenWidth, this->screenHeight);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+
+    D3DXMATRIX ortho;
+    memset(&ortho, 0, sizeof(ortho));
+    ortho._11 = 2.0f / this->screenWidth;
+    ortho._22 = -2.0f / this->screenHeight;
+    ortho._33 = -1.0f;
+    ortho._44 = 1.0f;
+    ortho._41 = -1.0f;
+    ortho._42 = 1.0f;
+    pglUniformMatrix4fv(this->loc_u_MVP, 1, GL_FALSE, &ortho.m[0][0]);
+
+    D3DXMATRIX ident;
+    D3DXMatrixIdentity(&ident);
+    pglUniformMatrix4fv(this->loc_u_ModelView, 1, GL_FALSE, &ident.m[0][0]);
+    pglUniformMatrix4fv(this->loc_u_TexMatrix, 1, GL_FALSE, &ident.m[0][0]);
+    pglUniform1i(this->loc_u_FogEnabled, 0);
+
+    this->in2DPass = true;
+}
+
+void RendererGLES::Leave2DPass()
+{
+    if (!this->in2DPass) return;
+    FlushBatch();
+
+    // Restore 3D state
+    glViewport(this->viewportX,
+               this->screenHeight - this->viewportY - this->viewportH,
+               this->viewportW, this->viewportH);
+    glScissor(this->saved3D_scissor[0], this->saved3D_scissor[1],
+              this->saved3D_scissor[2], this->saved3D_scissor[3]);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(this->currentZWriteDisable ? GL_FALSE : GL_TRUE);
+    pglUniform1i(this->loc_u_FogEnabled, this->saved3D_fog);
+    pglUniformMatrix4fv(this->loc_u_TexMatrix, 1, GL_FALSE,
+                        &this->saved3D_texMatrix.m[0][0]);
+    this->in2DPass = false;
+    this->mvpDirty = true;
+    this->fogDirty = true;
+}
+
+void RendererGLES::FlushBatch()
+{
+    if (this->batchQuadCount == 0) return;
+
+    const i32 vertCount = this->batchQuadCount * 4;
+    const i32 stride = (i32)sizeof(BatchVertex); // 24 bytes
+
+    pglBindBuffer(GL_ARRAY_BUFFER, this->batchVBO);
+    pglBufferData(GL_ARRAY_BUFFER,
+                  (GLsizeiptr)(vertCount * stride),
+                  this->batchBuffer.data(), GL_STREAM_DRAW);
+
+    if (!this->attribsEnabled)
+    {
+        pglEnableVertexAttribArray(this->loc_a_Position);
+        pglEnableVertexAttribArray(this->loc_a_Color);
+        pglEnableVertexAttribArray(this->loc_a_TexCoord);
+        this->attribsEnabled = true;
+    }
+
+    pglVertexAttribPointer(this->loc_a_Position, 3, GL_FLOAT,
+                           GL_FALSE, stride, (void *)0);
+    pglVertexAttribPointer(this->loc_a_Color, 4, GL_UNSIGNED_BYTE,
+                           GL_TRUE, stride, (void *)12);
+    pglVertexAttribPointer(this->loc_a_TexCoord, 2, GL_FLOAT,
+                           GL_FALSE, stride, (void *)16);
+
+    pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->quadIBO);
+    glDrawElements(GL_TRIANGLES, this->batchQuadCount * 6,
+                   GL_UNSIGNED_SHORT, 0);
+    pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    this->stats.drawCalls++;
+    this->stats.batchFlushes++;
+    this->stats.quadsBatched += this->batchQuadCount;
+    this->stats.vertexCount += vertCount;
+
+    this->batchQuadCount = 0;
 }
 
 // =========================================================================
@@ -787,165 +948,224 @@ static inline void ColorToFloat(D3DCOLOR c, f32 *out)
     out[3] = D3DCOLOR_A(c) / 255.0f;
 }
 
-// Helper: set up 2D ortho MVP for pre-transformed (XYZRHW) vertices.
-// Saves/restores fog, depth, viewport, texture matrix state.
-struct Begin2DState
+// Helper: fill one BatchVertex
+static inline void FillBatchVert(RendererGLES::BatchVertex &v,
+    f32 x, f32 y, f32 z, D3DCOLOR col, f32 u, f32 vv)
 {
-    RendererGLES *r;
-    i32 prevFog;
-    GLboolean prevDepthTest;
-    GLboolean prevDepthMask;
-    GLint prevScissor[4];
-    D3DXMATRIX prevTexMatrix;
-
-    void Begin(RendererGLES *rr)
-    {
-        r = rr;
-        prevFog = r->fogEnabled;
-        prevDepthTest = glIsEnabled(GL_DEPTH_TEST);
-        glGetBooleanv(GL_DEPTH_WRITEMASK, &prevDepthMask);
-        glGetIntegerv(GL_SCISSOR_BOX, prevScissor);
-        prevTexMatrix = r->textureMatrix;
-
-        glViewport(0, 0, r->screenWidth, r->screenHeight);
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
-
-        // Ortho MVP for screen-space coords
-        D3DXMATRIX ortho;
-        memset(&ortho, 0, sizeof(ortho));
-        ortho._11 = 2.0f / r->screenWidth;
-        ortho._22 = -2.0f / r->screenHeight;
-        ortho._33 = -1.0f;   // map z [0,1] to [-1,1] (near/far)
-        ortho._44 = 1.0f;
-        ortho._41 = -1.0f;
-        ortho._42 = 1.0f;
-        ortho._43 = 0.0f;
-        pglUniformMatrix4fv(r->loc_u_MVP, 1, GL_FALSE, &ortho.m[0][0]);
-
-        // Identity modelview for fog calculation (disable fog for 2D)
-        D3DXMATRIX ident;
-        D3DXMatrixIdentity(&ident);
-        pglUniformMatrix4fv(r->loc_u_ModelView, 1, GL_FALSE, &ident.m[0][0]);
-        pglUniformMatrix4fv(r->loc_u_TexMatrix, 1, GL_FALSE, &ident.m[0][0]);
-        pglUniform1i(r->loc_u_FogEnabled, 0);
-    }
-
-    void End()
-    {
-        glViewport(r->viewportX, r->screenHeight - r->viewportY - r->viewportH,
-                   r->viewportW, r->viewportH);
-        glScissor(prevScissor[0], prevScissor[1], prevScissor[2], prevScissor[3]);
-        if (prevDepthTest) glEnable(GL_DEPTH_TEST);
-        else glDisable(GL_DEPTH_TEST);
-        glDepthMask(prevDepthMask);
-        pglUniform1i(r->loc_u_FogEnabled, prevFog);
-        pglUniformMatrix4fv(r->loc_u_TexMatrix, 1, GL_FALSE, &prevTexMatrix.m[0][0]);
-    }
-};
+    v.x = x; v.y = y; v.z = z;
+    v.r = D3DCOLOR_R(col); v.g = D3DCOLOR_G(col);
+    v.b = D3DCOLOR_B(col); v.a = D3DCOLOR_A(col);
+    v.u = u; v.v = vv;
+}
 
 void RendererGLES::DrawTriangleStrip(const VertexDiffuseXyzrwh *verts, i32 count)
 {
+    // Non-textured 2D quad — disable texture, batch
     u8 prevTexEnabled = this->textureEnabled;
-    if (prevTexEnabled) { this->textureEnabled = 0; pglUniform1i(loc_u_TextureEnabled, 0); }
-
-    Begin2DState s; s.Begin(this);
-
-    const size_t needed = (size_t)count * 9;
-    if (this->drawScratch.size() < needed)
-        this->drawScratch.resize(needed);
-    f32 *buf = this->drawScratch.data();
-    for (i32 i = 0; i < count; i++)
+    if (prevTexEnabled)
     {
-        f32 *dst = buf + i * 9;
-        dst[0] = verts[i].position.x;
-        dst[1] = verts[i].position.y;
-        dst[2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, dst + 3);
-        dst[7] = 0.0f;
-        dst[8] = 0.0f;
+        if (this->in2DPass) FlushBatch();
+        this->textureEnabled = 0;
+        pglUniform1i(loc_u_TextureEnabled, 0);
     }
-    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
+    if (!this->in2DPass) Enter2DPass();
 
-    s.End();
-    if (prevTexEnabled) { this->textureEnabled = 1; pglUniform1i(loc_u_TextureEnabled, 1); }
+    if (count == 4)
+    {
+        const size_t off = (size_t)this->batchQuadCount * 4;
+        if (this->batchBuffer.size() < off + 4)
+            this->batchBuffer.resize(off + 4);
+        BatchVertex *bv = this->batchBuffer.data() + off;
+        FillBatchVert(bv[0], verts[0].position.x, verts[0].position.y,
+                      verts[0].position.z, verts[0].diffuse, 0, 0);
+        FillBatchVert(bv[1], verts[1].position.x, verts[1].position.y,
+                      verts[1].position.z, verts[1].diffuse, 0, 0);
+        FillBatchVert(bv[2], verts[2].position.x, verts[2].position.y,
+                      verts[2].position.z, verts[2].diffuse, 0, 0);
+        FillBatchVert(bv[3], verts[3].position.x, verts[3].position.y,
+                      verts[3].position.z, verts[3].diffuse, 0, 0);
+        this->batchQuadCount++;
+        if (this->batchQuadCount >= BATCH_MAX_QUADS) FlushBatch();
+    }
+    else
+    {
+        FlushBatch();
+        const size_t needed = (size_t)count * 9;
+        if (this->drawScratch.size() < needed)
+            this->drawScratch.resize(needed);
+        f32 *buf = this->drawScratch.data();
+        for (i32 i = 0; i < count; i++)
+        {
+            f32 *dst = buf + i * 9;
+            dst[0] = verts[i].position.x;
+            dst[1] = verts[i].position.y;
+            dst[2] = verts[i].position.z;
+            ColorToFloat(verts[i].diffuse, dst + 3);
+            dst[7] = 0.0f; dst[8] = 0.0f;
+        }
+        DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
+        this->stats.drawCalls++;
+    }
+
+    if (prevTexEnabled)
+    {
+        if (this->in2DPass) FlushBatch();
+        this->textureEnabled = 1;
+        pglUniform1i(loc_u_TextureEnabled, 1);
+    }
 }
 
 void RendererGLES::DrawTriangleStripTex(const VertexTex1Xyzrwh *verts, i32 count)
 {
-    Begin2DState s; s.Begin(this);
+    if (!this->in2DPass) Enter2DPass();
 
-    f32 tfCol[4];
-    ColorToFloat(this->textureFactor, tfCol);
-    const size_t needed = (size_t)count * 9;
-    if (this->drawScratch.size() < needed)
-        this->drawScratch.resize(needed);
-    f32 *buf = this->drawScratch.data();
-    for (i32 i = 0; i < count; i++)
+    if (count == 4)
     {
-        f32 *dst = buf + i * 9;
-        dst[0] = verts[i].position.x;
-        dst[1] = verts[i].position.y;
-        dst[2] = verts[i].position.z;
-        memcpy(dst + 3, tfCol, sizeof(tfCol));
-        dst[7] = verts[i].textureUV.x;
-        dst[8] = verts[i].textureUV.y;
+        D3DCOLOR tf = this->textureFactor;
+        const size_t off = (size_t)this->batchQuadCount * 4;
+        if (this->batchBuffer.size() < off + 4)
+            this->batchBuffer.resize(off + 4);
+        BatchVertex *bv = this->batchBuffer.data() + off;
+        FillBatchVert(bv[0], verts[0].position.x, verts[0].position.y,
+                      verts[0].position.z, tf,
+                      verts[0].textureUV.x, verts[0].textureUV.y);
+        FillBatchVert(bv[1], verts[1].position.x, verts[1].position.y,
+                      verts[1].position.z, tf,
+                      verts[1].textureUV.x, verts[1].textureUV.y);
+        FillBatchVert(bv[2], verts[2].position.x, verts[2].position.y,
+                      verts[2].position.z, tf,
+                      verts[2].textureUV.x, verts[2].textureUV.y);
+        FillBatchVert(bv[3], verts[3].position.x, verts[3].position.y,
+                      verts[3].position.z, tf,
+                      verts[3].textureUV.x, verts[3].textureUV.y);
+        this->batchQuadCount++;
+        if (this->batchQuadCount >= BATCH_MAX_QUADS) FlushBatch();
     }
-    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
-
-    s.End();
+    else
+    {
+        FlushBatch();
+        f32 tfCol[4];
+        ColorToFloat(this->textureFactor, tfCol);
+        const size_t needed = (size_t)count * 9;
+        if (this->drawScratch.size() < needed)
+            this->drawScratch.resize(needed);
+        f32 *buf = this->drawScratch.data();
+        for (i32 i = 0; i < count; i++)
+        {
+            f32 *dst = buf + i * 9;
+            dst[0] = verts[i].position.x;
+            dst[1] = verts[i].position.y;
+            dst[2] = verts[i].position.z;
+            memcpy(dst + 3, tfCol, sizeof(tfCol));
+            dst[7] = verts[i].textureUV.x;
+            dst[8] = verts[i].textureUV.y;
+        }
+        DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
+        this->stats.drawCalls++;
+    }
 }
 
 void RendererGLES::DrawTriangleStripTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count)
 {
-    Begin2DState s; s.Begin(this);
+    if (!this->in2DPass) Enter2DPass();
 
-    const size_t needed = (size_t)count * 9;
-    if (this->drawScratch.size() < needed)
-        this->drawScratch.resize(needed);
-    f32 *buf = this->drawScratch.data();
-    for (i32 i = 0; i < count; i++)
+    if (count == 4)
     {
-        f32 *dst = buf + i * 9;
-        dst[0] = verts[i].position.x;
-        dst[1] = verts[i].position.y;
-        dst[2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, dst + 3);
-        dst[7] = verts[i].textureUV.x;
-        dst[8] = verts[i].textureUV.y;
+        const size_t off = (size_t)this->batchQuadCount * 4;
+        if (this->batchBuffer.size() < off + 4)
+            this->batchBuffer.resize(off + 4);
+        BatchVertex *bv = this->batchBuffer.data() + off;
+        FillBatchVert(bv[0], verts[0].position.x, verts[0].position.y,
+                      verts[0].position.z, verts[0].diffuse,
+                      verts[0].textureUV.x, verts[0].textureUV.y);
+        FillBatchVert(bv[1], verts[1].position.x, verts[1].position.y,
+                      verts[1].position.z, verts[1].diffuse,
+                      verts[1].textureUV.x, verts[1].textureUV.y);
+        FillBatchVert(bv[2], verts[2].position.x, verts[2].position.y,
+                      verts[2].position.z, verts[2].diffuse,
+                      verts[2].textureUV.x, verts[2].textureUV.y);
+        FillBatchVert(bv[3], verts[3].position.x, verts[3].position.y,
+                      verts[3].position.z, verts[3].diffuse,
+                      verts[3].textureUV.x, verts[3].textureUV.y);
+        this->batchQuadCount++;
+        if (this->batchQuadCount >= BATCH_MAX_QUADS) FlushBatch();
     }
-    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
-
-    s.End();
+    else
+    {
+        FlushBatch();
+        const size_t needed = (size_t)count * 9;
+        if (this->drawScratch.size() < needed)
+            this->drawScratch.resize(needed);
+        f32 *buf = this->drawScratch.data();
+        for (i32 i = 0; i < count; i++)
+        {
+            f32 *dst = buf + i * 9;
+            dst[0] = verts[i].position.x;
+            dst[1] = verts[i].position.y;
+            dst[2] = verts[i].position.z;
+            ColorToFloat(verts[i].diffuse, dst + 3);
+            dst[7] = verts[i].textureUV.x;
+            dst[8] = verts[i].textureUV.y;
+        }
+        DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
+        this->stats.drawCalls++;
+    }
 }
 
 void RendererGLES::DrawTriangleFanTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count)
 {
-    Begin2DState s; s.Begin(this);
+    if (!this->in2DPass) Enter2DPass();
 
-    const size_t needed = (size_t)count * 9;
-    if (this->drawScratch.size() < needed)
-        this->drawScratch.resize(needed);
-    f32 *buf = this->drawScratch.data();
-    for (i32 i = 0; i < count; i++)
+    if (count == 4)
     {
-        f32 *dst = buf + i * 9;
-        dst[0] = verts[i].position.x;
-        dst[1] = verts[i].position.y;
-        dst[2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, dst + 3);
-        dst[7] = verts[i].textureUV.x;
-        dst[8] = verts[i].textureUV.y;
+        // Fan order v0,v1,v2,v3 → reorder to strip v1,v0,v2,v3
+        // so the strip IBO (0,1,2, 2,1,3) produces equivalent triangles
+        const size_t off = (size_t)this->batchQuadCount * 4;
+        if (this->batchBuffer.size() < off + 4)
+            this->batchBuffer.resize(off + 4);
+        BatchVertex *bv = this->batchBuffer.data() + off;
+        FillBatchVert(bv[0], verts[1].position.x, verts[1].position.y,
+                      verts[1].position.z, verts[1].diffuse,
+                      verts[1].textureUV.x, verts[1].textureUV.y);
+        FillBatchVert(bv[1], verts[0].position.x, verts[0].position.y,
+                      verts[0].position.z, verts[0].diffuse,
+                      verts[0].textureUV.x, verts[0].textureUV.y);
+        FillBatchVert(bv[2], verts[2].position.x, verts[2].position.y,
+                      verts[2].position.z, verts[2].diffuse,
+                      verts[2].textureUV.x, verts[2].textureUV.y);
+        FillBatchVert(bv[3], verts[3].position.x, verts[3].position.y,
+                      verts[3].position.z, verts[3].diffuse,
+                      verts[3].textureUV.x, verts[3].textureUV.y);
+        this->batchQuadCount++;
+        if (this->batchQuadCount >= BATCH_MAX_QUADS) FlushBatch();
     }
-    DrawArrays(GL_TRIANGLE_FAN, nullptr, nullptr, nullptr, count);
-
-    s.End();
+    else
+    {
+        FlushBatch();
+        const size_t needed = (size_t)count * 9;
+        if (this->drawScratch.size() < needed)
+            this->drawScratch.resize(needed);
+        f32 *buf = this->drawScratch.data();
+        for (i32 i = 0; i < count; i++)
+        {
+            f32 *dst = buf + i * 9;
+            dst[0] = verts[i].position.x;
+            dst[1] = verts[i].position.y;
+            dst[2] = verts[i].position.z;
+            ColorToFloat(verts[i].diffuse, dst + 3);
+            dst[7] = verts[i].textureUV.x;
+            dst[8] = verts[i].textureUV.y;
+        }
+        DrawArrays(GL_TRIANGLE_FAN, nullptr, nullptr, nullptr, count);
+        this->stats.drawCalls++;
+    }
 }
 
 // continued below — 3D draw methods
 
 void RendererGLES::DrawTriangleStripTextured3D(const VertexTex1DiffuseXyz *verts, i32 count)
 {
+    if (this->in2DPass) Leave2DPass();
     UploadMVP();
     UploadUniforms();
 
@@ -968,6 +1188,7 @@ void RendererGLES::DrawTriangleStripTextured3D(const VertexTex1DiffuseXyz *verts
 
 void RendererGLES::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, i32 count)
 {
+    if (this->in2DPass) Leave2DPass();
     UploadMVP();
     UploadUniforms();
 
@@ -990,6 +1211,7 @@ void RendererGLES::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, 
 
 void RendererGLES::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count)
 {
+    if (this->in2DPass) Leave2DPass();
     UploadMVP();
     UploadUniforms();
 
@@ -1202,28 +1424,35 @@ void RendererGLES::CopySurfaceToScreen(u32 surfaceTex, i32 srcX, i32 srcY,
     i32 drawW = w > 0 ? w : texW;
     i32 drawH = h > 0 ? h : texH;
 
-    Begin2DState s; s.Begin(this);
+    if (!this->in2DPass) Enter2DPass();
 
     u8 prevTexEnabled = this->textureEnabled;
-    if (!prevTexEnabled) { this->textureEnabled = 1; pglUniform1i(loc_u_TextureEnabled, 1); }
+    if (!prevTexEnabled)
+    {
+        if (this->in2DPass) FlushBatch();
+        this->textureEnabled = 1;
+        pglUniform1i(loc_u_TextureEnabled, 1);
+    }
+    // Force-bind surface texture (bypass cache — temp texture)
+    FlushBatch();
     glBindTexture(GL_TEXTURE_2D, (GLuint)surfaceTex);
 
-    f32 white[4] = {1, 1, 1, 1};
-    f32 pos[] = {
-        (f32)dstX, (f32)dstY, 0,
-        (f32)(dstX + drawW), (f32)dstY, 0,
-        (f32)dstX, (f32)(dstY + drawH), 0,
-        (f32)(dstX + drawW), (f32)(dstY + drawH), 0
-    };
-    f32 col[] = { white[0],white[1],white[2],white[3],
-                  white[0],white[1],white[2],white[3],
-                  white[0],white[1],white[2],white[3],
-                  white[0],white[1],white[2],white[3] };
-    f32 tc[] = { u0,v0, u1,v0, u0,v1, u1,v1 };
-    DrawArrays(GL_TRIANGLE_STRIP, pos, col, tc, 4);
+    const D3DCOLOR white = 0xFFFFFFFF;
+    const size_t off = (size_t)this->batchQuadCount * 4;
+    if (this->batchBuffer.size() < off + 4) this->batchBuffer.resize(off + 4);
+    BatchVertex *bv = this->batchBuffer.data() + off;
+    FillBatchVert(bv[0], (f32)dstX,         (f32)dstY,         0, white, u0, v0);
+    FillBatchVert(bv[1], (f32)(dstX + drawW),(f32)dstY,         0, white, u1, v0);
+    FillBatchVert(bv[2], (f32)dstX,         (f32)(dstY + drawH),0, white, u0, v1);
+    FillBatchVert(bv[3], (f32)(dstX + drawW),(f32)(dstY + drawH),0, white, u1, v1);
+    this->batchQuadCount++;
+    FlushBatch();
 
-    s.End();
-    if (!prevTexEnabled) { this->textureEnabled = 0; pglUniform1i(loc_u_TextureEnabled, 0); }
+    if (!prevTexEnabled)
+    {
+        this->textureEnabled = 0;
+        pglUniform1i(loc_u_TextureEnabled, 0);
+    }
     if (this->currentTexture != 0)
         glBindTexture(GL_TEXTURE_2D, this->currentTexture);
 }
@@ -1242,24 +1471,34 @@ void RendererGLES::CopySurfaceRectToScreen(u32 surfaceTex, i32 srcX, i32 srcY, i
     f32 u1 = (f32)(srcX + srcW) / texW;
     f32 v1 = (f32)(srcY + srcH) / texH;
 
-    Begin2DState s; s.Begin(this);
+    if (!this->in2DPass) Enter2DPass();
 
     u8 prevTexEnabled = this->textureEnabled;
-    if (!prevTexEnabled) { this->textureEnabled = 1; pglUniform1i(loc_u_TextureEnabled, 1); }
+    if (!prevTexEnabled)
+    {
+        if (this->in2DPass) FlushBatch();
+        this->textureEnabled = 1;
+        pglUniform1i(loc_u_TextureEnabled, 1);
+    }
+    FlushBatch();
     glBindTexture(GL_TEXTURE_2D, (GLuint)surfaceTex);
 
-    f32 pos[] = {
-        (f32)dstX, (f32)dstY, 0,
-        (f32)(dstX + srcW), (f32)dstY, 0,
-        (f32)dstX, (f32)(dstY + srcH), 0,
-        (f32)(dstX + srcW), (f32)(dstY + srcH), 0
-    };
-    f32 col[] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
-    f32 tc[] = { u0,v0, u1,v0, u0,v1, u1,v1 };
-    DrawArrays(GL_TRIANGLE_STRIP, pos, col, tc, 4);
+    const D3DCOLOR white = 0xFFFFFFFF;
+    const size_t off = (size_t)this->batchQuadCount * 4;
+    if (this->batchBuffer.size() < off + 4) this->batchBuffer.resize(off + 4);
+    BatchVertex *bv = this->batchBuffer.data() + off;
+    FillBatchVert(bv[0], (f32)dstX,          (f32)dstY,          0, white, u0, v0);
+    FillBatchVert(bv[1], (f32)(dstX + srcW), (f32)dstY,          0, white, u1, v0);
+    FillBatchVert(bv[2], (f32)dstX,          (f32)(dstY + srcH), 0, white, u0, v1);
+    FillBatchVert(bv[3], (f32)(dstX + srcW), (f32)(dstY + srcH), 0, white, u1, v1);
+    this->batchQuadCount++;
+    FlushBatch();
 
-    s.End();
-    if (!prevTexEnabled) { this->textureEnabled = 0; pglUniform1i(loc_u_TextureEnabled, 0); }
+    if (!prevTexEnabled)
+    {
+        this->textureEnabled = 0;
+        pglUniform1i(loc_u_TextureEnabled, 0);
+    }
     if (this->currentTexture != 0)
         glBindTexture(GL_TEXTURE_2D, this->currentTexture);
 }
@@ -1267,6 +1506,7 @@ void RendererGLES::CopySurfaceRectToScreen(u32 surfaceTex, i32 srcX, i32 srcY, i
 void RendererGLES::TakeScreenshot(u32 dstTex, i32 left, i32 top, i32 width, i32 height)
 {
     if (dstTex == 0) return;
+    if (this->in2DPass) Leave2DPass();
 
     GLint prevFbo = 0;
     if (this->fbo != 0)
@@ -1366,6 +1606,9 @@ void RendererGLES::BlitFBOToScreen()
 
 void RendererGLES::EndFrame()
 {
+    // Flush any pending 2D batch
+    if (this->in2DPass) Leave2DPass();
+
     if (this->fbo != 0)
     {
         // Render ImGui overlay into FBO at game resolution
@@ -1407,6 +1650,7 @@ void RendererGLES::EndFrame()
         this->currentBlendMode = 0xff;
         this->currentColorOp = 0xff;
         this->currentZWriteDisable = 0xff;
+        this->stats.Reset();
     }
     else
     {
@@ -1415,6 +1659,7 @@ void RendererGLES::EndFrame()
         THPrac::THPracGuiRender();
         this->attribsEnabled = false;
         SDL_GL_SwapWindow(this->window);
+        this->stats.Reset();
     }
 }
 

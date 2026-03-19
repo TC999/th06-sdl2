@@ -52,12 +52,46 @@ struct RendererGLES : public IRenderer
     GLuint fboColorTex;
     GLuint fboDepthRb;
 
-    // Dynamic VBO for streaming vertices
+    // Dynamic VBO for streaming vertices (used by 3D draws & fallback)
     GLuint vbo;
 
-    // Reusable CPU-side interleaved vertex staging buffer
+    // === 2D Quad Batch System ===
+    struct BatchVertex {
+        f32 x, y, z;     // 12 bytes
+        u8 r, g, b, a;   //  4 bytes (normalized to float by GL)
+        f32 u, v;         //  8 bytes
+    };                    // 24 bytes total (was 36 with float4 color)
+    static const i32 BATCH_MAX_QUADS = 2048;
+    GLuint batchVBO;      // VBO for batch vertex data
+    GLuint quadIBO;       // static IBO: 6 indices per quad
+    std::vector<BatchVertex> batchBuffer; // CPU staging: 4 verts per quad
+    i32 batchQuadCount;
+    bool in2DPass;        // true while 2D ortho state is active
+    bool mvpDirty;        // true when MVP uniform needs re-upload
+    bool fogDirty;        // true when fog uniforms need re-upload
+
+    // Saved 3D state for pass-level Enter/Leave
+    i32 saved3D_fog;
+    GLint saved3D_scissor[4];
+    D3DXMATRIX saved3D_texMatrix;
+
+    // Reusable CPU-side interleaved vertex staging buffer (3D draws)
     std::vector<f32> drawScratch;
     bool attribsEnabled;
+
+    // Per-frame debug stats
+    struct FrameStats {
+        i32 drawCalls;
+        i32 batchFlushes;
+        i32 quadsBatched;
+        i32 vertexCount;
+        void Reset() { drawCalls = batchFlushes = quadsBatched = vertexCount = 0; }
+    } stats;
+
+    // Internal batch helpers
+    void Enter2DPass();
+    void Leave2DPass();
+    void FlushBatch();
 
     // --- IRenderer interface ---
     void Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h) override;
