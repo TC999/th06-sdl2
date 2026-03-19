@@ -241,7 +241,7 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *mgr)
         mgr->replayData->shottypeChara = g_GameManager.character * 2 + g_GameManager.shotType;
         mgr->replayData->version = 0x102;
         mgr->replayData->difficulty = g_GameManager.difficulty;
-        memcpy(&mgr->replayData->name, "NO NAME", 4);
+        utils::CopyStringToFixedField(mgr->replayData->name, sizeof(mgr->replayData->name), "NO NAME");
         for (idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->replayData->stageReplayData); idx += 1)
         {
             mgr->replayData->stageReplayData[idx] = NULL;
@@ -405,7 +405,7 @@ void ReplayManager::SaveReplay(char *replayPath, char *replayName)
                 replayCopy.slowdownRate2 = replayCopy.slowdownRate + 1.12f;
                 replayCopy.slowdownRate3 = replayCopy.slowdownRate + 2.34f;
                 mgr->replayData->stageReplayData[g_GameManager.currentStage - 1]->score = g_GameManager.score;
-                strcpy(replayCopy.name, replayName);
+                utils::CopyStringToFixedField(replayCopy.name, sizeof(replayCopy.name), replayName);
 #ifdef _WIN32
                 _strdate(replayCopy.date);
 #else

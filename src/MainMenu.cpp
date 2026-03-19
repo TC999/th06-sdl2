@@ -1557,6 +1557,7 @@ i32 MainMenu::ReplayHandling()
 ZunResult MainMenu::DrawReplayMenu()
 {
     i32 replayAmount;
+    char replayName[9];
     i32 i;
     AnmVm *vmRef;
     ZunBool isSelected;
@@ -1598,8 +1599,10 @@ ZunResult MainMenu::DrawReplayMenu()
             }
         }
 
+        utils::CopyFixedFieldToSizedBuffer(replayName, sizeof(replayName), this->replayFileData[i].name,
+                                           sizeof(this->replayFileData[i].name));
         g_AsciiManager.AddFormatText(&vmRef->pos, "%s %8s  %8s %7s  %7s", this->replayFileName[i],
-                                     this->replayFileData[i].name, this->replayFileData[i].date,
+                                     replayName, this->replayFileData[i].date,
                                      g_ShortCharacterList[this->replayFileData[i].shottypeChara],
                                      g_DifficultyList[this->replayFileData[i].difficulty]);
     }

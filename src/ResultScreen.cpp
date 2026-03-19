@@ -596,13 +596,13 @@ i32 ResultScreen::HandleResultKeyboard()
         }
 
         this->hscr.base.unk_9 = 1;
-        strcpy(this->hscr.name, "        ");
+        utils::CopyStringToSizedBuffer(this->hscr.name, sizeof(this->hscr.name), "");
 
         if (this->LinkScoreEx(&this->hscr, this->diffSelected, this->charUsed * 2 + g_GameManager.shotType) >= 10)
             goto RETURN_TO_STATS_SCREEN_WITHOUT_SOUND;
 
         this->cursor = 0;
-        strcpy(this->replayName, "");
+        utils::CopyStringToFixedField(this->replayName, sizeof(this->replayName), "");
     }
     if (this->frameTimer < 30)
     {
@@ -742,7 +742,7 @@ i32 ResultScreen::HandleResultKeyboard()
         {
             sprite->pendingInterrupt = 2;
         }
-        strcpy(this->replayName, this->hscr.name);
+        utils::CopyStringToFixedField(this->replayName, sizeof(this->replayName), this->hscr.name);
     }
     return 0;
 }
@@ -2026,8 +2026,10 @@ ChainCallbackResult th06::ResultScreen::OnDraw(ResultScreen *resultScreen)
             }
             if (resultScreen->resultScreenState == RESULT_SCREEN_STATE_WRITING_REPLAY_NAME)
             {
+                utils::CopyFixedFieldToSizedBuffer(name, sizeof(name), resultScreen->replayName,
+                                                   sizeof(resultScreen->replayName));
                 g_AsciiManager.AddFormatText(spritePos.AsD3dXVec(), "No.%.2d %8s %8s %7s %9d", row + 1,
-                                             &resultScreen->replayName, resultScreen->defaultReplay.date,
+                                             name, resultScreen->defaultReplay.date,
                                              g_ShortCharacterList2[g_GameManager.CharacterShotType()],
                                              resultScreen->defaultReplay.score);
                 g_AsciiManager.color = 0xfff0f0ff;
@@ -2047,8 +2049,10 @@ ChainCallbackResult th06::ResultScreen::OnDraw(ResultScreen *resultScreen)
             }
             else
             {
+                utils::CopyFixedFieldToSizedBuffer(name, sizeof(name), resultScreen->replays[row].name,
+                                                   sizeof(resultScreen->replays[row].name));
                 g_AsciiManager.AddFormatText(spritePos.AsD3dXVec(), "No.%.2d %8s %8s %7s %9d", row + 1,
-                                             resultScreen->replays[row].name, resultScreen->replays[row].date,
+                                             name, resultScreen->replays[row].date,
                                              g_ShortCharacterList2[resultScreen->replays[row].shottypeChara],
                                              resultScreen->replays[row].score);
             }
