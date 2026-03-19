@@ -6,6 +6,7 @@
 
 #include "IRenderer.hpp"
 #include "sdl2_renderer.hpp" // for vertex structs, BlendMode enum
+#include <vector>
 #ifdef __ANDROID__
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
@@ -53,6 +54,10 @@ struct RendererGLES : public IRenderer
 
     // Dynamic VBO for streaming vertices
     GLuint vbo;
+
+    // Reusable CPU-side interleaved vertex staging buffer
+    std::vector<f32> drawScratch;
+    bool attribsEnabled;
 
     // --- IRenderer interface ---
     void Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h) override;

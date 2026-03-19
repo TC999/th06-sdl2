@@ -11,7 +11,6 @@
 #include <SDL_image.h>
 #include <cstring>
 #include <cstdio>
-#include <vector>
 
 // ---------------------------------------------------------------------------
 // GL 2.0 shader / FBO function pointers (loaded via SDL_GL_GetProcAddress)
@@ -295,6 +294,7 @@ void RendererGLES::Init(SDL_Window *win, SDL_GLContext ctx, i32 w, i32 h)
 
     // Create dynamic VBO
     pglGenBuffers(1, &this->vbo);
+    this->attribsEnabled = false;
 
     // Enable core GL state (no fixed-function)
     glEnable(GL_BLEND);
@@ -714,40 +714,66 @@ void RendererGLES::DrawArrays(GLenum mode, const f32 *positions, const f32 *colo
                                const f32 *texcoords, i32 vertCount)
 {
     const i32 stride = 9 * sizeof(f32); // pos(3) + col(4) + tc(2)
-    std::vector<f32> buf((size_t)vertCount * 9);
+    const size_t needed = (size_t)vertCount * 9;
 
-    for (i32 i = 0; i < vertCount; i++)
+    // If positions is null, caller already filled drawScratch directly
+    if (positions)
     {
-        f32 *dst = &buf[i * 9];
-        dst[0] = positions[i * 3 + 0]; // x
-        dst[1] = positions[i * 3 + 1]; // y
-        dst[2] = positions[i * 3 + 2]; // z
-        dst[3] = colors[i * 4 + 0]; // r
-        dst[4] = colors[i * 4 + 1]; // g
-        dst[5] = colors[i * 4 + 2]; // b
-        dst[6] = colors[i * 4 + 3]; // a
-        dst[7] = texcoords ? texcoords[i * 2 + 0] : 0.0f;
-        dst[8] = texcoords ? texcoords[i * 2 + 1] : 0.0f;
+        if (this->drawScratch.size() < needed)
+            this->drawScratch.resize(needed);
+        f32 *buf = this->drawScratch.data();
+
+        if (texcoords)
+        {
+            for (i32 i = 0; i < vertCount; i++)
+            {
+                f32 *dst = buf + i * 9;
+                dst[0] = positions[i * 3 + 0];
+                dst[1] = positions[i * 3 + 1];
+                dst[2] = positions[i * 3 + 2];
+                dst[3] = colors[i * 4 + 0];
+                dst[4] = colors[i * 4 + 1];
+                dst[5] = colors[i * 4 + 2];
+                dst[6] = colors[i * 4 + 3];
+                dst[7] = texcoords[i * 2 + 0];
+                dst[8] = texcoords[i * 2 + 1];
+            }
+        }
+        else
+        {
+            for (i32 i = 0; i < vertCount; i++)
+            {
+                f32 *dst = buf + i * 9;
+                dst[0] = positions[i * 3 + 0];
+                dst[1] = positions[i * 3 + 1];
+                dst[2] = positions[i * 3 + 2];
+                dst[3] = colors[i * 4 + 0];
+                dst[4] = colors[i * 4 + 1];
+                dst[5] = colors[i * 4 + 2];
+                dst[6] = colors[i * 4 + 3];
+                dst[7] = 0.0f;
+                dst[8] = 0.0f;
+            }
+        }
     }
 
     pglBindBuffer(GL_ARRAY_BUFFER, this->vbo);
-    pglBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(buf.size() * sizeof(f32)),
-                  buf.data(), GL_STREAM_DRAW);
+    pglBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(needed * sizeof(f32)),
+                  this->drawScratch.data(), GL_STREAM_DRAW);
 
-    pglEnableVertexAttribArray(this->loc_a_Position);
-    pglEnableVertexAttribArray(this->loc_a_Color);
-    pglEnableVertexAttribArray(this->loc_a_TexCoord);
+    if (!this->attribsEnabled)
+    {
+        pglEnableVertexAttribArray(this->loc_a_Position);
+        pglEnableVertexAttribArray(this->loc_a_Color);
+        pglEnableVertexAttribArray(this->loc_a_TexCoord);
+        this->attribsEnabled = true;
+    }
 
     pglVertexAttribPointer(this->loc_a_Position, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
     pglVertexAttribPointer(this->loc_a_Color, 4, GL_FLOAT, GL_FALSE, stride, (void *)(3 * sizeof(f32)));
     pglVertexAttribPointer(this->loc_a_TexCoord, 2, GL_FLOAT, GL_FALSE, stride, (void *)(7 * sizeof(f32)));
 
     glDrawArrays(mode, 0, vertCount);
-
-    pglDisableVertexAttribArray(this->loc_a_Position);
-    pglDisableVertexAttribArray(this->loc_a_Color);
-    pglDisableVertexAttribArray(this->loc_a_TexCoord);
-    pglBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 // continued below — draw methods
@@ -825,15 +851,21 @@ void RendererGLES::DrawTriangleStrip(const VertexDiffuseXyzrwh *verts, i32 count
 
     Begin2DState s; s.Begin(this);
 
-    std::vector<f32> pos(count * 3), col(count * 4);
+    const size_t needed = (size_t)count * 9;
+    if (this->drawScratch.size() < needed)
+        this->drawScratch.resize(needed);
+    f32 *buf = this->drawScratch.data();
     for (i32 i = 0; i < count; i++)
     {
-        pos[i*3+0] = verts[i].position.x;
-        pos[i*3+1] = verts[i].position.y;
-        pos[i*3+2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, &col[i*4]);
+        f32 *dst = buf + i * 9;
+        dst[0] = verts[i].position.x;
+        dst[1] = verts[i].position.y;
+        dst[2] = verts[i].position.z;
+        ColorToFloat(verts[i].diffuse, dst + 3);
+        dst[7] = 0.0f;
+        dst[8] = 0.0f;
     }
-    DrawArrays(GL_TRIANGLE_STRIP, pos.data(), col.data(), nullptr, count);
+    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
 
     s.End();
     if (prevTexEnabled) { this->textureEnabled = 1; pglUniform1i(loc_u_TextureEnabled, 1); }
@@ -843,19 +875,23 @@ void RendererGLES::DrawTriangleStripTex(const VertexTex1Xyzrwh *verts, i32 count
 {
     Begin2DState s; s.Begin(this);
 
-    std::vector<f32> pos(count * 3), col(count * 4), tc(count * 2);
     f32 tfCol[4];
     ColorToFloat(this->textureFactor, tfCol);
+    const size_t needed = (size_t)count * 9;
+    if (this->drawScratch.size() < needed)
+        this->drawScratch.resize(needed);
+    f32 *buf = this->drawScratch.data();
     for (i32 i = 0; i < count; i++)
     {
-        pos[i*3+0] = verts[i].position.x;
-        pos[i*3+1] = verts[i].position.y;
-        pos[i*3+2] = verts[i].position.z;
-        memcpy(&col[i*4], tfCol, sizeof(tfCol));
-        tc[i*2+0] = verts[i].textureUV.x;
-        tc[i*2+1] = verts[i].textureUV.y;
+        f32 *dst = buf + i * 9;
+        dst[0] = verts[i].position.x;
+        dst[1] = verts[i].position.y;
+        dst[2] = verts[i].position.z;
+        memcpy(dst + 3, tfCol, sizeof(tfCol));
+        dst[7] = verts[i].textureUV.x;
+        dst[8] = verts[i].textureUV.y;
     }
-    DrawArrays(GL_TRIANGLE_STRIP, pos.data(), col.data(), tc.data(), count);
+    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
 
     s.End();
 }
@@ -864,17 +900,21 @@ void RendererGLES::DrawTriangleStripTextured(const VertexTex1DiffuseXyzrwh *vert
 {
     Begin2DState s; s.Begin(this);
 
-    std::vector<f32> pos(count * 3), col(count * 4), tc(count * 2);
+    const size_t needed = (size_t)count * 9;
+    if (this->drawScratch.size() < needed)
+        this->drawScratch.resize(needed);
+    f32 *buf = this->drawScratch.data();
     for (i32 i = 0; i < count; i++)
     {
-        pos[i*3+0] = verts[i].position.x;
-        pos[i*3+1] = verts[i].position.y;
-        pos[i*3+2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, &col[i*4]);
-        tc[i*2+0] = verts[i].textureUV.x;
-        tc[i*2+1] = verts[i].textureUV.y;
+        f32 *dst = buf + i * 9;
+        dst[0] = verts[i].position.x;
+        dst[1] = verts[i].position.y;
+        dst[2] = verts[i].position.z;
+        ColorToFloat(verts[i].diffuse, dst + 3);
+        dst[7] = verts[i].textureUV.x;
+        dst[8] = verts[i].textureUV.y;
     }
-    DrawArrays(GL_TRIANGLE_STRIP, pos.data(), col.data(), tc.data(), count);
+    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
 
     s.End();
 }
@@ -883,17 +923,21 @@ void RendererGLES::DrawTriangleFanTextured(const VertexTex1DiffuseXyzrwh *verts,
 {
     Begin2DState s; s.Begin(this);
 
-    std::vector<f32> pos(count * 3), col(count * 4), tc(count * 2);
+    const size_t needed = (size_t)count * 9;
+    if (this->drawScratch.size() < needed)
+        this->drawScratch.resize(needed);
+    f32 *buf = this->drawScratch.data();
     for (i32 i = 0; i < count; i++)
     {
-        pos[i*3+0] = verts[i].position.x;
-        pos[i*3+1] = verts[i].position.y;
-        pos[i*3+2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, &col[i*4]);
-        tc[i*2+0] = verts[i].textureUV.x;
-        tc[i*2+1] = verts[i].textureUV.y;
+        f32 *dst = buf + i * 9;
+        dst[0] = verts[i].position.x;
+        dst[1] = verts[i].position.y;
+        dst[2] = verts[i].position.z;
+        ColorToFloat(verts[i].diffuse, dst + 3);
+        dst[7] = verts[i].textureUV.x;
+        dst[8] = verts[i].textureUV.y;
     }
-    DrawArrays(GL_TRIANGLE_FAN, pos.data(), col.data(), tc.data(), count);
+    DrawArrays(GL_TRIANGLE_FAN, nullptr, nullptr, nullptr, count);
 
     s.End();
 }
@@ -905,24 +949,21 @@ void RendererGLES::DrawTriangleStripTextured3D(const VertexTex1DiffuseXyz *verts
     UploadMVP();
     UploadUniforms();
 
-    if (this->currentTexture != 0)
-    {
-        glBindTexture(GL_TEXTURE_2D, this->currentTexture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    }
-
-    std::vector<f32> pos(count * 3), col(count * 4), tc(count * 2);
+    const size_t needed = (size_t)count * 9;
+    if (this->drawScratch.size() < needed)
+        this->drawScratch.resize(needed);
+    f32 *buf = this->drawScratch.data();
     for (i32 i = 0; i < count; i++)
     {
-        pos[i*3+0] = verts[i].position.x;
-        pos[i*3+1] = verts[i].position.y;
-        pos[i*3+2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, &col[i*4]);
-        tc[i*2+0] = verts[i].textureUV.x;
-        tc[i*2+1] = verts[i].textureUV.y;
+        f32 *dst = buf + i * 9;
+        dst[0] = verts[i].position.x;
+        dst[1] = verts[i].position.y;
+        dst[2] = verts[i].position.z;
+        ColorToFloat(verts[i].diffuse, dst + 3);
+        dst[7] = verts[i].textureUV.x;
+        dst[8] = verts[i].textureUV.y;
     }
-    DrawArrays(GL_TRIANGLE_STRIP, pos.data(), col.data(), tc.data(), count);
+    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
 }
 
 void RendererGLES::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, i32 count)
@@ -930,24 +971,21 @@ void RendererGLES::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, 
     UploadMVP();
     UploadUniforms();
 
-    if (this->currentTexture != 0)
-    {
-        glBindTexture(GL_TEXTURE_2D, this->currentTexture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    }
-
-    std::vector<f32> pos(count * 3), col(count * 4), tc(count * 2);
+    const size_t needed = (size_t)count * 9;
+    if (this->drawScratch.size() < needed)
+        this->drawScratch.resize(needed);
+    f32 *buf = this->drawScratch.data();
     for (i32 i = 0; i < count; i++)
     {
-        pos[i*3+0] = verts[i].position.x;
-        pos[i*3+1] = verts[i].position.y;
-        pos[i*3+2] = verts[i].position.z;
-        ColorToFloat(verts[i].diffuse, &col[i*4]);
-        tc[i*2+0] = verts[i].textureUV.x;
-        tc[i*2+1] = verts[i].textureUV.y;
+        f32 *dst = buf + i * 9;
+        dst[0] = verts[i].position.x;
+        dst[1] = verts[i].position.y;
+        dst[2] = verts[i].position.z;
+        ColorToFloat(verts[i].diffuse, dst + 3);
+        dst[7] = verts[i].textureUV.x;
+        dst[8] = verts[i].textureUV.y;
     }
-    DrawArrays(GL_TRIANGLE_FAN, pos.data(), col.data(), tc.data(), count);
+    DrawArrays(GL_TRIANGLE_FAN, nullptr, nullptr, nullptr, count);
 }
 
 void RendererGLES::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count)
@@ -955,27 +993,24 @@ void RendererGLES::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count)
     UploadMVP();
     UploadUniforms();
 
-    if (this->currentTexture != 0)
-    {
-        glBindTexture(GL_TEXTURE_2D, this->currentTexture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    }
-
     f32 tfCol[4];
     ColorToFloat(this->textureFactor, tfCol);
 
-    std::vector<f32> pos(count * 3), col(count * 4), tc(count * 2);
+    const size_t needed = (size_t)count * 9;
+    if (this->drawScratch.size() < needed)
+        this->drawScratch.resize(needed);
+    f32 *buf = this->drawScratch.data();
     for (i32 i = 0; i < count; i++)
     {
-        pos[i*3+0] = verts[i].position.x;
-        pos[i*3+1] = verts[i].position.y;
-        pos[i*3+2] = verts[i].position.z;
-        memcpy(&col[i*4], tfCol, sizeof(tfCol));
-        tc[i*2+0] = verts[i].textureUV.x;
-        tc[i*2+1] = verts[i].textureUV.y;
+        f32 *dst = buf + i * 9;
+        dst[0] = verts[i].position.x;
+        dst[1] = verts[i].position.y;
+        dst[2] = verts[i].position.z;
+        memcpy(dst + 3, tfCol, sizeof(tfCol));
+        dst[7] = verts[i].textureUV.x;
+        dst[8] = verts[i].textureUV.y;
     }
-    DrawArrays(GL_TRIANGLE_STRIP, pos.data(), col.data(), tc.data(), count);
+    DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, count);
 }
 
 // continued below — texture management
@@ -1318,8 +1353,7 @@ void RendererGLES::BlitFBOToScreen()
     pglUniformMatrix4fv(this->loc_u_ModelView, 1, GL_FALSE, &ident.m[0][0]);
 
     glBindTexture(GL_TEXTURE_2D, this->fboColorTex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // Filter/wrap params already set at FBO texture creation time
 
     f32 pos[] = { 0,0,0, 1,0,0, 0,1,0, 1,1,0 };
     f32 col[] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
@@ -1340,14 +1374,18 @@ void RendererGLES::EndFrame()
         glDisable(GL_DEPTH_TEST);
         pglUniform1i(this->loc_u_FogEnabled, 0);
         THPrac::THPracGuiRender();
+        this->attribsEnabled = false;
 
         // Re-activate game shader (ImGui may have switched the active program)
         pglUseProgram(this->shaderProgram);
 
-        // Blit FBO -> screen, swap, blit again (for capture tools)
+        // Blit FBO -> screen, swap
         BlitFBOToScreen();
         SDL_GL_SwapWindow(this->window);
+#ifndef __ANDROID__
+        // Post-swap blit for desktop capture tools (OBS, etc.)
         BlitFBOToScreen();
+#endif
 
         // Restore state for next frame
         pglBindFramebuffer(GL_FRAMEBUFFER, this->fbo);
@@ -1375,6 +1413,7 @@ void RendererGLES::EndFrame()
         glDisable(GL_DEPTH_TEST);
         pglUniform1i(this->loc_u_FogEnabled, 0);
         THPrac::THPracGuiRender();
+        this->attribsEnabled = false;
         SDL_GL_SwapWindow(this->window);
     }
 }
