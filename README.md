@@ -86,6 +86,17 @@ android/                    # Android build (Gradle + NDK, WIP)
 - [Team Shanghai Alice](https://www16.big.or.jp/~zun/) — Original game by ZUN
 - [SDL2](https://www.libsdl.org/) / [OpenGL](https://www.opengl.org/)
 
+
+### ⚠️ Developer Disclaimer (A Note on this Project's "Silicon Content")
+
+> **TL;DR:** Yes, this project is 100% **vibe-coded**!
+> 
+> Confession time: A significant portion of the underlying code in this repo was generated with the help of LLMs. If you're scrolling through the commit history and catch a strong whiff of "AI," trust your instincts—your radar is spot on.
+> 
+> My primary goal was straightforward: **achieve cross-platform compatibility** and get the game running smoothly with **full OpenGL hardware acceleration on modern machines**, finally breaking free from the ancient shackles of D3D8. To quickly validate this idea and hit that goal, I happily outsourced all the tedious C++ grunt work, API swapping, and low-level duct-taping to my AI assistant.
+> 
+> The core philosophy here is simple: "The code might look a bit abstract, but hey, it actually runs on modern hardware." 🛠️
+
 ---
 
 <a id="中文"></a>
@@ -169,3 +180,14 @@ android/                    # Android 构建（Gradle + NDK，开发中）
 - [happyhavoc/th06](https://github.com/happyhavoc/th06) — 原始逆向重建源码
 - [上海爱丽丝幻乐团](https://www16.big.or.jp/~zun/) — ZUN 制作的原版游戏
 - [SDL2](https://www.libsdl.org/) / [OpenGL](https://www.opengl.org/)
+
+
+### ⚠️ 开发者叠甲时间 (关于本项目含硅量的声明)
+
+> **太长不看版：** 没错，这是一个纯正的 **Vibe-coded（凭感觉编程）** 项目！
+> 
+> 坦白局：本项目含有大量由 LLM辅助生成的底层代码。如果你在翻看 commit 记录时闻到了一股浓浓的“AI 味”，自信点，你的直觉非常准确。
+> 
+> 我的核心目的其实非常纯粹：**实现跨平台运行**，并让游戏在**现代机器上能顺利跑满 OpenGL 硬件加速**，彻底摆脱古老的 D3D8 的束缚。为了快速达成这个目标验证想法，那些繁琐的 C++ 搬砖活儿、API 替换和底层缝合，我就全权委托给 AI 助理了。
+> 
+> 主打一个“代码虽然抽象，但它在现代机器上真能跑”。🛠️
