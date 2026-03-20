@@ -32,6 +32,19 @@ static double GetFrameTime() {
     return (speed > 0.01f) ? (FRAME_TIME / speed) : FRAME_TIME;
 }
 
+static int GetPreferredSwapInterval(bool windowed)
+{
+#ifdef __ANDROID__
+    (void)windowed;
+    // On Android, pacing is usually more stable when we let EGL/SurfaceFlinger
+    // block on the display cadence instead of combining swap interval 0 with a
+    // coarse SDL_Delay-based software limiter.
+    return 1;
+#else
+    return windowed ? 1 : 0;
+#endif
+}
+
 static bool g_PendingWindowModeChange = false;
 static bool g_PendingWindowModeWindowed = false;
 static bool g_PendingRestart = false;
@@ -125,7 +138,9 @@ static void ApplyPendingWindowMode()
     }
 
     SDL_PumpEvents();
-    SDL_GL_SetSwapInterval(windowed ? 1 : 0);
+    const int preferredSwapInterval = GetPreferredSwapInterval(windowed);
+    SDL_GL_SetSwapInterval(preferredSwapInterval);
+    g_Supervisor.vsyncEnabled = preferredSwapInterval > 0 ? 1 : 0;
 
     // Set real screen dimensions directly — don't rely on SDL_GL_GetDrawableSize
     // which may not be up to date yet on Windows after an async resize.
@@ -316,6 +331,7 @@ void GameWindow::Present()
 
     g_Renderer->EndFrame();
 
+ #ifndef __ANDROID__
     if (g_GameWindow.screenWidth != 0)
     {
         static u32 s_lastPresentTime = 0;
@@ -332,6 +348,7 @@ void GameWindow::Present()
         }
         s_lastPresentTime = timeGetTime();
     }
+ #endif
     if (g_Supervisor.unk198 != 0)
     {
         g_Supervisor.unk198--;
@@ -504,7 +521,9 @@ i32 GameWindow::InitD3dRendering(void)
         return 1;
     }
 
-    SDL_GL_SetSwapInterval(g_Supervisor.cfg.windowed ? 1 : 0);
+    const int preferredSwapInterval = GetPreferredSwapInterval(g_Supervisor.cfg.windowed != 0);
+    SDL_GL_SetSwapInterval(preferredSwapInterval);
+    g_Supervisor.vsyncEnabled = preferredSwapInterval > 0 ? 1 : 0;
 
     // Select renderer based on persisted config (unk[0]: 0=GLES, 1=GL)
 #ifdef __ANDROID__
