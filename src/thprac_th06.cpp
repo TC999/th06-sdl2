@@ -284,6 +284,11 @@ namespace TH06 {
             "有効にすると、ウィンドウがフォーカスを失っても更新と描画を続行します。同一PCでのネット対戦テストでは有効化が必要です。");
     }
 
+    const char* NoFreezeOnFocusLossLockedHint()
+    {
+        return TrLocal("（联机中锁定）", "(locked by netplay)", "（ネット対戦中は固定）");
+    }
+
     // Legacy address constants removed - use Bridge:: accessors instead
     // e.g., Bridge::GM_Lives() instead of *(int8_t*)(0x69d4ba)
 
@@ -1927,7 +1932,19 @@ namespace TH06 {
                 g_bossMoveDownRange = std::clamp(g_bossMoveDownRange, 0.0f, 1.0f);
 
             ImGui::Checkbox(S(TH_ENABLE_LOCK_TIMER), &g_adv_igi_options.enable_lock_timer_autoly);
-            ImGui::Checkbox(NoFreezeOnFocusLossLabel(), &g_adv_igi_options.th06_run_in_background);
+            const bool forceRunInBackground = th06::OnlineMenu::ShouldForceRunInBackground();
+            bool effectiveRunInBackground = g_adv_igi_options.th06_run_in_background || forceRunInBackground;
+            if (forceRunInBackground) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Checkbox(NoFreezeOnFocusLossLabel(), &effectiveRunInBackground) && !forceRunInBackground) {
+                g_adv_igi_options.th06_run_in_background = effectiveRunInBackground;
+            }
+            if (forceRunInBackground) {
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", NoFreezeOnFocusLossLockedHint());
+            }
             ImGui::SameLine();
             HelpMarker(NoFreezeOnFocusLossDesc());
 

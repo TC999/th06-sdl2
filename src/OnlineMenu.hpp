@@ -6,6 +6,7 @@ void Open();
 void Close();
 void Reset();
 bool IsOpen();
+bool ShouldForceRunInBackground();
 bool ConsumeCloseRequested();
 bool AllowsBackShortcut();
 void UpdateImGui();

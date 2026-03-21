@@ -3,6 +3,7 @@
 #include "Controller.hpp"
 #include "GameErrorContext.hpp"
 #include "NetplaySession.hpp"
+#include "OnlineMenu.hpp"
 #include "RendererGLES.hpp"
 #include "ScreenEffect.hpp"
 #include "Session.hpp"
@@ -56,7 +57,7 @@ static bool g_PendingRestart = false;
 
 static bool ShouldFreezeWhenInactive()
 {
-    return !THPrac::g_adv_igi_options.th06_run_in_background;
+    return !(THPrac::g_adv_igi_options.th06_run_in_background || OnlineMenu::ShouldForceRunInBackground());
 }
 
 #ifdef __ANDROID__

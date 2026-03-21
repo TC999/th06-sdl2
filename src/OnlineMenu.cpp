@@ -426,6 +426,13 @@ bool IsOpen()
     return g_State.isOpen;
 }
 
+bool ShouldForceRunInBackground()
+{
+    const SessionKind kind = Session::GetKind();
+    return g_State.isOpen || Netplay::IsWaitingForStartup() || Netplay::IsSessionActive() ||
+           kind == SessionKind::LocalNetplay || kind == SessionKind::Netplay;
+}
+
 bool ConsumeCloseRequested()
 {
     if (!g_State.closeRequested)
