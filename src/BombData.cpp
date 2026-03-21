@@ -16,6 +16,18 @@ DIFFABLE_STATIC_ARRAY_ASSIGN(BombData, 4, g_BombData) = {
     /* MarisaB */ {BombData::BombMarisaBCalc, BombData::BombMarisaBDraw},
 };
 
+namespace
+{
+i32 PlayerBombScript(const Player *player, i32 player1Script)
+{
+    if (player->playerType == 2)
+    {
+        return player1Script + ANM_OFFSET_PLAYER_DIFFERENCE;
+    }
+    return player1Script;
+}
+} // namespace
+
 #pragma var_order(angle, i, bombSprite, vecLength, bombPivot, bombIdx)
 void BombData::BombReimuACalc(Player *player)
 {
@@ -71,7 +83,7 @@ void BombData::BombReimuACalc(Player *player)
 
             for (bombSprite = &player->bombInfo.sprites[0][i * 4], bombIdx = 0; bombIdx < 4; bombIdx++, bombSprite++)
             {
-                g_AnmManager->ExecuteAnmIdx(bombSprite, ANM_SCRIPT_PLAYER_REIMU_A_BOMB_ARRAY + bombIdx);
+                g_AnmManager->ExecuteAnmIdx(bombSprite, PlayerBombScript(player, ANM_SCRIPT_PLAYER_REIMU_A_BOMB_ARRAY + bombIdx));
             }
             g_SoundPlayer.PlaySoundByIdx(SOUND_BOMB_REIMU_A, 0);
         }
@@ -274,7 +286,7 @@ void BombData::BombReimuBCalc(Player *player)
 
         for (i = 0; i < 4; i++, bombSprite++)
         {
-            g_AnmManager->ExecuteAnmIdx(bombSprite, ANM_SCRIPT_PLAYER_REIMU_B_BOMB_ARRAY + i);
+            g_AnmManager->ExecuteAnmIdx(bombSprite, PlayerBombScript(player, ANM_SCRIPT_PLAYER_REIMU_B_BOMB_ARRAY + i));
         }
 
         g_SoundPlayer.PlaySoundByIdx(SOUND_BOMB_REIMARI, 0);
@@ -374,7 +386,7 @@ void BombData::BombMarisaACalc(Player *player)
         starSprite = player->bombInfo.sprites[0];
         for (i = 0; i < ARRAY_SIZE_SIGNED(player->bombInfo.sprites); i++, starSprite++)
         {
-            g_AnmManager->ExecuteAnmIdx(starSprite, ANM_SCRIPT_PLAYER_MARISA_A_BLUE_STAR + i % 3);
+            g_AnmManager->ExecuteAnmIdx(starSprite, PlayerBombScript(player, ANM_SCRIPT_PLAYER_MARISA_A_BLUE_STAR + i % 3));
             player->bombInfo.bombRegionPositions[i] = player->positionCenter;
 
             starAngle = i * ZUN_2PI / 8.0f;
@@ -484,7 +496,7 @@ void BombData::BombMarisaBCalc(Player *player)
         bombSprite = player->bombInfo.sprites[0];
         for (i = 0; i < 4; i++, bombSprite++)
         {
-            g_AnmManager->ExecuteAnmIdx(bombSprite, ANM_SCRIPT_PLAYER_MARISA_B_MASTER_SPARK + i);
+            g_AnmManager->ExecuteAnmIdx(bombSprite, PlayerBombScript(player, ANM_SCRIPT_PLAYER_MARISA_B_MASTER_SPARK + i));
             player->bombInfo.bombRegionPositions[i] = player->positionCenter;
         }
         g_SoundPlayer.PlaySoundByIdx(SOUND_BOMB_MARISA_B, 0);
