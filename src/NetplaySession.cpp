@@ -1,9 +1,17 @@
 #include "NetplaySession.hpp"
 
 #include "AsciiManager.hpp"
+#include "BulletManager.hpp"
 #include "Controller.hpp"
+#include "EclManager.hpp"
+#include "EffectManager.hpp"
+#include "EnemyManager.hpp"
 #include "GameManager.hpp"
+#include "Gui.hpp"
+#include "ItemManager.hpp"
+#include "Player.hpp"
 #include "Rng.hpp"
+#include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "ZunColor.hpp"
 
@@ -14,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <sstream>
 #include <map>
 #include <string>
@@ -38,7 +47,9 @@ namespace
 {
 constexpr int kMaxDelay = 10;
 constexpr int kKeyPackFrameCount = 15;
-constexpr int kFrameCacheSize = 80;
+constexpr int kFrameCacheSize = 180;
+constexpr int kRollbackSnapshotInterval = 15;
+constexpr int kRollbackMaxSnapshots = 8;
 constexpr int kRelayDefaultPort = 3478;
 constexpr Uint64 kPeriodicPingMs = 1000;
 constexpr Uint64 kReconnectPingMs = 100;
@@ -122,6 +133,34 @@ struct Pack
     CtrlPack ctrl {};
 };
 #pragma pack(pop)
+
+struct RollbackSnapshot
+{
+    int frame = 0;
+    int stage = 0;
+    int delay = 1;
+    int currentDelayCooldown = 0;
+    bool hasGuiImpl = false;
+
+    GameManager gameManager;
+    Player player1;
+    Player player2;
+    BulletManager bulletManager;
+    EnemyManager enemyManager;
+    ItemManager itemManager;
+    EffectManager effectManager;
+    Gui gui;
+    GuiImpl guiImpl;
+    AsciiManager asciiManager;
+    Stage stageState;
+    EclManager eclManager;
+    Rng rng;
+
+    u16 lastFrameInput = 0;
+    u16 curFrameInput = 0;
+    u16 eighthFrameHeldInput = 0;
+    u16 heldInputFrames = 0;
+};
 
 static_assert(sizeof(Bits<16>) == 2, "Bits<16> layout mismatch");
 static_assert(sizeof(CtrlPack) == 128, "CtrlPack layout mismatch");
@@ -394,6 +433,9 @@ struct RuntimeState
     int resyncTargetFrame = 0;
     bool resyncTriggered = false;
     int lastFrame = -1;
+    int lastConfirmedSyncFrame = 0;
+    int rollbackTargetFrame = 0;
+    int rollbackStage = -1;
     int sessionBaseCalcCount = 0;
     int currentNetFrame = 0;
     Uint64 lastPeriodicPingTick = 0;
@@ -412,6 +454,8 @@ struct RuntimeState
     std::map<int, u16> remoteSeeds;
     std::map<int, InGameCtrlType> localCtrls;
     std::map<int, InGameCtrlType> remoteCtrls;
+    std::deque<RollbackSnapshot> rollbackSnapshots;
+    bool rollbackActive = false;
 };
 
 RuntimeState g_State;
@@ -460,6 +504,10 @@ void PruneOldFrameData(int frame);
 InGameCtrlType CaptureControlKeys();
 Pack MakePing(Control ctrlType);
 int CurrentNetFrame();
+void CaptureRollbackSnapshot(int frame);
+bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlType &outCtrl);
+bool RestoreRollbackSnapshot(const RollbackSnapshot &snapshot);
+bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame);
 void SendPeriodicPing();
 void ActivateNetplaySession();
 void BeginSessionStartupWait();
@@ -475,7 +523,7 @@ void SendStartupBootstrapPacket();
 void SendKeyPacket(int frame);
 void SendResyncPacket();
 void HandleDesync(int frame);
-u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl);
+u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &outRollbackStarted);
 void ApplyDelayControl();
 void TryReconnect(int frame);
 
@@ -1124,6 +1172,11 @@ void ClearRuntimeCaches()
     g_State.remoteSeeds.clear();
     g_State.localCtrls.clear();
     g_State.remoteCtrls.clear();
+    g_State.rollbackSnapshots.clear();
+    g_State.rollbackActive = false;
+    g_State.rollbackTargetFrame = 0;
+    g_State.rollbackStage = -1;
+    g_State.lastConfirmedSyncFrame = 0;
     g_State.currentCtrl = IGC_NONE;
 }
 
@@ -1519,6 +1572,242 @@ int CurrentNetFrame()
     return std::max(0, g_State.currentNetFrame);
 }
 
+void CaptureRollbackSnapshot(int frame)
+{
+    if (!g_State.isSessionActive || !g_State.isConnected || !Session::IsRemoteNetplaySession())
+    {
+        return;
+    }
+
+    if (g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER || g_GameManager.demoMode || g_State.rollbackActive)
+    {
+        return;
+    }
+
+    if (g_State.rollbackStage != g_GameManager.currentStage)
+    {
+        g_State.rollbackSnapshots.clear();
+        g_State.rollbackStage = g_GameManager.currentStage;
+        g_State.lastConfirmedSyncFrame = frame;
+    }
+
+    if (!g_State.rollbackSnapshots.empty() && g_State.rollbackSnapshots.back().frame == frame)
+    {
+        return;
+    }
+
+    if (frame != 0 && frame % kRollbackSnapshotInterval != 0)
+    {
+        return;
+    }
+
+    g_State.rollbackSnapshots.emplace_back();
+    RollbackSnapshot &snapshot = g_State.rollbackSnapshots.back();
+
+    snapshot.frame = frame;
+    snapshot.stage = g_GameManager.currentStage;
+    snapshot.delay = g_State.delay;
+    snapshot.currentDelayCooldown = g_State.currentDelayCooldown;
+    snapshot.hasGuiImpl = g_Gui.impl != nullptr;
+    snapshot.gameManager = g_GameManager;
+    snapshot.player1 = g_Player;
+    snapshot.player2 = g_Player2;
+    snapshot.bulletManager = g_BulletManager;
+    snapshot.enemyManager = g_EnemyManager;
+    snapshot.itemManager = g_ItemManager;
+    snapshot.effectManager = g_EffectManager;
+    snapshot.gui = g_Gui;
+    if (snapshot.hasGuiImpl)
+    {
+        snapshot.guiImpl = *g_Gui.impl;
+    }
+    snapshot.asciiManager = g_AsciiManager;
+    snapshot.stageState = g_Stage;
+    snapshot.eclManager = g_EclManager;
+    snapshot.rng = g_Rng;
+    snapshot.lastFrameInput = g_LastFrameInput;
+    snapshot.curFrameInput = g_CurFrameInput;
+    snapshot.eighthFrameHeldInput = g_IsEigthFrameOfHeldInput;
+    snapshot.heldInputFrames = g_NumOfFramesInputsWereHeld;
+
+    while ((int)g_State.rollbackSnapshots.size() > kRollbackMaxSnapshots)
+    {
+        g_State.rollbackSnapshots.pop_front();
+    }
+}
+
+bool RestoreRollbackSnapshot(const RollbackSnapshot &snapshot)
+{
+    if (snapshot.stage != g_GameManager.currentStage)
+    {
+        return false;
+    }
+
+    g_GameManager = snapshot.gameManager;
+    g_Player = snapshot.player1;
+    g_Player2 = snapshot.player2;
+    g_BulletManager = snapshot.bulletManager;
+    g_EnemyManager = snapshot.enemyManager;
+    g_ItemManager = snapshot.itemManager;
+    g_EffectManager = snapshot.effectManager;
+    g_Gui = snapshot.gui;
+    if (snapshot.hasGuiImpl && g_Gui.impl != nullptr)
+    {
+        *g_Gui.impl = snapshot.guiImpl;
+    }
+    g_AsciiManager = snapshot.asciiManager;
+    g_Stage = snapshot.stageState;
+    g_EclManager = snapshot.eclManager;
+    g_Rng = snapshot.rng;
+    g_LastFrameInput = snapshot.lastFrameInput;
+    g_CurFrameInput = snapshot.curFrameInput;
+    g_IsEigthFrameOfHeldInput = snapshot.eighthFrameHeldInput;
+    g_NumOfFramesInputsWereHeld = snapshot.heldInputFrames;
+    g_State.delay = snapshot.delay;
+    g_State.currentDelayCooldown = snapshot.currentDelayCooldown;
+    g_State.currentCtrl = IGC_NONE;
+    return true;
+}
+
+bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlType &outCtrl)
+{
+    const auto mapToPlayer2 = [](u16 input) -> u16 {
+        u16 mapped = 0;
+        mapped |= (input & TH_BUTTON_LEFT) ? TH_BUTTON_LEFT2 : 0;
+        mapped |= (input & TH_BUTTON_RIGHT) ? TH_BUTTON_RIGHT2 : 0;
+        mapped |= (input & TH_BUTTON_UP) ? TH_BUTTON_UP2 : 0;
+        mapped |= (input & TH_BUTTON_DOWN) ? TH_BUTTON_DOWN2 : 0;
+        mapped |= (input & TH_BUTTON_SHOOT) ? TH_BUTTON_SHOOT2 : 0;
+        mapped |= (input & TH_BUTTON_BOMB) ? TH_BUTTON_BOMB2 : 0;
+        mapped |= (input & TH_BUTTON_FOCUS) ? TH_BUTTON_FOCUS2 : 0;
+        mapped |= (input & TH_BUTTON_MENU) ? TH_BUTTON_MENU : 0;
+        mapped |= (input & TH_BUTTON_SKIP) ? TH_BUTTON_SKIP : 0;
+        return mapped;
+    };
+
+    outCtrl = IGC_NONE;
+    outInput = 0;
+
+    if (frame - g_State.delay < 0)
+    {
+        return true;
+    }
+
+    const int delayedFrame = frame - g_State.delay;
+    const bool localIsPlayer1 = IsLocalPlayer1();
+
+    const auto selfIt = g_State.localInputs.find(delayedFrame);
+    if (selfIt == g_State.localInputs.end())
+    {
+        return false;
+    }
+    const u16 selfInput = WriteToInt(selfIt->second);
+
+    const auto remoteIt = g_State.remoteInputs.find(delayedFrame);
+    if (remoteIt == g_State.remoteInputs.end())
+    {
+        return false;
+    }
+    const u16 remoteInput = WriteToInt(remoteIt->second);
+
+    InGameCtrlType selfCtrl = IGC_NONE;
+    const auto selfCtrlIt = g_State.localCtrls.find(delayedFrame);
+    if (selfCtrlIt != g_State.localCtrls.end())
+    {
+        selfCtrl = selfCtrlIt->second;
+    }
+
+    InGameCtrlType remoteCtrl = IGC_NONE;
+    const auto remoteCtrlIt = g_State.remoteCtrls.find(delayedFrame);
+    if (remoteCtrlIt != g_State.remoteCtrls.end())
+    {
+        remoteCtrl = remoteCtrlIt->second;
+    }
+
+    if (selfCtrl != IGC_NONE && remoteCtrl != IGC_NONE)
+    {
+        outCtrl = localIsPlayer1 ? selfCtrl : remoteCtrl;
+    }
+    else
+    {
+        outCtrl = selfCtrl == IGC_NONE ? remoteCtrl : selfCtrl;
+    }
+
+    if (isInUi)
+    {
+        outInput = selfInput | remoteInput;
+        return true;
+    }
+
+    if (localIsPlayer1)
+    {
+        outInput = selfInput | mapToPlayer2(remoteInput);
+    }
+    else
+    {
+        outInput = remoteInput | mapToPlayer2(selfInput);
+    }
+    return true;
+}
+
+bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame)
+{
+    if (g_State.rollbackActive || g_State.rollbackSnapshots.empty() || mismatchFrame <= 0)
+    {
+        return false;
+    }
+
+    int lastSynchronizedFrame = std::min(g_State.lastConfirmedSyncFrame, mismatchFrame - 1);
+    while (lastSynchronizedFrame >= 0)
+    {
+        const auto localSeedIt = g_State.localSeeds.find(lastSynchronizedFrame);
+        const auto remoteSeedIt = g_State.remoteSeeds.find(lastSynchronizedFrame);
+        if (localSeedIt != g_State.localSeeds.end() && remoteSeedIt != g_State.remoteSeeds.end() &&
+            localSeedIt->second == remoteSeedIt->second)
+        {
+            break;
+        }
+        --lastSynchronizedFrame;
+    }
+
+    if (lastSynchronizedFrame < 0)
+    {
+        return false;
+    }
+
+    const RollbackSnapshot *snapshot = nullptr;
+    for (auto it = g_State.rollbackSnapshots.rbegin(); it != g_State.rollbackSnapshots.rend(); ++it)
+    {
+        if (it->stage == g_GameManager.currentStage && it->frame <= lastSynchronizedFrame)
+        {
+            snapshot = &(*it);
+            break;
+        }
+    }
+
+    if (snapshot == nullptr || snapshot->frame >= currentFrame || !RestoreRollbackSnapshot(*snapshot))
+    {
+        return false;
+    }
+
+    while (!g_State.rollbackSnapshots.empty() && g_State.rollbackSnapshots.back().frame > snapshot->frame)
+    {
+        g_State.rollbackSnapshots.pop_back();
+    }
+
+    g_State.rollbackActive = true;
+    g_State.rollbackTargetFrame = currentFrame;
+    g_State.currentNetFrame = snapshot->frame;
+    g_State.lastFrame = snapshot->frame - 1;
+    g_State.lastConfirmedSyncFrame = lastSynchronizedFrame;
+    g_State.resyncTriggered = false;
+    g_State.resyncTargetFrame = 0;
+    g_State.isSync = true;
+    g_State.currentCtrl = IGC_NONE;
+    SetStatus("rollback catchup...");
+    return true;
+}
+
 void SendPeriodicPing()
 {
     if (!g_State.isConnected)
@@ -1889,7 +2178,7 @@ void HandleDesync(int frame)
     }
 }
 
-u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl)
+u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &outRollbackStarted)
 {
     const auto mapToPlayer2 = [](u16 input) -> u16 {
         u16 mapped = 0;
@@ -1906,6 +2195,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl)
     };
     const bool localIsPlayer1 = IsLocalPlayer1();
 
+    outRollbackStarted = false;
     outCtrl = IGC_NONE;
     if (frame - g_State.delay < 0)
     {
@@ -1938,7 +2228,20 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl)
             const auto localSeedIt = g_State.localSeeds.find(delayedFrame);
             if (remoteSeedIt != g_State.remoteSeeds.end() && localSeedIt != g_State.localSeeds.end())
             {
-                g_State.isSync = remoteSeedIt->second == localSeedIt->second;
+                if (remoteSeedIt->second == localSeedIt->second)
+                {
+                    g_State.isSync = true;
+                    g_State.lastConfirmedSyncFrame = delayedFrame;
+                }
+                else
+                {
+                    g_State.isSync = false;
+                    if (TryStartAutomaticRollback(frame, delayedFrame))
+                    {
+                        outRollbackStarted = true;
+                        return 0;
+                    }
+                }
             }
 
             const auto remoteCtrlIt = g_State.remoteCtrls.find(delayedFrame);
@@ -2079,11 +2382,10 @@ void NetSession::AdvanceFrameInput()
     }
 
     const int frame = CurrentNetFrame();
-    if (g_State.lastFrame >= 0 && frame < g_State.lastFrame)
+    if (g_State.lastFrame >= 0 && frame < g_State.lastFrame && !g_State.rollbackActive)
     {
         ClearRuntimeCaches();
     }
-    g_State.lastFrame = frame;
 
     if (g_State.isTryingReconnect)
     {
@@ -2095,6 +2397,33 @@ void NetSession::AdvanceFrameInput()
     const bool isInUi =
         g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER ||
         (g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER && g_GameManager.isInGameMenu);
+
+    CaptureRollbackSnapshot(frame);
+
+    if (g_State.rollbackActive)
+    {
+        InGameCtrlType currentCtrl = IGC_NONE;
+        u16 finalInput = 0;
+        if (!ResolveStoredFrameInput(frame, isInUi, finalInput, currentCtrl))
+        {
+            g_State.rollbackActive = false;
+            SetStatus("rollback aborted");
+            Session::ApplyLegacyFrameInput(0);
+            return;
+        }
+
+        g_State.currentCtrl = currentCtrl;
+        ApplyDelayControl();
+        Session::ApplyLegacyFrameInput(finalInput);
+        g_State.lastFrame = frame;
+        g_State.currentNetFrame = frame + 1;
+        if (g_State.currentNetFrame >= g_State.rollbackTargetFrame)
+        {
+            g_State.rollbackActive = false;
+            SetStatus("connected");
+        }
+        return;
+    }
 
     HandleDesync(frame);
 
@@ -2110,13 +2439,27 @@ void NetSession::AdvanceFrameInput()
     ReceiveRuntimePackets();
 
     InGameCtrlType currentCtrl = IGC_NONE;
-    u16 finalInput = ResolveFrameInput(frame, isInUi, currentCtrl);
+    bool rollbackStarted = false;
+    u16 finalInput = ResolveFrameInput(frame, isInUi, currentCtrl, rollbackStarted);
+    int processedFrame = frame;
+    if (rollbackStarted)
+    {
+        processedFrame = CurrentNetFrame();
+        if (!ResolveStoredFrameInput(processedFrame, isInUi, finalInput, currentCtrl))
+        {
+            g_State.rollbackActive = false;
+            SetStatus("rollback aborted");
+            Session::ApplyLegacyFrameInput(0);
+            return;
+        }
+    }
     g_State.currentCtrl = currentCtrl;
     ApplyDelayControl();
     Session::ApplyLegacyFrameInput(finalInput);
+    g_State.lastFrame = processedFrame;
     if (g_State.isConnected && !g_State.isTryingReconnect)
     {
-        g_State.currentNetFrame = frame + 1;
+        g_State.currentNetFrame = processedFrame + 1;
     }
 }
 
@@ -2474,6 +2817,11 @@ bool IsLocalPlayer1()
 bool IsSync()
 {
     return g_State.isSync;
+}
+
+bool NeedsRollbackCatchup()
+{
+    return g_State.rollbackActive;
 }
 
 int GetDelay()

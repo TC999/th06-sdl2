@@ -1,6 +1,8 @@
 #include "GameWindow.hpp"
 #include "AnmManager.hpp"
+#include "Controller.hpp"
 #include "GameErrorContext.hpp"
+#include "NetplaySession.hpp"
 #include "RendererGLES.hpp"
 #include "ScreenEffect.hpp"
 #include "Session.hpp"
@@ -28,6 +30,7 @@ IRenderer *g_Renderer = nullptr;
 #endif
 
 #define FRAME_TIME (1000. / 60.)
+constexpr int kRollbackCatchupCalcLimit = 32;
 
 static double GetFrameTime() {
     float speed = THPrac::THPracGetSpeedMultiplier();
@@ -244,7 +247,6 @@ RenderResult GameWindow::Render()
         g_Renderer->SetViewport(0, 0, 640, 480);
         res = g_Chain.RunCalcChain();
         THPrac::THPracGuiUpdate();
-        g_SoundPlayer.PlaySounds();
         if (res == 0)
         {
             return RENDER_RESULT_EXIT_SUCCESS;
@@ -252,6 +254,25 @@ RenderResult GameWindow::Render()
         if (res == -1)
         {
             return RENDER_RESULT_EXIT_ERROR;
+        }
+        for (int rollbackCatchupFrames = 0; rollbackCatchupFrames < kRollbackCatchupCalcLimit &&
+                                           Netplay::NeedsRollbackCatchup();
+             ++rollbackCatchupFrames)
+        {
+            res = g_Chain.RunCalcChain();
+            THPrac::THPracGuiUpdate();
+            if (res == 0)
+            {
+                return RENDER_RESULT_EXIT_SUCCESS;
+            }
+            if (res == -1)
+            {
+                return RENDER_RESULT_EXIT_ERROR;
+            }
+        }
+        if (!Netplay::NeedsRollbackCatchup())
+        {
+            g_SoundPlayer.PlaySounds();
         }
         this->curFrame++;
     }
@@ -463,33 +484,33 @@ void GameWindow_ProcessEvents()
             {
                 g_GameWindow.lastActiveAppValue = 1;
                 g_GameWindow.isAppActive = 0;
-                Session::ResetInputState();
+                Controller::ResetInputState();
             }
             else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
             {
                 g_GameWindow.lastActiveAppValue = ShouldFreezeWhenInactive() ? 0 : 1;
                 g_GameWindow.isAppActive = ShouldFreezeWhenInactive() ? 1 : 0;
-                Session::ResetInputState();
+                Controller::ResetInputState();
             }
             break;
         case SDL_APP_WILLENTERBACKGROUND:
         case SDL_APP_DIDENTERBACKGROUND:
             g_GameWindow.lastActiveAppValue = ShouldFreezeWhenInactive() ? 0 : 1;
             g_GameWindow.isAppActive = ShouldFreezeWhenInactive() ? 1 : 0;
-            Session::ResetInputState();
+            Controller::ResetInputState();
             break;
         case SDL_APP_WILLENTERFOREGROUND:
         case SDL_APP_DIDENTERFOREGROUND:
             g_GameWindow.lastActiveAppValue = 1;
             g_GameWindow.isAppActive = 0;
-            Session::ResetInputState();
+            Controller::ResetInputState();
             break;
         case SDL_JOYDEVICEADDED:
         case SDL_JOYDEVICEREMOVED:
         case SDL_CONTROLLERDEVICEADDED:
         case SDL_CONTROLLERDEVICEREMOVED:
             Controller::RefreshSDLController();
-            Session::ResetInputState();
+            Controller::ResetInputState();
             break;
         default:
             break;

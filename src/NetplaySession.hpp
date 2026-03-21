@@ -72,6 +72,7 @@ bool IsConnected();
 bool IsHost();
 bool IsLocalPlayer1();
 bool IsSync();
+bool NeedsRollbackCatchup();
 int GetDelay();
 void SetDelay(int delay);
 void SetHostPlayer1(bool hostIsPlayer1);
