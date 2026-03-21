@@ -26,6 +26,15 @@ i32 PlayerBombScript(const Player *player, i32 player1Script)
     }
     return player1Script;
 }
+
+u32 PlayerBombPortraitScript(const Player *player, u32 player1Script)
+{
+    if (player->playerType == 2)
+    {
+        return player1Script + ANM_OFFSET_PLAYER_DIFFERENCE;
+    }
+    return player1Script;
+}
 } // namespace
 
 #pragma var_order(angle, i, bombSprite, vecLength, bombPivot, bombIdx)
@@ -46,7 +55,8 @@ void BombData::BombReimuACalc(Player *player)
     }
     if (player->bombInfo.timer.HasTicked() && player->bombInfo.timer == 0)
     {
-        g_Gui.ShowBombNamePortrait(ANM_SCRIPT_FACE_BOMB_PORTRAIT, TH_REIMU_A_BOMB_NAME);
+        g_Gui.ShowBombNamePortrait(PlayerBombPortraitScript(player, ANM_SCRIPT_FACE_BOMB_PORTRAIT),
+                                   TH_REIMU_A_BOMB_NAME);
         player->bombInfo.duration = 300;
         player->invulnerabilityTimer.SetCurrent(360);
 
@@ -279,7 +289,8 @@ void BombData::BombReimuBCalc(Player *player)
     if (player->bombInfo.timer.HasTicked() && player->bombInfo.timer == 0)
     {
         g_ItemManager.RemoveAllItems();
-        g_Gui.ShowBombNamePortrait(ANM_SCRIPT_FACE_ENEMY_SPELLCARD_PORTRAIT, TH_REIMU_B_BOMB_NAME);
+        g_Gui.ShowBombNamePortrait(PlayerBombPortraitScript(player, ANM_SCRIPT_FACE_ENEMY_SPELLCARD_PORTRAIT),
+                                   TH_REIMU_B_BOMB_NAME);
         player->bombInfo.duration = 140;
         player->invulnerabilityTimer.SetCurrent(200);
         bombSprite = player->bombInfo.sprites[0];
@@ -379,7 +390,8 @@ void BombData::BombMarisaACalc(Player *player)
     if (player->bombInfo.timer.HasTicked() && player->bombInfo.timer == 0)
     {
         g_ItemManager.RemoveAllItems();
-        g_Gui.ShowBombNamePortrait(ANM_SCRIPT_FACE_ENEMY_SPELLCARD_PORTRAIT, TH_MARISA_A_BOMB_NAME);
+        g_Gui.ShowBombNamePortrait(PlayerBombPortraitScript(player, ANM_SCRIPT_FACE_ENEMY_SPELLCARD_PORTRAIT),
+                                   TH_MARISA_A_BOMB_NAME);
         player->bombInfo.duration = 250;
         player->invulnerabilityTimer.SetCurrent(300);
 
@@ -490,7 +502,8 @@ void BombData::BombMarisaBCalc(Player *player)
     if (player->bombInfo.timer.HasTicked() && player->bombInfo.timer == 0)
     {
         g_ItemManager.RemoveAllItems();
-        g_Gui.ShowBombNamePortrait(ANM_SCRIPT_FACE_BOMB_PORTRAIT, TH_MARISA_B_BOMB_NAME);
+        g_Gui.ShowBombNamePortrait(PlayerBombPortraitScript(player, ANM_SCRIPT_FACE_BOMB_PORTRAIT),
+                                   TH_MARISA_B_BOMB_NAME);
         player->bombInfo.duration = 300;
         player->invulnerabilityTimer.SetCurrent(360);
         bombSprite = player->bombInfo.sprites[0];

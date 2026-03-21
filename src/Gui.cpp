@@ -22,6 +22,46 @@ DIFFABLE_STATIC(Gui, g_Gui);
 DIFFABLE_STATIC(ChainElem, g_GuiCalcChain);
 DIFFABLE_STATIC(ChainElem, g_GuiDrawChain);
 
+namespace
+{
+ZunResult LoadCharacterFaceAnm(Character character, i32 fileA, i32 fileB, i32 fileC, i32 offsetA, i32 offsetB, i32 offsetC)
+{
+    switch (character)
+    {
+    case CHARA_REIMU:
+        if (g_AnmManager->LoadAnm(fileA, "data/face00a.anm", offsetA) != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+        if (g_AnmManager->LoadAnm(fileB, "data/face00b.anm", offsetB) != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+        if (g_AnmManager->LoadAnm(fileC, "data/face00c.anm", offsetC) != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+        return ZUN_SUCCESS;
+    case CHARA_MARISA:
+        if (g_AnmManager->LoadAnm(fileA, "data/face01a.anm", offsetA) != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+        if (g_AnmManager->LoadAnm(fileB, "data/face01b.anm", offsetB) != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+        if (g_AnmManager->LoadAnm(fileC, "data/face01c.anm", offsetC) != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+        return ZUN_SUCCESS;
+    default:
+        return ZUN_ERROR;
+    }
+}
+} // namespace
+
 ZunBool Gui::IsStageFinished()
 {
     return this->impl->loadingScreenSprite.activeSpriteIndex >= 0 && this->impl->loadingScreenSprite.flags.isStopped;
@@ -246,7 +286,7 @@ ChainCallbackResult Gui::OnDraw(Gui *gui)
 
 void Gui::ShowBombNamePortrait(u32 sprite, char *bombName)
 {
-    g_AnmManager->SetAndExecuteScriptIdx(&this->impl->playerSpellcardPortrait, 0x4a1);
+    g_AnmManager->SetAndExecuteScriptIdx(&this->impl->playerSpellcardPortrait, sprite);
     g_AnmManager->SetActiveSprite(&this->impl->playerSpellcardPortrait, sprite);
     g_AnmManager->SetAndExecuteScriptIdx(&this->impl->bombSpellcardName, 0x706);
     g_AnmManager->DrawVmTextFmt(g_AnmManager, &this->impl->bombSpellcardName, 0xf0f0ff, 0x0, bombName);
@@ -283,42 +323,19 @@ ZunResult Gui::ActualAddedCallback()
             return ZUN_ERROR;
         }
         this->impl->loadingScreenSprite.activeSpriteIndex = -1;
-        switch (g_GameManager.character)
+        if (LoadCharacterFaceAnm((Character)g_GameManager.character, ANM_FILE_FACE_CHARA_A, ANM_FILE_FACE_CHARA_B,
+                                 ANM_FILE_FACE_CHARA_C, ANM_OFFSET_FACE_CHARA_A, ANM_OFFSET_FACE_CHARA_B,
+                                 ANM_OFFSET_FACE_CHARA_C) != ZUN_SUCCESS)
         {
-        case CHARA_REIMU:
-            if (g_AnmManager->LoadAnm(ANM_FILE_FACE_CHARA_A, "data/face00a.anm", ANM_OFFSET_FACE_CHARA_A) !=
-                ZUN_SUCCESS)
-            {
-                return ZUN_ERROR;
-            }
-            if (g_AnmManager->LoadAnm(ANM_FILE_FACE_CHARA_B, "data/face00b.anm", ANM_OFFSET_FACE_CHARA_B) !=
-                ZUN_SUCCESS)
-            {
-                return ZUN_ERROR;
-            }
-            if (g_AnmManager->LoadAnm(ANM_FILE_FACE_CHARA_C, "data/face00c.anm", ANM_OFFSET_FACE_CHARA_C) !=
-                ZUN_SUCCESS)
-            {
-                return ZUN_ERROR;
-            }
-            break;
-        case CHARA_MARISA:
-            if (g_AnmManager->LoadAnm(ANM_FILE_FACE_CHARA_A, "data/face01a.anm", ANM_OFFSET_FACE_CHARA_A) !=
-                ZUN_SUCCESS)
-            {
-                return ZUN_ERROR;
-            }
-            if (g_AnmManager->LoadAnm(ANM_FILE_FACE_CHARA_B, "data/face01b.anm", ANM_OFFSET_FACE_CHARA_B) !=
-                ZUN_SUCCESS)
-            {
-                return ZUN_ERROR;
-            }
-            if (g_AnmManager->LoadAnm(ANM_FILE_FACE_CHARA_C, "data/face01c.anm", ANM_OFFSET_FACE_CHARA_C) !=
-                ZUN_SUCCESS)
-            {
-                return ZUN_ERROR;
-            }
-            break;
+            return ZUN_ERROR;
+        }
+
+        if (Session::IsDualPlayerSession() &&
+            LoadCharacterFaceAnm((Character)g_GameManager.character2, ANM_FILE_FACE_CHARA_A2, ANM_FILE_FACE_CHARA_B2,
+                                 ANM_FILE_FACE_CHARA_C2, ANM_OFFSET_FACE_CHARA_A2, ANM_OFFSET_FACE_CHARA_B2,
+                                 ANM_OFFSET_FACE_CHARA_C2) != ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
         }
     }
     else
@@ -1059,6 +1076,10 @@ void Gui::DrawGameScene()
     i32 idx;
     f32 xPos;
     f32 yPos;
+    const bool isDualSession = Session::IsDualPlayerSession();
+    const bool isRemoteNetplaySession = Session::IsRemoteNetplaySession();
+    const float dualHudYOffset = isDualSession ? 20.0f : 0.0f;
+    const float netplayStatsYOffset = isRemoteNetplaySession ? 20.0f : 0.0f;
 
     if (this->impl->msg.currentMsgIdx < 0 && (this->bossPresent + this->impl->bossHealthBarState) > 0)
     {
@@ -1151,8 +1172,22 @@ void Gui::DrawGameScene()
         g_AnmManager->DrawNoRotation(&this->impl->vms[11]);
         g_AnmManager->DrawNoRotation(&this->impl->vms[12]);
         g_AnmManager->DrawNoRotation(&this->impl->vms[13]);
-        g_AnmManager->DrawNoRotation(&this->impl->vms[14]);
-        g_AnmManager->DrawNoRotation(&this->impl->vms[15]);
+        if (isRemoteNetplaySession)
+        {
+            AnmVm grazeLabel = this->impl->vms[14];
+            AnmVm pointLabel = this->impl->vms[15];
+
+            grazeLabel.pos.y += netplayStatsYOffset;
+            pointLabel.pos.y += netplayStatsYOffset;
+
+            g_AnmManager->DrawNoRotation(&grazeLabel);
+            g_AnmManager->DrawNoRotation(&pointLabel);
+        }
+        else
+        {
+            g_AnmManager->DrawNoRotation(&this->impl->vms[14]);
+            g_AnmManager->DrawNoRotation(&this->impl->vms[15]);
+        }
         this->flags.flag0 = 2;
         this->flags.flag1 = 2;
         this->flags.flag3 = 2;
@@ -1181,15 +1216,20 @@ void Gui::DrawGameScene()
         {
             vm->pos = D3DXVECTOR3(xPos, 186.0f, 0.49f);
             g_AnmManager->DrawNoRotation(vm);
+            if (isRemoteNetplaySession && isDualSession)
+            {
+                vm->pos = D3DXVECTOR3(xPos, 206.0f, 0.49f);
+                g_AnmManager->DrawNoRotation(vm);
+            }
         }
         if (this->flags.flag3)
         {
-            vm->pos = D3DXVECTOR3(xPos, 206.0f, 0.49f);
+            vm->pos = D3DXVECTOR3(xPos, 206.0f + netplayStatsYOffset, 0.49f);
             g_AnmManager->DrawNoRotation(vm);
         }
         if (this->flags.flag4)
         {
-            vm->pos = D3DXVECTOR3(xPos, 226.0f, 0.49f);
+            vm->pos = D3DXVECTOR3(xPos, 226.0f + netplayStatsYOffset, 0.49f);
             g_AnmManager->DrawNoRotation(vm);
         }
         vm->pos = D3DXVECTOR3(488.0f, 464.0f, 0.49f);
@@ -1197,8 +1237,6 @@ void Gui::DrawGameScene()
         vm->pos = D3DXVECTOR3(0.0, 464.0f, 0.49f);
         g_AnmManager->DrawNoRotation(vm);
     }
-    const bool isDualSession = Session::IsDualPlayerSession();
-    const float dualHudYOffset = isDualSession ? 20.0f : 0.0f;
 
     if (this->flags.flag0 || ((g_Supervisor.cfg.opts >> GCOS_DISPLAY_MINIMUM_GRAPHICS & 1) != 0))
     {
@@ -1344,12 +1382,12 @@ void Gui::DrawGameScene()
         g_AsciiManager.AddFormatText(&elemPos, "%.9d", g_GameManager.highScore);
         if (this->flags.flag3 || ((g_Supervisor.cfg.opts >> 4 & 1) != 0))
         {
-            elemPos = D3DXVECTOR3(496.0f, 206.0f + dualHudYOffset, 0.0f);
+            elemPos = D3DXVECTOR3(496.0f, 206.0f + netplayStatsYOffset, 0.0f);
             g_AsciiManager.AddFormatText(&elemPos, "%d", g_GameManager.grazeInStage);
         }
         if (this->flags.flag4 || ((g_Supervisor.cfg.opts >> 4 & 1) != 0))
         {
-            elemPos = D3DXVECTOR3(496.0f, 226.0f + dualHudYOffset, 0.0f);
+            elemPos = D3DXVECTOR3(496.0f, 226.0f + netplayStatsYOffset, 0.0f);
             g_AsciiManager.AddFormatText(&elemPos, "%d", g_GameManager.pointItemsCollectedInStage);
         }
     }
@@ -1489,6 +1527,9 @@ ZunResult Gui::DeletedCallback(Gui *gui)
         g_AnmManager->ReleaseAnm(ANM_FILE_FACE_CHARA_A);
         g_AnmManager->ReleaseAnm(ANM_FILE_FACE_CHARA_B);
         g_AnmManager->ReleaseAnm(ANM_FILE_FACE_CHARA_C);
+        g_AnmManager->ReleaseAnm(ANM_FILE_FACE_CHARA_A2);
+        g_AnmManager->ReleaseAnm(ANM_FILE_FACE_CHARA_B2);
+        g_AnmManager->ReleaseAnm(ANM_FILE_FACE_CHARA_C2);
         delete gui->impl;
         gui->impl = NULL;
     }
