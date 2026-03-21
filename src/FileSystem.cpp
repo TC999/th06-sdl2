@@ -13,6 +13,65 @@ namespace th06
 {
 DIFFABLE_STATIC(u32, g_LastFileSize)
 
+namespace
+{
+bool TryReadStandaloneArchiveEntry(const char *archivePath, const char *entryname, u8 **outData, u32 *outSize)
+{
+    if (archivePath == NULL || entryname == NULL || outData == NULL || outSize == NULL)
+    {
+        return false;
+    }
+
+    Pbg3Archive archive;
+    if (archive.Load((char *)archivePath) == FALSE)
+    {
+        return false;
+    }
+
+    const i32 entryIdx = archive.FindEntry((char *)entryname);
+    if (entryIdx < 0)
+    {
+        return false;
+    }
+
+    u8 *data = archive.ReadDecompressEntry(entryIdx, (char *)entryname);
+    if (data == NULL)
+    {
+        return false;
+    }
+
+    *outData = data;
+    *outSize = archive.GetEntrySize(entryIdx);
+    return true;
+}
+
+u8 *TryReadModifiedCmArchiveEntry(const char *entryname)
+{
+    static const char *kModifiedCmArchives[] = {
+        "TOLOL_CM.dat",
+        "TOTOL_CM.dat",
+        "TOLOL_CM.DAT",
+        "TOTOL_CM.DAT",
+        "tolol_cm.dat",
+        "totol_cm.dat",
+    };
+
+    for (const char *archivePath : kModifiedCmArchives)
+    {
+        u8 *data = NULL;
+        u32 size = 0;
+        if (TryReadStandaloneArchiveEntry(archivePath, entryname, &data, &size))
+        {
+            g_LastFileSize = size;
+            utils::DebugPrint2("%s Decode from %s ... \n", entryname, archivePath);
+            return data;
+        }
+    }
+
+    return NULL;
+}
+} // namespace
+
 #pragma var_order(pbg3Idx, entryname, entryIdx, fsize, data, file)
 u8 *FileSystem::OpenPath(char *filepath, int isExternalResource)
 {
@@ -64,6 +123,11 @@ u8 *FileSystem::OpenPath(char *filepath, int isExternalResource)
         }
         if (entryIdx < 0)
         {
+            data = TryReadModifiedCmArchiveEntry(entryname);
+            if (data != NULL)
+            {
+                return data;
+            }
             return NULL;
         }
     }

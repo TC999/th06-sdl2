@@ -27,6 +27,7 @@
 #include "EclManager.hpp"
 #include "AnmManager.hpp"
 #include "MainMenu.hpp"
+#include "OnlineMenu.hpp"
 #include "BulletManager.hpp"
 #include "Rng.hpp"
 #include "Stage.hpp"
@@ -257,6 +258,31 @@ namespace THPrac {
 
 namespace TH06 {
     using namespace Bridge;
+
+    const char* TrLocal(const char* zh, const char* en, const char* ja)
+    {
+        switch (Gui::LocaleGet()) {
+        case Gui::LOCALE_ZH_CN:
+            return zh;
+        case Gui::LOCALE_JA_JP:
+            return ja;
+        case Gui::LOCALE_EN_US:
+        default:
+            return en;
+        }
+    }
+
+    const char* NoFreezeOnFocusLossLabel()
+    {
+        return TrLocal("窗口失焦时不中止游戏", "Do not freeze on focus loss", "フォーカスを失っても停止しない");
+    }
+
+    const char* NoFreezeOnFocusLossDesc()
+    {
+        return TrLocal("启用后，窗口失去焦点或进入后台时仍继续更新和渲染。联机双开同机测试时需要打开。",
+            "Keep updating and rendering when the window loses focus or enters the background. Enable this for same-machine netplay testing.",
+            "有効にすると、ウィンドウがフォーカスを失っても更新と描画を続行します。同一PCでのネット対戦テストでは有効化が必要です。");
+    }
 
     // Legacy address constants removed - use Bridge:: accessors instead
     // e.g., Bridge::GM_Lives() instead of *(int8_t*)(0x69d4ba)
@@ -1901,6 +1927,9 @@ namespace TH06 {
                 g_bossMoveDownRange = std::clamp(g_bossMoveDownRange, 0.0f, 1.0f);
 
             ImGui::Checkbox(S(TH_ENABLE_LOCK_TIMER), &g_adv_igi_options.enable_lock_timer_autoly);
+            ImGui::Checkbox(NoFreezeOnFocusLossLabel(), &g_adv_igi_options.th06_run_in_background);
+            ImGui::SameLine();
+            HelpMarker(NoFreezeOnFocusLossDesc());
 
             ImGui::Checkbox(S(THPRAC_SHOW_BULLET_HITBOX), &g_show_bullet_hitbox);
 
@@ -3887,7 +3916,8 @@ namespace TH06 {
     })
     PATCH_DY(th06_disable_menu, 0x439ab2, "9090909090")
     EHOOK_DY(th06_update, 0x41caac, 1, {
-        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen() && !THConfigWnd::singleton().IsOpen() && !THFirstRunWnd::singleton().IsOpen());
+        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen() && !THConfigWnd::singleton().IsOpen() &&
+                                         !THFirstRunWnd::singleton().IsOpen() && !th06::OnlineMenu::IsOpen());
         
         // Gui components update
         Gui::KeyboardInputUpdate(VK_ESCAPE);
@@ -3921,7 +3951,9 @@ namespace TH06 {
             }
         }
         
-        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() || THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen());
+        th06::OnlineMenu::UpdateImGui();
+        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() ||
+                   THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen() || th06::OnlineMenu::IsOpen());
     })
     EHOOK_DY(th06_render, 0x41cb6d, 1, {
         GameGuiRender(IMPL_WIN32_DX8);
@@ -4242,7 +4274,8 @@ namespace TH06 {
         if (!ImGui::GetCurrentContext())
             return;
 
-        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen() && !THConfigWnd::singleton().IsOpen() && !THFirstRunWnd::singleton().IsOpen());
+        GameGuiBegin(IMPL_WIN32_DX8, !THAdvOptWnd::singleton().IsOpen() && !THConfigWnd::singleton().IsOpen() &&
+                                         !THFirstRunWnd::singleton().IsOpen() && !th06::OnlineMenu::IsOpen());
 
         // Gui components update
         Gui::KeyboardInputUpdate(VK_ESCAPE);
@@ -4277,7 +4310,9 @@ namespace TH06 {
             }
         }
 
-        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() || THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen());
+        th06::OnlineMenu::UpdateImGui();
+        GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() ||
+                   THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen() || th06::OnlineMenu::IsOpen());
     }
 
     void THPracRender()

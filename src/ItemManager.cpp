@@ -5,6 +5,7 @@
 #include "Gui.hpp"
 #include "Player.hpp"
 #include "Rng.hpp"
+#include "Session.hpp"
 #include "SoundPlayer.hpp"
 #include "utils.hpp"
 
@@ -13,6 +14,21 @@
 namespace th06
 {
 DIFFABLE_STATIC(ItemManager, g_ItemManager);
+
+namespace
+{
+bool HasSecondPlayer()
+{
+    return Session::IsDualPlayerSession();
+}
+
+f32 SquaredDistanceTo(const D3DXVECTOR3 &lhs, const D3DXVECTOR3 &rhs)
+{
+    const f32 dx = lhs.x - rhs.x;
+    const f32 dy = lhs.y - rhs.y;
+    return dx * dx + dy * dy;
+}
+} // namespace
 
 ItemManager::ItemManager() {
 
@@ -61,6 +77,13 @@ void ItemManager::SpawnItem(D3DXVECTOR3 *position, ItemType itemType, int state)
             item->targetPosition.z = 0.0;
             item->startPosition = item->currentPosition;
         }
+        if (state == 3 || state == 4)
+        {
+            item->targetPosition.x = position->x;
+            item->targetPosition.y = position->y - 60.0f;
+            item->targetPosition.z = 0.0;
+            item->startPosition = item->currentPosition;
+        }
         g_AnmManager->SetAndExecuteScriptIdx(&item->sprite, ANM_SCRIPT_BULLET3_ITEMS_START + itemType);
         item->sprite.color = COLOR_WHITE;
         item->unk_142 = 1;
@@ -95,6 +118,7 @@ void ItemManager::OnUpdate()
     f32 fVar5;
     f32 playerAngle;
     i32 itemAcquired;
+    const bool hasSecondPlayer = HasSecondPlayer();
 
     curItem = &this->items[0];
     static D3DXVECTOR3 g_ItemSize(16.0f, 16.0f, 16.0f);
@@ -118,13 +142,49 @@ void ItemManager::OnUpdate()
             else if ((i32)(curItem->timer.current == 60))
             {
                 curItem->startPosition = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
+                curItem->state = 0;
+            }
+        }
+        else if (curItem->state == 3 || curItem->state == 4)
+        {
+            if ((i32)(20 > curItem->timer.current))
+            {
+                const f32 t = curItem->timer.AsFramesFloat() / 20.0f;
+                const f32 easedY = 1.0f - powf(1.0f - t, 1.5f);
+                curItem->currentPosition = easedY * curItem->targetPosition + curItem->startPosition * (1.0f - easedY);
+                goto yolo;
+            }
+            else if ((i32)(curItem->timer.current == 20))
+            {
+                curItem->startPosition = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
+                curItem->state = 0;
             }
         }
         else
         {
-            if (curItem->state == 1 || (128 <= g_GameManager.currentPower && g_Player.positionCenter.y < 128.0f))
+            if (curItem->state == 1)
             {
                 playerAngle = g_Player.AngleToPlayer(&curItem->currentPosition);
+                if (hasSecondPlayer)
+                {
+                    const f32 dist1 = SquaredDistanceTo(curItem->currentPosition, g_Player.positionCenter);
+                    const f32 dist2 = SquaredDistanceTo(curItem->currentPosition, g_Player2.positionCenter);
+                    if (dist2 <= dist1)
+                    {
+                        playerAngle = g_Player2.AngleToPlayer(&curItem->currentPosition);
+                    }
+                }
+                sincosmul(&curItem->startPosition, playerAngle, 8.0f);
+            }
+            else if (hasSecondPlayer ? (g_Player.positionCenter.y < 128.0f) : (128 <= g_GameManager.currentPower && g_Player.positionCenter.y < 128.0f))
+            {
+                playerAngle = g_Player.AngleToPlayer(&curItem->currentPosition);
+                sincosmul(&curItem->startPosition, playerAngle, 8.0f);
+                curItem->state = 1;
+            }
+            else if (hasSecondPlayer && g_Player2.positionCenter.y < 128.0f)
+            {
+                playerAngle = g_Player2.AngleToPlayer(&curItem->currentPosition);
                 sincosmul(&curItem->startPosition, playerAngle, 8.0f);
                 curItem->state = 1;
             }
@@ -154,52 +214,122 @@ void ItemManager::OnUpdate()
             curItem->startPosition.y = 3.0f;
         }
     yolo:
-        if (g_Player.CalcItemBoxCollision(&curItem->currentPosition, &g_ItemSize))
+        bool hit_player1 = g_Player.CalcItemBoxCollision(&curItem->currentPosition, &g_ItemSize);
+        bool hit_player2 = hasSecondPlayer && g_Player2.CalcItemBoxCollision(&curItem->currentPosition, &g_ItemSize);
+        if (curItem->timer.current < 20 && (curItem->state == 3 || curItem->state == 4))
         {
-            switch (curItem->itemType)
+            hit_player1 = false;
+            hit_player2 = false;
+        }
+        if (hit_player1 || hit_player2)
+        {
+            if (hit_player1 && hit_player2)
             {
-            case ITEM_POWER_SMALL:
-                if (g_GameManager.currentPower >= 128)
+                const f32 dist1 = SquaredDistanceTo(curItem->currentPosition, g_Player.positionCenter);
+                const f32 dist2 = SquaredDistanceTo(curItem->currentPosition, g_Player2.positionCenter);
+                if (dist2 <= dist1)
                 {
-                    g_GameManager.powerItemCountForScore++;
-                    if ((u32)g_GameManager.powerItemCountForScore >= 31)
-                    {
-                        g_GameManager.powerItemCountForScore = 30;
-                    }
-                    itemScore = g_PowerItemScore[g_GameManager.powerItemCountForScore];
-                    g_GameManager.AddScore(itemScore);
-                    g_AsciiManager.CreatePopup1(&curItem->currentPosition, itemScore, itemScore >= 12800 ? -256 : -1);
+                    hit_player1 = false;
                 }
                 else
                 {
-                    idx2 = 0;
-                    while (g_GameManager.currentPower >= g_PowerUpThresholds[idx2])
-                    {
-                        idx2++;
-                    }
-                    iVar8 = idx2;
-                    g_GameManager.powerItemCountForScore = 0;
-                    g_GameManager.currentPower++;
+                    hit_player2 = false;
+                }
+            }
+
+            switch (curItem->itemType)
+            {
+            case ITEM_POWER_SMALL:
+                if (hit_player1)
+                {
                     if (g_GameManager.currentPower >= 128)
                     {
-                        g_GameManager.currentPower = 128;
-                        g_BulletManager.TurnAllBulletsIntoPoints();
-                        g_Gui.ShowFullPowerMode(0);
-                    }
-                    g_GameManager.AddScore(10);
-                    g_Gui.flags.flag2 = 2;
-                    while (g_GameManager.currentPower >= g_PowerUpThresholds[idx2])
-                    {
-                        idx2++;
-                    }
-                    if (idx2 != iVar8)
-                    {
-                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
-                        g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        g_GameManager.powerItemCountForScore++;
+                        if ((u32)g_GameManager.powerItemCountForScore >= 31)
+                        {
+                            g_GameManager.powerItemCountForScore = 30;
+                        }
+                        itemScore = g_PowerItemScore[g_GameManager.powerItemCountForScore];
+                        g_GameManager.AddScore(itemScore);
+                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, itemScore, itemScore >= 12800 ? -256 : -1);
                     }
                     else
                     {
-                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, 10, COLOR_WHITE);
+                        idx2 = 0;
+                        while (g_GameManager.currentPower >= g_PowerUpThresholds[idx2])
+                        {
+                            idx2++;
+                        }
+                        iVar8 = idx2;
+                        g_GameManager.powerItemCountForScore = 0;
+                        g_GameManager.currentPower++;
+                        if (g_GameManager.currentPower >= 128)
+                        {
+                            g_GameManager.currentPower = 128;
+                            g_BulletManager.TurnAllBulletsIntoPoints();
+                            g_Gui.ShowFullPowerMode(0);
+                        }
+                        g_GameManager.AddScore(10);
+                        g_Gui.flags.flag2 = 2;
+                        while (g_GameManager.currentPower >= g_PowerUpThresholds[idx2])
+                        {
+                            idx2++;
+                        }
+                        if (idx2 != iVar8)
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        }
+                        else
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, 10, COLOR_WHITE);
+                        }
+                    }
+                }
+                else
+                {
+                    if (g_GameManager.currentPower2 >= 128)
+                    {
+                        g_GameManager.powerItemCountForScore++;
+                        if ((u32)g_GameManager.powerItemCountForScore >= 31)
+                        {
+                            g_GameManager.powerItemCountForScore = 30;
+                        }
+                        itemScore = g_PowerItemScore[g_GameManager.powerItemCountForScore];
+                        g_GameManager.AddScore(itemScore);
+                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, itemScore, itemScore >= 12800 ? -256 : -1);
+                    }
+                    else
+                    {
+                        idx2 = 0;
+                        while (g_GameManager.currentPower2 >= g_PowerUpThresholds[idx2])
+                        {
+                            idx2++;
+                        }
+                        iVar8 = idx2;
+                        g_GameManager.powerItemCountForScore = 0;
+                        g_GameManager.currentPower2++;
+                        if (g_GameManager.currentPower2 >= 128)
+                        {
+                            g_GameManager.currentPower2 = 128;
+                            g_BulletManager.TurnAllBulletsIntoPoints();
+                            g_Gui.ShowFullPowerMode2(0);
+                        }
+                        g_GameManager.AddScore(10);
+                        g_Gui.flags.flag2 = 2;
+                        while (g_GameManager.currentPower2 >= g_PowerUpThresholds[idx2])
+                        {
+                            idx2++;
+                        }
+                        if (idx2 != iVar8)
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        }
+                        else
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, 10, COLOR_WHITE);
+                        }
                     }
                 }
                 g_GameManager.IncreaseSubrank(1);
@@ -239,78 +369,153 @@ void ItemManager::OnUpdate()
                 }
                 break;
             case ITEM_POWER_BIG:
-                if (g_GameManager.currentPower >= 128)
+                if (hit_player1)
                 {
-                    g_GameManager.powerItemCountForScore += 8;
-                    if (31 <= (u32)g_GameManager.powerItemCountForScore)
+                    if (g_GameManager.currentPower >= 128)
                     {
-                        g_GameManager.powerItemCountForScore = 30;
-                    }
-                    itemScore = g_PowerItemScore[g_GameManager.powerItemCountForScore];
-                    g_GameManager.score += itemScore;
-                    g_AsciiManager.CreatePopup1(&curItem->currentPosition, itemScore, itemScore >= 12800 ? -256 : -1);
-                }
-                else
-                {
-                    idx3 = 0;
-                    while (g_GameManager.currentPower >= g_PowerUpThresholds[idx3])
-                    {
-                        idx3++;
-                    }
-                    iVar9 = idx3;
-                    g_GameManager.currentPower += 8;
-                    if (128 <= g_GameManager.currentPower)
-                    {
-                        g_GameManager.currentPower = 128;
-                        g_BulletManager.TurnAllBulletsIntoPoints();
-                        g_Gui.ShowFullPowerMode(0);
-                    }
-                    g_Gui.flags.flag2 = 2;
-                    g_GameManager.AddScore(10);
-                    while (g_GameManager.currentPower >= g_PowerUpThresholds[idx3])
-                    {
-                        idx3++;
-                    }
-                    if (idx3 != iVar9)
-                    {
-                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
-                        g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        g_GameManager.powerItemCountForScore += 8;
+                        if (31 <= (u32)g_GameManager.powerItemCountForScore)
+                        {
+                            g_GameManager.powerItemCountForScore = 30;
+                        }
+                        itemScore = g_PowerItemScore[g_GameManager.powerItemCountForScore];
+                        g_GameManager.score += itemScore;
+                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, itemScore, itemScore >= 12800 ? -256 : -1);
                     }
                     else
                     {
-                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, 10, COLOR_WHITE);
+                        idx3 = 0;
+                        while (g_GameManager.currentPower >= g_PowerUpThresholds[idx3])
+                        {
+                            idx3++;
+                        }
+                        iVar9 = idx3;
+                        g_GameManager.currentPower += 8;
+                        if (128 <= g_GameManager.currentPower)
+                        {
+                            g_GameManager.currentPower = 128;
+                            g_BulletManager.TurnAllBulletsIntoPoints();
+                            g_Gui.ShowFullPowerMode(0);
+                        }
+                        g_Gui.flags.flag2 = 2;
+                        g_GameManager.AddScore(10);
+                        while (g_GameManager.currentPower >= g_PowerUpThresholds[idx3])
+                        {
+                            idx3++;
+                        }
+                        if (idx3 != iVar9)
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        }
+                        else
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, 10, COLOR_WHITE);
+                        }
+                    }
+                }
+                else
+                {
+                    if (g_GameManager.currentPower2 >= 128)
+                    {
+                        g_GameManager.powerItemCountForScore += 8;
+                        if (31 <= (u32)g_GameManager.powerItemCountForScore)
+                        {
+                            g_GameManager.powerItemCountForScore = 30;
+                        }
+                        itemScore = g_PowerItemScore[g_GameManager.powerItemCountForScore];
+                        g_GameManager.score += itemScore;
+                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, itemScore, itemScore >= 12800 ? -256 : -1);
+                    }
+                    else
+                    {
+                        idx3 = 0;
+                        while (g_GameManager.currentPower2 >= g_PowerUpThresholds[idx3])
+                        {
+                            idx3++;
+                        }
+                        iVar9 = idx3;
+                        g_GameManager.currentPower2 += 8;
+                        if (128 <= g_GameManager.currentPower2)
+                        {
+                            g_GameManager.currentPower2 = 128;
+                            g_BulletManager.TurnAllBulletsIntoPoints();
+                            g_Gui.ShowFullPowerMode2(0);
+                        }
+                        g_Gui.flags.flag2 = 2;
+                        g_GameManager.AddScore(10);
+                        while (g_GameManager.currentPower2 >= g_PowerUpThresholds[idx3])
+                        {
+                            idx3++;
+                        }
+                        if (idx3 != iVar9)
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        }
+                        else
+                        {
+                            g_AsciiManager.CreatePopup1(&curItem->currentPosition, 10, COLOR_WHITE);
+                        }
                     }
                 }
                 break;
             case ITEM_BOMB:
-                if (g_GameManager.bombsRemaining < 8)
+                if (hit_player1 && g_GameManager.bombsRemaining < 8)
                 {
                     g_GameManager.bombsRemaining++;
+                    g_Gui.flags.flag1 = 2;
+                }
+                else if (hit_player2 && g_GameManager.bombsRemaining2 < 8)
+                {
+                    g_GameManager.bombsRemaining2++;
                     g_Gui.flags.flag1 = 2;
                 }
                 g_GameManager.IncreaseSubrank(5);
                 break;
             case ITEM_LIFE:
-                if (g_GameManager.livesRemaining < 8)
+                if (hit_player1 && g_GameManager.livesRemaining < 8)
                 {
                     g_GameManager.livesRemaining++;
+                    g_Gui.flags.flag0 = 2;
+                }
+                else if (hit_player2 && g_GameManager.livesRemaining2 < 8)
+                {
+                    g_GameManager.livesRemaining2++;
                     g_Gui.flags.flag0 = 2;
                 }
                 g_GameManager.IncreaseSubrank(200);
                 g_SoundPlayer.PlaySoundByIdx(SOUND_1UP, 0);
                 break;
             case ITEM_FULL_POWER:
-                if (g_GameManager.currentPower < 128)
+                if (hit_player1)
                 {
-                    g_BulletManager.TurnAllBulletsIntoPoints();
-                    g_Gui.ShowFullPowerMode(0);
-                    g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
-                    g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
+                    if (g_GameManager.currentPower < 128)
+                    {
+                        g_BulletManager.TurnAllBulletsIntoPoints();
+                        g_Gui.ShowFullPowerMode(0);
+                        g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
+                    }
+                    g_GameManager.currentPower = 128;
+                    g_GameManager.AddScore(1000);
+                    g_AsciiManager.CreatePopup1(&curItem->currentPosition, 1000, COLOR_WHITE);
+                    g_Gui.flags.flag2 = 2;
                 }
-                g_GameManager.currentPower = 128;
-                g_GameManager.AddScore(1000);
-                g_AsciiManager.CreatePopup1(&curItem->currentPosition, 1000, COLOR_WHITE);
-                g_Gui.flags.flag2 = 2;
+                else
+                {
+                    if (g_GameManager.currentPower2 < 128)
+                    {
+                        g_BulletManager.TurnAllBulletsIntoPoints();
+                        g_Gui.ShowFullPowerMode2(0);
+                        g_SoundPlayer.PlaySoundByIdx(SOUND_POWERUP, 0);
+                        g_AsciiManager.CreatePopup1(&curItem->currentPosition, -1, 0xff80c0ff);
+                    }
+                    g_GameManager.currentPower2 = 128;
+                    g_GameManager.AddScore(1000);
+                    g_AsciiManager.CreatePopup1(&curItem->currentPosition, 1000, COLOR_WHITE);
+                    g_Gui.flags.flag2 = 2;
+                }
                 break;
             case ITEM_POINT_BULLET:
                 itemScore = (g_GameManager.grazeInStage / 3) * 10 + 500;

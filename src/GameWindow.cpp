@@ -3,12 +3,14 @@
 #include "GameErrorContext.hpp"
 #include "RendererGLES.hpp"
 #include "ScreenEffect.hpp"
+#include "Session.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "diffbuild.hpp"
 #include "i18n.hpp"
 #include "sdl2_renderer.hpp"
+#include "thprac_games.h"
 #include "thprac_gui_integration.h"
 #include <cmath>
 #include <cstdio>
@@ -48,6 +50,11 @@ static int GetPreferredSwapInterval(bool windowed)
 static bool g_PendingWindowModeChange = false;
 static bool g_PendingWindowModeWindowed = false;
 static bool g_PendingRestart = false;
+
+static bool ShouldFreezeWhenInactive()
+{
+    return !THPrac::g_adv_igi_options.th06_run_in_background;
+}
 
 #ifdef __ANDROID__
 static void LogAndroidInputEvent(const SDL_Event &event)
@@ -184,7 +191,7 @@ RenderResult GameWindow::Render()
     u32 curtime;
     f64 local_34;
 
-    if (this->lastActiveAppValue == 0)
+    if (this->lastActiveAppValue == 0 && ShouldFreezeWhenInactive())
     {
         return RENDER_RESULT_KEEP_RUNNING;
     }
@@ -456,31 +463,33 @@ void GameWindow_ProcessEvents()
             {
                 g_GameWindow.lastActiveAppValue = 1;
                 g_GameWindow.isAppActive = 0;
-                Controller::ResetInputState();
+                Session::ResetInputState();
             }
             else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
             {
-                g_GameWindow.lastActiveAppValue = 0;
-                g_GameWindow.isAppActive = 1;
-                Controller::ResetInputState();
+                g_GameWindow.lastActiveAppValue = ShouldFreezeWhenInactive() ? 0 : 1;
+                g_GameWindow.isAppActive = ShouldFreezeWhenInactive() ? 1 : 0;
+                Session::ResetInputState();
             }
             break;
         case SDL_APP_WILLENTERBACKGROUND:
         case SDL_APP_DIDENTERBACKGROUND:
-            g_GameWindow.lastActiveAppValue = 0;
-            g_GameWindow.isAppActive = 1;
-            Controller::ResetInputState();
+            g_GameWindow.lastActiveAppValue = ShouldFreezeWhenInactive() ? 0 : 1;
+            g_GameWindow.isAppActive = ShouldFreezeWhenInactive() ? 1 : 0;
+            Session::ResetInputState();
             break;
         case SDL_APP_WILLENTERFOREGROUND:
         case SDL_APP_DIDENTERFOREGROUND:
-            Controller::ResetInputState();
+            g_GameWindow.lastActiveAppValue = 1;
+            g_GameWindow.isAppActive = 0;
+            Session::ResetInputState();
             break;
         case SDL_JOYDEVICEADDED:
         case SDL_JOYDEVICEREMOVED:
         case SDL_CONTROLLERDEVICEADDED:
         case SDL_CONTROLLERDEVICEREMOVED:
             Controller::RefreshSDLController();
-            Controller::ResetInputState();
+            Session::ResetInputState();
             break;
         default:
             break;

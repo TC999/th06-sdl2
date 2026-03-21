@@ -84,6 +84,11 @@ struct GameManager
         return g_GameManager.shotType + g_GameManager.character * 2;
     }
 
+    static i32 CharacterShotType2()
+    {
+        return g_GameManager.shotType2 + g_GameManager.character2 * 2;
+    }
+
     u32 guiScore;
     u32 score;
     u32 nextScoreIncrement;
@@ -110,7 +115,9 @@ struct GameManager
     i8 bombsRemaining;
     i8 extraLives;
     u8 character;
+    u8 character2;
     u8 shotType;
+    u8 shotType2;
     u8 isInGameMenu;
     u8 isInRetryMenu;
     u8 isInMenu;
@@ -138,6 +145,9 @@ struct GameManager
     i32 maxRank;
     i32 minRank;
     i32 subRank;
+    i8 livesRemaining2;
+    i8 bombsRemaining2;
+    u16 currentPower2;
 };
 ZUN_ASSERT_SIZE(GameManager, 0x1a80);
 }; // namespace th06

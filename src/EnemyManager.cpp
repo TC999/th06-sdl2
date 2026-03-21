@@ -8,12 +8,21 @@
 #include "Gui.hpp"
 #include "Player.hpp"
 #include "Rng.hpp"
+#include "Session.hpp"
 #include "diffbuild.hpp"
 #include "utils.hpp"
 #include "thprac_th06.h"
 
 namespace th06
 {
+
+namespace
+{
+bool HasSecondPlayer()
+{
+    return Session::IsDualPlayerSession();
+}
+} // namespace
 
 #define ITEM_SPAWNS 3
 #define ITEM_TABLES 8
@@ -107,7 +116,7 @@ Enemy *EnemyManager::SpawnEnemy(i32 eclSubId, D3DXVECTOR3 *pos, i16 life, i16 it
         if (0 <= life)
             newEnemy->life = life;
 
-        memcpy(&newEnemy->position, pos, sizeof(newEnemy->position));
+        newEnemy->position = *pos;
         g_EclManager.CallEclSub(&newEnemy->currentContext, eclSubId);
         g_EclManager.RunEcl(newEnemy);
         newEnemy->color = newEnemy->primaryVm.color;
@@ -166,6 +175,14 @@ void EnemyManager::RunEclTimeline()
         // number of lives lost?
         subrankIncreaseFrame = 10 * 4 * 60;
         subrankIncreaseFrame -= g_GameManager.livesRemaining * 4 * 60;
+        if (HasSecondPlayer())
+        {
+            subrankIncreaseFrame -= g_GameManager.livesRemaining2 * 4 * 60;
+        }
+        if (subrankIncreaseFrame <= 0)
+        {
+            subrankIncreaseFrame = 1;
+        }
         if (this->timelineTime.HasTicked() && this->timelineTime.AsFrames() % subrankIncreaseFrame == 0)
         {
             g_GameManager.IncreaseSubrank(100);
@@ -180,7 +197,7 @@ void EnemyManager::RunEclTimeline()
             case 0:
                 if (!g_Gui.BossPresent())
                 {
-                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    D3DXVECTOR3 spawnPos = this->timelineInstr->args.ReadVar1AsVec();
                     i16 spawnLife = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar1);
                     i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
                     i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
@@ -191,7 +208,7 @@ void EnemyManager::RunEclTimeline()
             case 1:
                 if (!g_Gui.BossPresent())
                 {
-                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    D3DXVECTOR3 spawnPos = this->timelineInstr->args.ReadVar1AsVec();
 
                     this->SpawnEnemy(this->timelineInstr->arg0, &spawnPos, -1, ITEM_NO_ITEM, -1);
                 }
@@ -199,7 +216,7 @@ void EnemyManager::RunEclTimeline()
             case 2:
                 if (!g_Gui.BossPresent())
                 {
-                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    D3DXVECTOR3 spawnPos = this->timelineInstr->args.ReadVar1AsVec();
                     i16 spawnLife = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar1);
                     i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
                     i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
@@ -212,7 +229,7 @@ void EnemyManager::RunEclTimeline()
             case 3:
                 if (!g_Gui.BossPresent())
                 {
-                    D3DXVECTOR3 spawnPos = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    D3DXVECTOR3 spawnPos = this->timelineInstr->args.ReadVar1AsVec();
 
                     spawnedEnemy = this->SpawnEnemy(this->timelineInstr->arg0, &spawnPos, -1, ITEM_NO_ITEM, -1);
                     spawnedEnemy->flags.unk4 = 1;
@@ -225,7 +242,7 @@ void EnemyManager::RunEclTimeline()
                     i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
                     i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
 
-                    pos1 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    pos1 = this->timelineInstr->args.ReadVar1AsVec();
                     if (pos1.x <= -990.0f)
                     {
                         pos1.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
@@ -244,7 +261,7 @@ void EnemyManager::RunEclTimeline()
             case 5:
                 if (!g_Gui.BossPresent())
                 {
-                    pos2 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    pos2 = this->timelineInstr->args.ReadVar1AsVec();
                     if (pos2.x <= -990.0f)
                     {
                         pos2.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
@@ -267,7 +284,7 @@ void EnemyManager::RunEclTimeline()
                     i16 spawnItemDrop = utils::ReadUnaligned<u16>(&this->timelineInstr->args.ushortVar2);
                     i32 spawnScore = utils::ReadUnaligned<u32>(&this->timelineInstr->args.uintVar4);
 
-                    pos3 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    pos3 = this->timelineInstr->args.ReadVar1AsVec();
                     if (pos3.x <= -990.0f)
                     {
                         pos3.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
@@ -288,7 +305,7 @@ void EnemyManager::RunEclTimeline()
             case 7:
                 if (!g_Gui.BossPresent())
                 {
-                    pos4 = utils::ReadUnaligned<D3DXVECTOR3>(&this->timelineInstr->args.uintVar1);
+                    pos4 = this->timelineInstr->args.ReadVar1AsVec();
                     if (pos4.x <= -990.0f)
                     {
                         pos4.x = g_Rng.GetRandomF32InRange(g_GameManager.playerMovementAreaSize.x);
@@ -333,6 +350,10 @@ void EnemyManager::RunEclTimeline()
             }
             case 0xb:
                 g_GameManager.currentPower = this->timelineInstr->arg0;
+                if (HasSecondPlayer())
+                {
+                    g_GameManager.currentPower2 = this->timelineInstr->arg0;
+                }
                 break;
             case 0xc:
                 if (this->bosses[this->timelineInstr->arg0] != NULL &&
@@ -538,7 +559,7 @@ ZunResult EnemyManager::RegisterChain(char *stgEnm1, char *stgEnm2)
     return ZUN_SUCCESS;
 }
 
-#pragma var_order(local_8, damage, enemyIdx, enemyHitbox, enemyVmIdx, enemyLifeBeforeDmg, curEnemy)
+#pragma var_order(local_8, damage, damage2, enemyIdx, enemyHitbox, enemyVmIdx, enemyLifeBeforeDmg, curEnemy)
 ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
 {
     Enemy *curEnemy;
@@ -547,7 +568,9 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
     D3DXVECTOR3 enemyHitbox;
     i32 enemyIdx;
     i32 damage;
+    i32 damage2;
     i32 local_8;
+    const bool hasSecondPlayer = HasSecondPlayer();
 
     local_8 = 0;
     mgr->RunEclTimeline();
@@ -612,11 +635,31 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
                 {
                     curEnemy->life -= 10;
                 }
+                if (hasSecondPlayer &&
+                    g_Player2.CalcKillBoxCollision(&curEnemy->position, &enemyHitbox) == 1 && curEnemy->flags.unk6 &&
+                    !curEnemy->flags.isBoss)
+                {
+                    curEnemy->life -= 10;
+                }
             }
             if (curEnemy->flags.unk6 != 0)
             {
                 damage = g_Player.CalcDamageToEnemy(&curEnemy->position, &curEnemy->hitboxDimensions, &local_8);
-                if (70 <= damage)
+                if (damage > 0)
+                {
+                    curEnemy->provokedPlayer = 1;
+                }
+                damage2 = 0;
+                if (hasSecondPlayer)
+                {
+                    damage2 = g_Player2.CalcDamageToEnemy(&curEnemy->position, &curEnemy->hitboxDimensions, &local_8);
+                    if (damage2 > 0)
+                    {
+                        curEnemy->provokedPlayer = 2;
+                    }
+                    damage += damage2;
+                }
+                if (!hasSecondPlayer && 70 <= damage)
                 {
                     damage = 70;
                 }
@@ -652,11 +695,19 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
                 }
                 if (curEnemy->flags.unk10 != 0)
                 {
+                    if (hasSecondPlayer && curEnemy->flags.isBoss)
+                    {
+                        damage = (i32)(damage * 0.75f);
+                    }
                     curEnemy->life -= damage;
                 }
                 if (g_Player.positionOfLastEnemyHit.y < curEnemy->position.y)
                 {
                     g_Player.positionOfLastEnemyHit = curEnemy->position;
+                }
+                if (hasSecondPlayer && g_Player2.positionOfLastEnemyHit.y < curEnemy->position.y)
+                {
+                    g_Player2.positionOfLastEnemyHit = curEnemy->position;
                 }
             }
             if (0 >= curEnemy->life && curEnemy->flags.unk6 != 0)

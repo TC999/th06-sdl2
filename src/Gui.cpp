@@ -9,6 +9,7 @@
 #include "FileSystem.hpp"
 #include "GameManager.hpp"
 #include "Player.hpp"
+#include "Session.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "ZunColor.hpp"
@@ -53,10 +54,19 @@ void Gui::ShowBonusScore(u32 bonusScore)
 
 void Gui::ShowFullPowerMode(i32 fmtArg)
 {
-    this->impl->fullPowerMode.pos = D3DXVECTOR3(416.0f, 232.0f, 0.0f);
+    this->impl->fullPowerMode.pos = D3DXVECTOR3(416.0f, 200.0f, 0.0f);
     this->impl->fullPowerMode.isShown = 1;
     this->impl->fullPowerMode.timer.InitializeForPopup();
     this->impl->fullPowerMode.fmtArg = fmtArg;
+    return;
+}
+
+void Gui::ShowFullPowerMode2(i32 fmtArg)
+{
+    this->impl->fullPowerMode2.pos = D3DXVECTOR3(416.0f, 232.0f, 0.0f);
+    this->impl->fullPowerMode2.isShown = 1;
+    this->impl->fullPowerMode2.timer.InitializeForPopup();
+    this->impl->fullPowerMode2.fmtArg = fmtArg;
     return;
 }
 
@@ -84,6 +94,7 @@ ChainCallbackResult Gui::OnDraw(Gui *gui)
 {
     char spellCardBonusStr[32];
     D3DXVECTOR3 stringPos;
+    const bool isDualSession = Session::IsDualPlayerSession();
 
     g_Renderer->SetDepthFunc(1);
     if (gui->impl->finishedStage)
@@ -107,7 +118,10 @@ ChainCallbackResult Gui::OnDraw(Gui *gui)
 
         stringPos.y += 16.0f;
         g_AsciiManager.color = COLOR_LAVENDER;
-        g_AsciiManager.AddFormatText(&stringPos, "Power *  100 = %5d\n", g_GameManager.currentPower * 100);
+        g_AsciiManager.AddFormatText(&stringPos, "Power *  100 = %5d\n",
+                                     (isDualSession ? (g_GameManager.currentPower + g_GameManager.currentPower2)
+                                                    : g_GameManager.currentPower) *
+                                         100);
 
         stringPos.y += 16.0f;
         g_AsciiManager.color = COLOR_LIGHTBLUE;
@@ -121,9 +135,15 @@ ChainCallbackResult Gui::OnDraw(Gui *gui)
         {
             stringPos.y += 16.0f;
             g_AsciiManager.color = COLOR_LIGHTYELLOW;
-            g_AsciiManager.AddFormatText(&stringPos, "Player    = %8d\n", g_GameManager.livesRemaining * 3000000);
+            g_AsciiManager.AddFormatText(
+                &stringPos, "Player    = %8d\n",
+                (isDualSession ? (g_GameManager.livesRemaining + g_GameManager.livesRemaining2) : g_GameManager.livesRemaining) *
+                    3000000);
             stringPos.y += 16.0f;
-            g_AsciiManager.AddFormatText(&stringPos, "Bomb      = %8d\n", g_GameManager.bombsRemaining * 1000000);
+            g_AsciiManager.AddFormatText(
+                &stringPos, "Bomb      = %8d\n",
+                (isDualSession ? (g_GameManager.bombsRemaining + g_GameManager.bombsRemaining2) : g_GameManager.bombsRemaining) *
+                    1000000);
         }
 
         stringPos.y += 32.0f;
@@ -188,6 +208,13 @@ ChainCallbackResult Gui::OnDraw(Gui *gui)
         g_AsciiManager.color = COLOR_PALEBLUE;
         g_AsciiManager.AddFormatText(&gui->impl->fullPowerMode.pos, "Full Power Mode!!",
                                      gui->impl->fullPowerMode.fmtArg);
+        g_AsciiManager.color = COLOR_WHITE;
+    }
+    if (gui->impl->fullPowerMode2.isShown)
+    {
+        g_AsciiManager.color = COLOR_LAVENDER;
+        g_AsciiManager.AddFormatText(&gui->impl->fullPowerMode2.pos, "Full Power Mode!!",
+                                     gui->impl->fullPowerMode2.fmtArg);
         g_AsciiManager.color = COLOR_WHITE;
     }
     if (gui->impl->spellCardBonus.isShown)
@@ -446,6 +473,7 @@ ZunResult Gui::ActualAddedCallback()
     this->impl->finishedStage = 0;
     this->impl->bonusScore.isShown = 0;
     this->impl->fullPowerMode.isShown = 0;
+    this->impl->fullPowerMode2.isShown = 0;
     this->impl->spellCardBonus.isShown = 0;
     this->flags.flag0 = 2;
     this->flags.flag1 = 2;
@@ -945,6 +973,23 @@ void Gui::UpdateStageElements()
         }
         this->TickTimer(&this->impl->fullPowerMode.timer);
     }
+    if (this->impl->fullPowerMode2.isShown)
+    {
+        if ((i32)(this->impl->fullPowerMode2.timer.current < 30))
+        {
+            this->impl->fullPowerMode2.pos.x =
+                (this->impl->fullPowerMode2.timer.AsFramesFloat() * -312.0f / 30.0f) + (f32)GAME_REGION_RIGHT;
+        }
+        else
+        {
+            this->impl->fullPowerMode2.pos.x = 104.0f;
+        }
+        if ((i32)(180 <= this->impl->fullPowerMode2.timer.current))
+        {
+            this->impl->fullPowerMode2.isShown = 0;
+        }
+        this->TickTimer(&this->impl->fullPowerMode2.timer);
+    }
     if (this->impl->spellCardBonus.isShown)
     {
         if ((i32)(280 <= this->impl->spellCardBonus.timer.current))
@@ -1152,9 +1197,20 @@ void Gui::DrawGameScene()
         vm->pos = D3DXVECTOR3(0.0, 464.0f, 0.49f);
         g_AnmManager->DrawNoRotation(vm);
     }
+    const bool isDualSession = Session::IsDualPlayerSession();
+    const float dualHudYOffset = isDualSession ? 20.0f : 0.0f;
+
     if (this->flags.flag0 || ((g_Supervisor.cfg.opts >> GCOS_DISPLAY_MINIMUM_GRAPHICS & 1) != 0))
     {
         vm = &this->impl->vms[16];
+        if (isDualSession)
+        {
+            for (idx = 0, xPos = 496.0f; idx < g_GameManager.livesRemaining2; idx++, xPos += 16.0f)
+            {
+                vm->pos = D3DXVECTOR3(xPos, 131.0f, 0.49f);
+                g_AnmManager->DrawNoRotation(vm);
+            }
+        }
         for (idx = 0, xPos = 496.0f; idx < g_GameManager.livesRemaining; idx++, xPos += 16.0f)
         {
             vm->pos = D3DXVECTOR3(xPos, 122.0f, 0.49f);
@@ -1164,6 +1220,14 @@ void Gui::DrawGameScene()
     if (this->flags.flag1 || ((g_Supervisor.cfg.opts >> GCOS_DISPLAY_MINIMUM_GRAPHICS & 1) != 0))
     {
         vm = &this->impl->vms[17];
+        if (isDualSession)
+        {
+            for (idx = 0, xPos = 496.0f; idx < g_GameManager.bombsRemaining2; idx++, xPos += 16.0f)
+            {
+                vm->pos = D3DXVECTOR3(xPos, 155.0f, 0.49f);
+                g_AnmManager->DrawNoRotation(vm);
+            }
+        }
         for (idx = 0, xPos = 496.0f; idx < g_GameManager.bombsRemaining; idx++, xPos += 16.0f)
         {
             vm->pos = D3DXVECTOR3(xPos, 146.0f, 0.49f);
@@ -1218,6 +1282,60 @@ void Gui::DrawGameScene()
         {
             g_AsciiManager.AddFormatText(&D3DXVECTOR3(496.0f, 186.0f, 0.0f), "%d", g_GameManager.currentPower);
         }
+
+        if (isDualSession)
+        {
+            if (g_GameManager.currentPower2 > 0)
+            {
+                memcpy(&vertices[0].position, &D3DXVECTOR3(496.0f, 186.0f + dualHudYOffset, 0.1f),
+                       sizeof(D3DXVECTOR3));
+                memcpy(&vertices[1].position,
+                       &D3DXVECTOR3(g_GameManager.currentPower2 + 496 + 0.0f, 186.0f + dualHudYOffset, 0.1f),
+                       sizeof(D3DXVECTOR3));
+                memcpy(&vertices[2].position, &D3DXVECTOR3(496.0f, 202.0f + dualHudYOffset, 0.1f),
+                       sizeof(D3DXVECTOR3));
+                memcpy(&vertices[3].position,
+                       &D3DXVECTOR3(g_GameManager.currentPower2 + 496 + 0.0f, 202.0f + dualHudYOffset, 0.1f),
+                       sizeof(D3DXVECTOR3));
+
+                vertices[0].diffuse = vertices[2].diffuse = 0xe0e0ffff;
+                vertices[1].diffuse = vertices[3].diffuse = 0x80e0ffff;
+                vertices[0].position.w = vertices[1].position.w = vertices[2].position.w = vertices[3].position.w =
+                    1.0f;
+
+                if ((g_Supervisor.cfg.opts >> 8 & 1) == 0)
+                {
+                    g_Renderer->SetTextureStageSelectDiffuse();
+                }
+                g_Renderer->SetTextureStageSelectDiffuse();
+                if ((g_Supervisor.cfg.opts >> GCOS_TURN_OFF_DEPTH_TEST & 1) == 0)
+                {
+                    g_Renderer->SetDepthFunc(1);
+                    g_Renderer->SetZWriteDisable(1);
+                }
+                g_Renderer->DrawTriangleStrip(vertices, 4);
+                g_AnmManager->SetCurrentVertexShader(0xff);
+                g_AnmManager->SetCurrentColorOp(0xff);
+                g_AnmManager->SetCurrentBlendMode(0xff);
+                g_AnmManager->SetCurrentZWriteDisable(0xff);
+                if ((g_Supervisor.cfg.opts >> GCOS_NO_COLOR_COMP & 1) == 0)
+                {
+                    g_Renderer->SetTextureStageModulateTexture();
+                }
+                g_Renderer->SetTextureStageModulateTexture();
+                if (128 <= g_GameManager.currentPower2)
+                {
+                    vm = &this->impl->vms[18];
+                    vm->pos = D3DXVECTOR3(496.0f, 186.0f + dualHudYOffset, 0.0f);
+                    g_AnmManager->DrawNoRotation(vm);
+                }
+            }
+            if (g_GameManager.currentPower2 < 128)
+            {
+                g_AsciiManager.AddFormatText(&D3DXVECTOR3(496.0f, 186.0f + dualHudYOffset, 0.0f), "%d",
+                                             g_GameManager.currentPower2);
+            }
+        }
     }
     {
         D3DXVECTOR3 elemPos(496.0f, 82.0f, 0.0f);
@@ -1226,12 +1344,12 @@ void Gui::DrawGameScene()
         g_AsciiManager.AddFormatText(&elemPos, "%.9d", g_GameManager.highScore);
         if (this->flags.flag3 || ((g_Supervisor.cfg.opts >> 4 & 1) != 0))
         {
-            elemPos = D3DXVECTOR3(496.0f, 206.0f, 0.0f);
+            elemPos = D3DXVECTOR3(496.0f, 206.0f + dualHudYOffset, 0.0f);
             g_AsciiManager.AddFormatText(&elemPos, "%d", g_GameManager.grazeInStage);
         }
         if (this->flags.flag4 || ((g_Supervisor.cfg.opts >> 4 & 1) != 0))
         {
-            elemPos = D3DXVECTOR3(496.0f, 226.0f, 0.0f);
+            elemPos = D3DXVECTOR3(496.0f, 226.0f + dualHudYOffset, 0.0f);
             g_AsciiManager.AddFormatText(&elemPos, "%d", g_GameManager.pointItemsCollectedInStage);
         }
     }

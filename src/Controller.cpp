@@ -1,6 +1,7 @@
 #include "Controller.hpp"
 
 #include "GameErrorContext.hpp"
+#include "Session.hpp"
 #include "Supervisor.hpp"
 #include "diffbuild.hpp"
 #include "i18n.hpp"
@@ -208,10 +209,13 @@ static void DescribeTouhouButtons(u16 buttons, char *buffer, size_t size)
     AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_LEFT) != 0, "left");
     AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_RIGHT) != 0, "right");
     AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_SKIP) != 0, "skip");
-    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_Q) != 0, "q");
-    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_S) != 0, "s");
-    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_HOME) != 0, "home");
-    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_ENTER) != 0, "enter");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_SHOOT2) != 0, "shoot2");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_BOMB2) != 0, "bomb2");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_FOCUS2) != 0, "focus2");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_UP2) != 0, "up2");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_DOWN2) != 0, "down2");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_LEFT2) != 0, "left2");
+    AppendButtonName(buffer, size, &offset, (buttons & TH_BUTTON_RIGHT2) != 0, "right2");
 
     if (offset == 0)
     {
@@ -462,7 +466,6 @@ u16 Controller::GetInput(void)
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_UP_RIGHT, SDL_SCANCODE_KP_9);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_DOWN_LEFT, SDL_SCANCODE_KP_1);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_DOWN_RIGHT, SDL_SCANCODE_KP_3);
-    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_HOME, SDL_SCANCODE_HOME);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_SHOOT, SDL_SCANCODE_Z);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_BOMB, SDL_SCANCODE_X);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_FOCUS, SDL_SCANCODE_LSHIFT);
@@ -470,9 +473,14 @@ u16 Controller::GetInput(void)
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_MENU, SDL_SCANCODE_ESCAPE);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_SKIP, SDL_SCANCODE_LCTRL);
     buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_SKIP, SDL_SCANCODE_RCTRL);
-    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_Q, SDL_SCANCODE_Q);
-    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_S, SDL_SCANCODE_S);
-    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_ENTER, SDL_SCANCODE_RETURN);
+
+    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_UP2, SDL_SCANCODE_I);
+    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_DOWN2, SDL_SCANCODE_K);
+    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_LEFT2, SDL_SCANCODE_J);
+    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_RIGHT2, SDL_SCANCODE_L);
+    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_SHOOT2, SDL_SCANCODE_F);
+    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_BOMB2, SDL_SCANCODE_G);
+    buttons |= KEYBOARD_KEY_PRESSED(TH_BUTTON_FOCUS2, SDL_SCANCODE_D);
 
     keyboardButtons = buttons;
     buttons = Controller::GetControllerInput(buttons);
@@ -494,15 +502,17 @@ void Controller::ResetKeyboard(void)
 
 void Controller::ResetInputState(void)
 {
-    ResetKeyboard();
-    g_FocusButtonConflictState = 0;
-    g_LastFrameInput = 0;
-    g_CurFrameInput = 0;
-    g_IsEigthFrameOfHeldInput = 0;
-    g_NumOfFramesInputsWereHeld = 0;
+    ResetDeviceInputState();
+    Session::ResetLegacyInputState();
 #ifdef __ANDROID__
     SDL_Log("[input/native] ResetInputState");
 #endif
+}
+
+void Controller::ResetDeviceInputState(void)
+{
+    ResetKeyboard();
+    g_FocusButtonConflictState = 0;
 }
 
 void Controller::InitSDLController(void)

@@ -11,6 +11,8 @@
 #include "GameWindow.hpp"
 #include "IRenderer.hpp"
 #include "MidiOutput.hpp"
+#include "NetplaySession.hpp"
+#include "Session.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
@@ -37,13 +39,6 @@ int main(int argc, char *argv[])
 
     GamePaths::Init();
 
-    if (utils::CheckForRunningGameInstance())
-    {
-        g_GameErrorContext.Flush();
-
-        return 1;
-    }
-
     if (g_Supervisor.LoadConfig(TH_CONFIG_FILE) != ZUN_SUCCESS)
     {
 #ifdef __ANDROID__
@@ -62,6 +57,8 @@ int main(int argc, char *argv[])
         g_GameErrorContext.Flush();
         return 1;
     }
+
+    Session::UseLocalSession();
 
 restart:
     GameWindow::CreateGameWindow(NULL);
@@ -102,6 +99,7 @@ restart:
 stop:
     g_Chain.Release();
     g_SoundPlayer.Release();
+    Netplay::Shutdown();
 
     delete g_AnmManager;
     g_AnmManager = NULL;
@@ -135,6 +133,7 @@ stop:
         }
         TextHelper::ReleaseTextBuffer();
         Controller::CloseSDLController();
+        Netplay::Shutdown();
 
         g_GameErrorContext.ResetContext();
 

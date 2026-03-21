@@ -6,6 +6,8 @@
 #include "EffectManager.hpp"
 #include "EnemyManager.hpp"
 #include "Gui.hpp"
+#include "ItemManager.hpp"
+#include "NetplaySession.hpp"
 #include "Player.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
@@ -23,6 +25,13 @@
 
 namespace th06
 {
+namespace
+{
+bool HasSecondPlayer()
+{
+    return Session::IsDualPlayerSession();
+}
+} // namespace
 
 DIFFABLE_STATIC_ARRAY_ASSIGN(u32, 5, g_ExtraLivesScores) = {10000000, 20000000, 40000000, 60000000, 1900000000};
 
@@ -159,6 +168,47 @@ ChainCallbackResult GameManager::OnUpdate(GameManager *gameManager)
 
     gameManager->isInMenu = isInMenu;
 
+    if (Session::IsRemoteNetplaySession())
+    {
+        const Netplay::InGameCtrlType ctrl = Netplay::ConsumeInGameControl();
+        if (gameManager->isInGameMenu)
+        {
+            switch (ctrl)
+            {
+            case Netplay::Quick_Quit:
+                g_Supervisor.curState = SUPERVISOR_STATE_MAINMENU;
+                break;
+            case Netplay::Quick_Restart:
+                g_Supervisor.wantedState = SUPERVISOR_STATE_GAMEMANAGER_REINIT;
+                break;
+            default:
+                break;
+            }
+        }
+        else
+        {
+            D3DXVECTOR3 spawnPos;
+            spawnPos.x = (g_Rng.GetRandomF32ZeroToOne() - 0.5f) * 2.0f * 192.0f + 192.0f;
+            spawnPos.y = (g_Rng.GetRandomF32ZeroToOne() - 0.5f) * 2.0f * 224.0f + 16.0f;
+            spawnPos.z = 0.0f;
+
+            switch (ctrl)
+            {
+            case Netplay::Inf_Life:
+                g_ItemManager.SpawnItem(&spawnPos, ITEM_LIFE, 0);
+                break;
+            case Netplay::Inf_Bomb:
+                g_ItemManager.SpawnItem(&spawnPos, ITEM_BOMB, 0);
+                break;
+            case Netplay::Inf_Power:
+                g_ItemManager.SpawnItem(&spawnPos, ITEM_FULL_POWER, 0);
+                break;
+            default:
+                break;
+            }
+        }
+    }
+
     g_Supervisor.viewport.X = gameManager->arcadeRegionTopLeftPos.x;
     g_Supervisor.viewport.Y = gameManager->arcadeRegionTopLeftPos.y;
     g_Supervisor.viewport.Width = gameManager->arcadeRegionSize.x;
@@ -218,10 +268,18 @@ ChainCallbackResult GameManager::OnUpdate(GameManager *gameManager)
         }
         if (gameManager->extraLives >= 0 && g_ExtraLivesScores[gameManager->extraLives] <= gameManager->guiScore)
         {
+            const bool hasSecondPlayer = HasSecondPlayer();
+            if (gameManager->livesRemaining < MAX_LIVES || (hasSecondPlayer && gameManager->livesRemaining2 < MAX_LIVES))
+            {
+                g_SoundPlayer.PlaySoundByIdx(SOUND_1UP, 0);
+            }
             if (gameManager->livesRemaining < MAX_LIVES)
             {
                 gameManager->livesRemaining++;
-                g_SoundPlayer.PlaySoundByIdx(SOUND_1UP, 0);
+            }
+            if (hasSecondPlayer && gameManager->livesRemaining2 < MAX_LIVES)
+            {
+                gameManager->livesRemaining2++;
             }
             g_Gui.flags.flag0 = 2;
             gameManager->extraLives++;
@@ -300,6 +358,7 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         mgr->nextScoreIncrement = 0;
         mgr->highScore = 100000;
         mgr->currentPower = 0;
+        mgr->currentPower2 = 0;
         mgr->numRetries = 0;
         if (6 <= mgr->currentStage)
         {
@@ -351,6 +410,14 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         mgr->deaths = 0;
         mgr->bombsUsed = 0;
         mgr->spellcardsCaptured = 0;
+        if (!HasSecondPlayer())
+        {
+            mgr->character2 = mgr->character;
+            mgr->shotType2 = mgr->shotType;
+            mgr->livesRemaining2 = 0;
+            mgr->bombsRemaining2 = 0;
+            mgr->currentPower2 = 0;
+        }
     }
     else
     {
@@ -383,9 +450,17 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
             break;
         case STAGE3:
             mgr->currentPower = 64;
+            if (HasSecondPlayer())
+            {
+                mgr->currentPower2 = 64;
+            }
             break;
         default:
             mgr->currentPower = 128;
+            if (HasSecondPlayer())
+            {
+                mgr->currentPower2 = 128;
+            }
         }
     }
     // Apply thprac practice overrides (lives, bombs, power, rank, etc.)
@@ -405,6 +480,14 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         }
         mgr->minRank = g_DifficultyInfoForReplay[g_GameManager.difficulty].minRank;
         mgr->maxRank = g_DifficultyInfoForReplay[g_GameManager.difficulty].maxRank;
+    }
+    if (Session::IsDualPlayerSession())
+    {
+        g_Rng.seed = 0;
+        if (Session::IsRemoteNetplaySession())
+        {
+            Netplay::PrepareGameplayStart();
+        }
     }
     g_Rng.generationCount = 0;
     mgr->randomSeed = g_Rng.seed;

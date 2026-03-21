@@ -1,5 +1,4 @@
 #include "sdl2_compat.hpp"
-#include "sdl2_renderer.hpp"
 #include <cstdio>
 #include <sys/stat.h>
 #ifdef _WIN32
@@ -19,6 +18,8 @@
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
 #include "GamePaths.hpp"
+#include "NetplaySession.hpp"
+#include "OnlineMenu.hpp"
 #include "ReplayData.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
@@ -41,6 +42,49 @@ namespace THPrac { namespace TH06 {
 
 namespace th06
 {
+namespace
+{
+constexpr f32 ONLINE_MENU_POS_X = 452.0f;
+constexpr f32 ONLINE_MENU_POS_Y = 404.0f;
+constexpr f32 ONLINE_MENU_SCALE = 1.0f;
+constexpr f32 ONLINE_MENU_SELECTED_SCALE = 1.15f;
+char g_OnlineLabel[] = "Online";
+
+void DrawOnlineMenuEntry(MainMenu *menu)
+{
+    if (menu->gameState != STATE_MAIN_MENU && menu->gameState != STATE_ONLINE)
+    {
+        return;
+    }
+
+    const bool isSelected = menu->cursor == 8;
+    const f32 scale = isSelected ? ONLINE_MENU_SELECTED_SCALE : ONLINE_MENU_SCALE;
+    D3DXVECTOR3 textPos = D3DXVECTOR3(ONLINE_MENU_POS_X, ONLINE_MENU_POS_Y, 0.0f);
+    if (isSelected)
+    {
+        textPos.x -= 4.0f;
+        textPos.y -= 4.0f;
+    }
+
+    const D3DCOLOR prevColor = g_AsciiManager.color;
+    const D3DXVECTOR2 prevScale = g_AsciiManager.scale;
+    const ZunBool prevIsSelected = g_AsciiManager.isSelected;
+    const u32 prevIsGui = g_AsciiManager.isGui;
+
+    g_AsciiManager.color = isSelected ? COLOR_KEYBOARD_KEY_HIGHLIGHT : COLOR_SET_ALPHA(COLOR_WHITE, 0xb0);
+    g_AsciiManager.scale.x = scale;
+    g_AsciiManager.scale.y = scale;
+    g_AsciiManager.isSelected = isSelected;
+    g_AsciiManager.isGui = 0;
+    g_AsciiManager.AddString(&textPos, g_OnlineLabel);
+
+    g_AsciiManager.color = prevColor;
+    g_AsciiManager.scale = prevScale;
+    g_AsciiManager.isSelected = prevIsSelected;
+    g_AsciiManager.isGui = prevIsGui;
+}
+} // namespace
+
 DIFFABLE_STATIC_ARRAY_ASSIGN(char *, 4, g_ShortCharacterList) = {"ReimuA ", "ReimuB ", "MarisaA", "MarisaB"};
 DIFFABLE_STATIC_ARRAY_ASSIGN(char *, 5, g_DifficultyList) = {"Easy   ", "Normal ", "Hard   ", "Lunatic", "Extra  "};
 DIFFABLE_STATIC_ARRAY_ASSIGN(char *, 7, g_StageList) = {"Stage1", "Stage2", "Stage3", "Stage4",
@@ -152,6 +196,32 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             g_GameManager.difficulty = LUNATIC;
             g_Supervisor.curState = SUPERVISOR_STATE_GAMEMANAGER;
             return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+        }
+        break;
+    case STATE_ONLINE:
+        menu->idleFrames = 0;
+        if (OnlineMenu::ConsumeCloseRequested() ||
+            (OnlineMenu::AllowsBackShortcut() && WAS_PRESSED(TH_BUTTON_BOMB)))
+        {
+            const bool coldStartRequested = Netplay::ConsumeTitleColdStartRequested();
+            OnlineMenu::Close();
+            if (coldStartRequested)
+            {
+                menu->gameState = STATE_STARTUP;
+                menu->stateTimer = 0;
+                menu->idleFrames = 0;
+                menu->cursor = 0;
+                menu->numFramesSinceActive = 0;
+                menu->framesActive = 0;
+                menu->framesInactive = 0;
+                menu->lastFrameTime = 0;
+                g_Supervisor.startupTimeBeforeMenuMusic = SDL_GetTicks();
+            }
+            else
+            {
+                menu->gameState = STATE_MAIN_MENU;
+                g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
+            }
         }
         break;
     case STATE_REPLAY_LOAD:
@@ -698,6 +768,55 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         else if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
         {
             g_GameManager.shotType = menu->cursor;
+            if (Session::IsDualPlayerSession())
+            {
+                menu->gameState = STATE_CHARACTER_SELECT2;
+                menu->stateTimer = 0;
+                for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+                {
+                    menu->vm[i].pendingInterrupt = 7;
+                }
+                g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+                if (g_GameManager.difficulty < 4)
+                {
+                    vmList = &menu->vm[81 + g_GameManager.difficulty];
+                    vmList->pendingInterrupt = 8;
+                    menu->cursor = g_GameManager.character2;
+                }
+                else
+                {
+                    vmList = &menu->vm[85];
+                    vmList->pendingInterrupt = 8;
+                    if (g_GameManager.HasReachedMaxClears(g_GameManager.character2, 0) ||
+                        g_GameManager.HasReachedMaxClears(g_GameManager.character2, 1))
+                    {
+                        menu->cursor = g_GameManager.character2;
+                    }
+                    else
+                    {
+                        menu->cursor = 1 - g_GameManager.character2;
+                    }
+                }
+                vmList = &menu->vm[86];
+                for (i = 0; i < 2; i++, vmList += 2)
+                {
+                    if (i != menu->cursor)
+                    {
+                        vmList[0].pendingInterrupt = 12;
+                        vmList[1].pendingInterrupt = 12;
+                        vmList[0].color = 0xffffffff;
+                        vmList[1].color = 0xffffffff;
+                    }
+                    else
+                    {
+                        vmList[0].pendingInterrupt = 9;
+                        vmList[1].pendingInterrupt = 9;
+                        vmList[0].color = 0xffffffff;
+                        vmList[1].color = 0xffffffff;
+                    }
+                }
+                break;
+            }
             if (g_GameManager.isInPracticeMode == 0)
             {
                 if (g_GameManager.difficulty < 4)
@@ -711,10 +830,30 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             something:
                 g_GameManager.livesRemaining = g_Supervisor.cfg.lifeCount;
                 g_GameManager.bombsRemaining = g_Supervisor.cfg.bombCount;
-                if ((g_GameManager.difficulty == EXTRA) || (g_GameManager.isInPracticeMode != 0))
+                if (Session::IsDualPlayerSession())
+                {
+                    g_GameManager.livesRemaining2 = g_Supervisor.cfg.lifeCount;
+                    g_GameManager.bombsRemaining2 = g_Supervisor.cfg.bombCount;
+                }
+                if (g_GameManager.difficulty == EXTRA)
                 {
                     g_GameManager.livesRemaining = 2;
                     g_GameManager.bombsRemaining = 3;
+                    if (Session::IsDualPlayerSession())
+                    {
+                        g_GameManager.livesRemaining2 = 2;
+                        g_GameManager.bombsRemaining2 = 3;
+                    }
+                }
+                if (g_GameManager.isInPracticeMode != 0)
+                {
+                    g_GameManager.livesRemaining = 8;
+                    g_GameManager.bombsRemaining = 8;
+                    if (Session::IsDualPlayerSession())
+                    {
+                        g_GameManager.livesRemaining2 = 8;
+                        g_GameManager.bombsRemaining2 = 8;
+                    }
                 }
                 g_Supervisor.curState = 2;
                 g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
@@ -800,6 +939,305 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             }
         }
         break;
+    case STATE_CHARACTER_SELECT2:
+        if (menu->stateTimer < 30)
+            break;
+        if (WAS_PRESSED_WEIRD(TH_BUTTON_LEFT))
+        {
+            menu->cursor = menu->cursor + 1;
+            if (2 <= menu->cursor)
+            {
+                menu->cursor = menu->cursor - 2;
+            }
+            if (g_GameManager.difficulty == EXTRA && g_GameManager.HasReachedMaxClears(menu->cursor, 0) == 0 &&
+                g_GameManager.HasReachedMaxClears(menu->cursor, 1) == 0)
+            {
+                menu->cursor = menu->cursor - 1;
+                if (menu->cursor < 0)
+                {
+                    menu->cursor = menu->cursor + 2;
+                }
+                goto here2;
+            }
+            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+            vmList = &menu->vm[86];
+            for (i = 0; i < 2; i++, vmList++)
+            {
+                if (i == menu->cursor)
+                {
+                    vmList->pendingInterrupt = 9;
+                    vmList++;
+                    vmList->pendingInterrupt = 9;
+                }
+                else
+                {
+                    vmList->pendingInterrupt = 12;
+                    vmList++;
+                    vmList->pendingInterrupt = 12;
+                }
+            }
+        }
+        if (WAS_PRESSED_WEIRD(TH_BUTTON_RIGHT))
+        {
+            menu->cursor = menu->cursor - 1;
+            if (menu->cursor < 0)
+            {
+                menu->cursor = menu->cursor + 2;
+            }
+            if (g_GameManager.difficulty == EXTRA && g_GameManager.HasReachedMaxClears(menu->cursor, 0) == 0 &&
+                g_GameManager.HasReachedMaxClears(menu->cursor, 1) == 0)
+            {
+                menu->cursor = menu->cursor + 1;
+                if (2 <= menu->cursor)
+                {
+                    menu->cursor = menu->cursor - 2;
+                }
+            }
+            else
+            {
+                g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                vmList = &menu->vm[86];
+                for (i = 0; i < 2; i++, vmList++)
+                {
+                    if (i == menu->cursor)
+                    {
+                        vmList->pendingInterrupt = 10;
+                        vmList++;
+                        vmList->pendingInterrupt = 10;
+                    }
+                    else
+                    {
+                        vmList->pendingInterrupt = 11;
+                        vmList++;
+                        vmList->pendingInterrupt = 11;
+                    }
+                }
+            }
+        }
+    here2:
+        if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
+        {
+            menu->gameState = STATE_DIFFICULTY_SELECT;
+            menu->stateTimer = 0;
+            if (g_GameManager.difficulty < 4)
+            {
+                for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+                {
+                    menu->vm[i].pendingInterrupt = 6;
+                }
+                menu->cursor = g_Supervisor.cfg.defaultDifficulty;
+            }
+            else
+            {
+                for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+                {
+                    menu->vm[i].pendingInterrupt = 18;
+                }
+                menu->cursor = 0;
+            }
+            g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
+            break;
+        }
+        if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
+        {
+            menu->gameState = STATE_SHOT_SELECT2;
+            menu->stateTimer = 0;
+            for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+            {
+                menu->vm[i].pendingInterrupt = 13;
+            }
+            vmList = &menu->vm[g_GameManager.difficulty + 81];
+            vmList->pendingInterrupt = 0;
+            vmList = &menu->vm[86];
+            for (i = 0; i < 2; i++, vmList += 2)
+            {
+                if (i != menu->cursor)
+                {
+                    vmList[0].pendingInterrupt = 0;
+                    vmList[1].pendingInterrupt = 0;
+                }
+            }
+            g_GameManager.character2 = menu->cursor;
+            if (g_GameManager.difficulty < 4)
+            {
+                menu->cursor = g_GameManager.shotType2;
+            }
+            else
+            {
+                if (g_GameManager.HasReachedMaxClears(g_GameManager.character2, g_GameManager.shotType2) != 0)
+                {
+                    menu->cursor = g_GameManager.shotType2;
+                }
+                else
+                {
+                    menu->cursor = 1 - g_GameManager.shotType2;
+                }
+            }
+            vmList = &menu->vm[92];
+            if (g_GameManager.character2 == 0)
+            {
+                vmList[2].pendingInterrupt = 0;
+                vmList[3].pendingInterrupt = 0;
+                if (menu->cursor == 0)
+                {
+                    vmList[2].color = 0xffffffff;
+                    vmList[3].color = 0xff202020;
+                }
+                else
+                {
+                    vmList[3].color = 0xffffffff;
+                    vmList[2].color = 0xff202020;
+                }
+            }
+            else
+            {
+                vmList[0].pendingInterrupt = 0;
+                vmList[1].pendingInterrupt = 0;
+                if (menu->cursor == 0)
+                {
+                    vmList[0].color = 0xffffffff;
+                    vmList[1].color = 0xff202020;
+                }
+                else
+                {
+                    vmList[1].color = 0xffffffff;
+                    vmList[0].color = 0xff202020;
+                }
+            }
+            g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+        }
+        break;
+    case STATE_SHOT_SELECT2:
+        MoveCursor(menu, 2);
+        if (g_GameManager.difficulty == EXTRA &&
+            g_GameManager.HasReachedMaxClears(g_GameManager.character2, menu->cursor) == 0)
+        {
+            menu->cursor = 1 - menu->cursor;
+        }
+        vmList = &menu->vm[92];
+        for (i = 0; i < 2; i++, vmList += 2)
+        {
+            vmList[1].flags.colorOp = AnmVmColorOp_Add;
+        }
+        vmList = &menu->vm[92 + g_GameManager.character2 * 2];
+        for (i = 0; i < 2; i++, vmList++)
+        {
+            vmList->flags.colorOp = AnmVmColorOp_Add;
+            vmList->flags.isVisible = 1;
+            if (i != menu->cursor)
+            {
+                if (((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1) == 0)
+                {
+                    vmList->color = 0xa0000000;
+                }
+                else
+                {
+                    vmList->color = 0xa0d0d0d0;
+                }
+                pos4.x = 0.0f;
+                pos4.y = 0.0f;
+                pos4.z = 0.0f;
+                memcpy(&vmList->posOffset, &pos4, sizeof(D3DXVECTOR3));
+            }
+            else
+            {
+                if (((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1) == 0)
+                {
+                    vmList->color = 0xff202020;
+                }
+                else
+                {
+                    vmList->color = 0xffffffff;
+                }
+                pos5.x = -6.f;
+                pos5.y = -6.f;
+                pos5.z = 0.0f;
+                memcpy(&vmList->posOffset, &pos5, sizeof(D3DXVECTOR3));
+            }
+        }
+        if (30 > menu->stateTimer)
+        {
+            break;
+        }
+        if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
+        {
+            menu->gameState = STATE_DIFFICULTY_SELECT;
+            if (g_GameManager.difficulty < 4)
+            {
+                for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+                {
+                    menu->vm[i].pendingInterrupt = 6;
+                }
+                menu->cursor = g_Supervisor.cfg.defaultDifficulty;
+            }
+            else
+            {
+                for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+                {
+                    menu->vm[i].pendingInterrupt = 18;
+                }
+                menu->cursor = 0;
+            }
+            g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
+            break;
+        }
+        else if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
+        {
+            g_GameManager.shotType2 = menu->cursor;
+            if (g_GameManager.isInPracticeMode == 0)
+            {
+                if (g_GameManager.difficulty < 4)
+                {
+                    g_GameManager.currentStage = 0;
+                }
+                else
+                {
+                    g_GameManager.currentStage = 6;
+                }
+                goto something;
+            }
+            menu->gameState = STATE_PRACTICE_LVL_SELECT;
+            menu->stateTimer = 0;
+            for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+            {
+                menu->vm[i].pendingInterrupt = 19;
+            }
+            vmList = &menu->vm[81 + g_GameManager.difficulty];
+            vmList->pendingInterrupt = 0;
+            vmList = &menu->vm[86];
+            for (i = 0; i < 2; i++, vmList += 2)
+            {
+                if (i != g_GameManager.character2)
+                {
+                    vmList[0].pendingInterrupt = 0;
+                    vmList[1].pendingInterrupt = 0;
+                }
+            }
+            vmList = &menu->vm[92];
+            for (i = 0; i < 2; i++, vmList += 2)
+            {
+                if (i != g_GameManager.character2)
+                {
+                    vmList[0].pendingInterrupt = 0;
+                    vmList[1].pendingInterrupt = 0;
+                }
+            }
+            menu->cursor = g_GameManager.menuCursorBackup;
+            local_4c = g_GameManager.clrd[g_GameManager.CharacterShotType()]
+                                   .difficultyClearedWithoutRetries[g_GameManager.difficulty] > 6
+                           ? 6
+                           : g_GameManager.clrd[g_GameManager.CharacterShotType()]
+                                 .difficultyClearedWithoutRetries[g_GameManager.difficulty];
+            if (g_GameManager.difficulty == EASY && local_4c == 6)
+            {
+                local_4c = 5;
+            }
+            if (menu->cursor >= local_4c)
+            {
+                menu->cursor = 0;
+            }
+        }
+        break;
     case STATE_PRACTICE_LVL_SELECT:
         chosenStage = g_GameManager.clrd[g_GameManager.CharacterShotType()]
                                   .difficultyClearedWithoutRetries[g_GameManager.difficulty] > 6
@@ -822,34 +1260,24 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
             THPrac::TH06::THPracMenuCancel();
-            menu->gameState = STATE_SHOT_SELECT;
-            menu->stateTimer = 0;
-            for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
+            menu->gameState = STATE_DIFFICULTY_SELECT;
+            if (g_GameManager.difficulty < 4)
             {
-                menu->vm[i].pendingInterrupt = 13;
-            }
-            vmList = &menu->vm[81 + g_GameManager.difficulty];
-            vmList->pendingInterrupt = 0;
-            vmList = &menu->vm[86];
-            for (i = 0; i < 2; i++, vmList += 2)
-            {
-                if (i != g_GameManager.character)
+                for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
                 {
-                    vmList[0].pendingInterrupt = 0;
-                    vmList[1].pendingInterrupt = 0;
+                    menu->vm[i].pendingInterrupt = 6;
                 }
+                menu->cursor = g_Supervisor.cfg.defaultDifficulty;
             }
-            vmList = &menu->vm[92];
-            for (i = 0; i < 2; i++, vmList += 2)
+            else
             {
-                if (i != g_GameManager.character)
+                for (i = 0; i < ARRAY_SIZE_SIGNED(menu->vm); i++)
                 {
-                    vmList[0].pendingInterrupt = 0;
-                    vmList[1].pendingInterrupt = 0;
+                    menu->vm[i].pendingInterrupt = 18;
                 }
+                menu->cursor = 0;
             }
-            menu->cursor = g_GameManager.shotType;
-            g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+            g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
             break;
         }
         else if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
@@ -1093,7 +1521,7 @@ ZunBool MainMenu::WeirdSecondInputCheck()
         return true;
     }
 
-    if (!WAS_PRESSED_WEIRD(TH_BUTTON_SELECTMENU | TH_BUTTON_BOMB | TH_BUTTON_MENU | TH_BUTTON_Q | TH_BUTTON_S))
+    if (!WAS_PRESSED_WEIRD(TH_BUTTON_SELECTMENU | TH_BUTTON_BOMB | TH_BUTTON_MENU))
     {
         return true;
     }
@@ -1128,16 +1556,27 @@ ZunBool MainMenu::WeirdSecondInputCheck()
 ZunResult MainMenu::DrawStartMenu(void)
 {
     i32 i;
-    i = MoveCursor(this, 8);
+    i = MoveCursor(this, 9);
     if ((this->cursor == 1) && !g_GameManager.HasReachedMaxClears(0, 0) && !g_GameManager.HasReachedMaxClears(0, 1) &&
         !g_GameManager.HasReachedMaxClears(1, 0) && !g_GameManager.HasReachedMaxClears(1, 1))
+    {
+        this->cursor += i;
+    }
+    if (this->cursor == 3 && !Netplay::AllowsReplay())
     {
         this->cursor += i;
     }
     AnmVm *drawVm = this->vm;
     for (i = 0; i < 8; i++, drawVm++ /* zun why */)
     {
-        DrawMenuItem(drawVm, i, this->cursor, COLOR_RED, COLOR_START_MENU_ITEM_INACTIVE, 122);
+        if (i == 3 && !Netplay::AllowsReplay())
+        {
+            DrawMenuItem(drawVm, i, this->cursor, COLOR_RED, 0x30000000, 122);
+        }
+        else
+        {
+            DrawMenuItem(drawVm, i, this->cursor, COLOR_RED, COLOR_START_MENU_ITEM_INACTIVE, 122);
+        }
     }
     if (this->stateTimer >= 0x14)
     {
@@ -1213,6 +1652,11 @@ ZunResult MainMenu::DrawStartMenu(void)
                 g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
                 break;
             case 3:
+                if (!Netplay::AllowsReplay())
+                {
+                    g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
+                    break;
+                }
                 for (i = 0; i < ARRAY_SIZE_SIGNED(this->vm); i++)
                 {
                     this->vm[i].pendingInterrupt = 4;
@@ -1270,17 +1714,12 @@ ZunResult MainMenu::DrawStartMenu(void)
                 }
                 g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
                 break;
+            case 8:
+                OnlineMenu::Open();
+                this->gameState = STATE_ONLINE;
+                g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+                break;
             }
-        }
-        if (WAS_PRESSED(TH_BUTTON_Q))
-        {
-            this->gameState = STATE_QUIT;
-            this->stateTimer = 0;
-            for (i = 0; i < ARRAY_SIZE_SIGNED(this->vm); i++)
-            {
-                this->vm[i].pendingInterrupt = 4;
-            }
-            g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
         }
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
@@ -2093,6 +2532,7 @@ ChainCallbackResult MainMenu::OnDraw(MainMenu *menu)
     default:
         menu->ChoosePracticeLevel();
     }
+    DrawOnlineMenuEntry(menu);
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -2333,6 +2773,7 @@ ZunResult MainMenu::AddedCallback(MainMenu *m)
 
     g_GameManager.isInPracticeMode = 0;
     THPrac::TH06::THPracResetParams();
+    OnlineMenu::Close();
     if ((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING & 1) == 0)
     {
         m->color1 = 0x80004000;

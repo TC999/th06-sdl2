@@ -10,6 +10,7 @@
 #include "Gui.hpp"
 #include "Player.hpp"
 #include "Rng.hpp"
+#include "Session.hpp"
 #include "Stage.hpp"
 #include "utils.hpp"
 #include "thprac_th06.h"
@@ -37,6 +38,14 @@ DIFFABLE_STATIC_ARRAY_ASSIGN(ExInsn, 17, g_EclExInsn) = {
     EnemyEclInstr::ExInsStage4Func12,         EnemyEclInstr::ExInsStageXFunc13,
     EnemyEclInstr::ExInsStageXFunc14,         EnemyEclInstr::ExInsStageXFunc15,
     EnemyEclInstr::ExInsStageXFunc16};
+
+namespace
+{
+bool HasSecondPlayer()
+{
+    return Session::IsDualPlayerSession();
+}
+} // namespace
 
 static inline void TraceSpellcardOpcode(Enemy *enemy, const EclRawInstr *rawInstruction)
 {
@@ -98,6 +107,15 @@ ZunResult EclManager::CallEclSub(EnemyEclContext *ctx, i16 subId)
     return ZUN_SUCCESS;
 }
 
+f32 EclManager::AngleProvokedPlayer(D3DXVECTOR3 *pos, u8 playerType)
+{
+    if (playerType == 2)
+    {
+        return g_Player2.AngleToPlayer(pos);
+    }
+    return g_Player.AngleToPlayer(pos);
+}
+
 #pragma var_order(local_8, local_14, local_18, args, instruction, local_24, local_28, local_2c, local_30, local_34,    \
                   local_38, local_3c, local_40, local_44, local_48, local_4c, local_50, local_54, local_58, local_5c,  \
                   local_60, local_64, local_68, local_6c, local_70, local_74, csum, scoreIncrease, local_80, local_84, \
@@ -124,6 +142,7 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
     EclRawInstrEnemyCreateArgs local_b0;
     Enemy *local_b4;
     std::vector<u8> alignedInstructionStorage;
+    const bool hasSecondPlayer = HasSecondPlayer();
 
     auto updateRawInstructionMetadata = [&]() -> ZunResult {
         rawInstructionBytes = reinterpret_cast<const u8 *>(rawInstruction);
@@ -182,6 +201,17 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
             }
 
             TraceSpellcardOpcode(enemy, rawInstruction);
+            if (hasSecondPlayer && enemy->provokedPlayer == 0)
+            {
+                if (g_Player.RangeToPlayer(&enemy->position) > g_Player2.RangeToPlayer(&enemy->position))
+                {
+                    enemy->provokedPlayer = 2;
+                }
+                else
+                {
+                    enemy->provokedPlayer = 1;
+                }
+            }
             switch (instruction->opCode)
             {
             case ECL_OPCODE_UNIMP:
@@ -477,7 +507,8 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                 enemy->flags.unk1 = 1;
                 break;
             case ECL_OPCODE_MOVEATPLAYER:
-                enemy->angle = g_Player.AngleToPlayer(&enemy->position) +
+                enemy->angle = (hasSecondPlayer ? this->AngleProvokedPlayer(&enemy->position, enemy->provokedPlayer)
+                                                : g_Player.AngleToPlayer(&enemy->position)) +
                                *EnemyEclInstr::GetVarFloat(enemy, RAW_ARG_PTR(f32, EclRawInstrMoveArgs, pos.x), NULL);
                 enemy->speed = *EnemyEclInstr::GetVarFloat(enemy, RAW_ARG_PTR(f32, EclRawInstrMoveArgs, pos.y), NULL);
                 enemy->flags.unk1 = 1;
@@ -502,6 +533,7 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
             case ECL_OPCODE_BULLETRANDOM:
                 local_54 = &instruction->args.bullet;
                 local_58 = &enemy->bulletProps;
+                local_58->provokedPlayer = enemy->provokedPlayer;
                 local_58->sprite = local_54->sprite;
                 local_58->aimMode = instruction->opCode - ECL_OPCODE_BULLETFANAIMED;
                 local_58->count1 = *EnemyEclInstr::GetVar(enemy, RAW_ARG_PTR(EclVarId, EclRawInstrBulletArgs, count1), NULL);
@@ -602,6 +634,7 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
             case ECL_OPCODE_LASERCREATEAIMED:
                 local_64 = &instruction->args.laser;
                 local_60 = &enemy->laserProps;
+                local_60->provokedPlayer = enemy->provokedPlayer;
                 local_60->position = enemy->position + enemy->shootOffset;
                 local_60->sprite = local_64->sprite;
                 local_60->spriteOffset = local_64->color;
@@ -645,7 +678,10 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                 if (enemy->lasers[instruction->args.laserOp.laserIdx] != NULL)
                 {
                     enemy->lasers[instruction->args.laserOp.laserIdx]->angle =
-                        g_Player.AngleToPlayer(&enemy->lasers[instruction->args.laserOp.laserIdx]->pos) +
+                        (hasSecondPlayer
+                             ? this->AngleProvokedPlayer(&enemy->lasers[instruction->args.laserOp.laserIdx]->pos,
+                                                         enemy->provokedPlayer)
+                             : g_Player.AngleToPlayer(&enemy->lasers[instruction->args.laserOp.laserIdx]->pos)) +
                         *EnemyEclInstr::GetVarFloat(enemy, RAW_ARG_PTR(f32, EclRawInstrLaserOpArgs, arg1.x), NULL);
                 }
                 break;
@@ -986,7 +1022,8 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
 
                     local_98[0] += g_Rng.GetRandomF32InRange(144.0f) - 72.0f;
                     local_98[1] += g_Rng.GetRandomF32InRange(144.0f) - 72.0f;
-                    if (g_GameManager.currentPower < 128)
+                    if (hasSecondPlayer ? (g_GameManager.currentPower < 128 || g_GameManager.currentPower2 < 128)
+                                        : (g_GameManager.currentPower < 128))
                     {
                         g_ItemManager.SpawnItem(&local_98, local_8c == 0 ? ITEM_POWER_BIG : ITEM_POWER_SMALL, 0);
                     }

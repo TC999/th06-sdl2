@@ -8,6 +8,7 @@
 #include "Gui.hpp"
 #include "Player.hpp"
 #include "Rng.hpp"
+#include "Session.hpp"
 #include "ZunBool.hpp"
 #include "utils.hpp"
 #include <cstddef>
@@ -289,7 +290,15 @@ i32 *GetVar(Enemy *enemy, EclVarId *eclVarId, EclValueType *valueType)
         return (i32 *)&g_Player.positionCenter.z;
 
     case ECL_VAR_PLAYER_ANGLE:
-        g_PlayerAngle = g_Player.AngleToPlayer(&enemy->position);
+        if (Session::IsDualPlayerSession() &&
+            g_Player.RangeToPlayer(&enemy->position) > g_Player2.RangeToPlayer(&enemy->position))
+        {
+            g_PlayerAngle = g_Player2.AngleToPlayer(&enemy->position);
+        }
+        else
+        {
+            g_PlayerAngle = g_Player.AngleToPlayer(&enemy->position);
+        }
         if (valueType != NULL)
             *valueType = ECL_VALUE_TYPE_READONLY;
         return (i32 *)&g_PlayerAngle;

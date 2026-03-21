@@ -168,11 +168,14 @@ set(TH06_GAME_SOURCES
     src/MainMenu.cpp
     src/MidiOutput.cpp
     src/MusicRoom.cpp
+    src/NetplaySession.cpp
+    src/OnlineMenu.cpp
     src/Player.cpp
     src/ReplayManager.cpp
     src/ResultScreen.cpp
     src/Rng.cpp
     src/ScreenEffect.cpp
+    src/Session.cpp
     src/sdl2_renderer.cpp
     src/SoundPlayer.cpp
     src/Stage.cpp

@@ -67,6 +67,7 @@ struct AdvancedGameOptions {
     int32_t th06_seed = 0;
     bool th06_pauseBGM = false;
     bool th06_disable_drop_rank = false;
+    bool th06_run_in_background = false;
     bool th06_showRank = false;
     bool th06_show_hitbox = false;
     bool th06_showRepMarker = false;

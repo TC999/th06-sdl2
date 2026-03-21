@@ -12,10 +12,12 @@
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "MainMenu.hpp"
+#include "NetplaySession.hpp"
 #include "MusicRoom.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
 #include "Rng.hpp"
+#include "Session.hpp"
 #include "SoundPlayer.hpp"
 #include "TextHelper.hpp"
 #include "i18n.hpp"
@@ -57,28 +59,8 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
     {
         g_SoundPlayer.backgroundMusic->UpdateFadeOut();
     }
-    g_LastFrameInput = g_CurFrameInput;
-    g_CurFrameInput = Controller::GetInput();
-    g_IsEigthFrameOfHeldInput = 0;
-    if (g_LastFrameInput == g_CurFrameInput)
-    {
-        if (0x1e <= g_NumOfFramesInputsWereHeld)
-        {
-            if (g_NumOfFramesInputsWereHeld % 8 == 0)
-            {
-                g_IsEigthFrameOfHeldInput = 1;
-            }
-            if (0x26 <= g_NumOfFramesInputsWereHeld)
-            {
-                g_NumOfFramesInputsWereHeld = 0x1e;
-            }
-        }
-        g_NumOfFramesInputsWereHeld++;
-    }
-    else
-    {
-        g_NumOfFramesInputsWereHeld = 0;
-    }
+    Session::AdvanceFrameInput();
+    Netplay::DrawOverlay();
 
     if (s->wantedState != s->curState)
     {

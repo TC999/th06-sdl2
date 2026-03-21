@@ -6,6 +6,7 @@
 #include "Controller.hpp"
 #include "GameManager.hpp"
 #include "Gui.hpp"
+#include "Session.hpp"
 #include "Supervisor.hpp"
 #include "sdl2_renderer.hpp"
 #include "utils.hpp"
@@ -407,7 +408,7 @@ i32 StageMenu::OnUpdateGameMenu()
         this->numFrames = 0;
         this->menuBackground.pendingInterrupt = 1;
     }
-    if (WAS_PRESSED(TH_BUTTON_Q))
+    if (WAS_PRESSED(TH_BUTTON_BOMB2))
     {
         this->curState = GAME_MENU_QUIT_SELECTED_YES;
         for (vmIdx = 0; vmIdx < ARRAY_SIZE_SIGNED(this->menuSprites); vmIdx++)
@@ -776,7 +777,17 @@ i32 StageMenu::OnUpdateRetryMenu()
             g_GameManager.livesRemaining = g_Supervisor.defaultConfig.lifeCount;
             g_GameManager.bombsRemaining = g_Supervisor.defaultConfig.bombCount;
             g_GameManager.grazeInStage = 0;
-            g_GameManager.currentPower = 0;
+            if (Session::IsDualPlayerSession())
+            {
+                g_GameManager.livesRemaining2 = g_Supervisor.defaultConfig.lifeCount;
+                g_GameManager.bombsRemaining2 = g_Supervisor.defaultConfig.bombCount;
+                g_GameManager.currentPower = 128;
+                g_GameManager.currentPower2 = 128;
+            }
+            else
+            {
+                g_GameManager.currentPower = 0;
+            }
             g_GameManager.pointItemsCollectedInStage = 0;
             g_GameManager.extraLives = 0;
             g_Gui.flags.flag0 = 2;

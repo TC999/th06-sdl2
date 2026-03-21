@@ -10,6 +10,7 @@
 #include "Gui.hpp"
 #include "ReplayManager.hpp"
 #include "Rng.hpp"
+#include "Session.hpp"
 #include "Supervisor.hpp"
 #include "utils.hpp"
 
@@ -135,7 +136,8 @@ ZunResult ReplayManager::RegisterChain(i32 isDemo, char *replayFile)
 }
 
 #define TH_BUTTON_REPLAY_CAPTURE                                                                                       \
-    (TH_BUTTON_SHOOT | TH_BUTTON_BOMB | TH_BUTTON_FOCUS | TH_BUTTON_SKIP | TH_BUTTON_DIRECTION)
+    (TH_BUTTON_SHOOT | TH_BUTTON_BOMB | TH_BUTTON_FOCUS | TH_BUTTON_SKIP | TH_BUTTON_DIRECTION | TH_BUTTON_SHOOT2 |   \
+     TH_BUTTON_BOMB2 | TH_BUTTON_FOCUS2 | TH_BUTTON_DIRECTION2)
 
 ChainCallbackResult ReplayManager::OnUpdate(ReplayManager *mgr)
 {
@@ -181,27 +183,8 @@ ChainCallbackResult ReplayManager::OnUpdateDemoHighPrio(ReplayManager *mgr)
     {
         mgr->replayInputs += 1;
     }
-    g_CurFrameInput = IS_PRESSED(0xFFFFFFFF & ~TH_BUTTON_REPLAY_CAPTURE) | mgr->replayInputs->inputKey;
-    g_IsEigthFrameOfHeldInput = 0;
-    if (g_LastFrameInput == g_CurFrameInput)
-    {
-        if (30 <= g_NumOfFramesInputsWereHeld)
-        {
-            if (g_NumOfFramesInputsWereHeld % 8 == 0)
-            {
-                g_IsEigthFrameOfHeldInput = 1;
-            }
-            if (38 <= g_NumOfFramesInputsWereHeld)
-            {
-                g_NumOfFramesInputsWereHeld = 30;
-            }
-        }
-        g_NumOfFramesInputsWereHeld++;
-    }
-    else
-    {
-        g_NumOfFramesInputsWereHeld = 0;
-    }
+    const u16 replayInput = IS_PRESSED(0xFFFFFFFF & ~TH_BUTTON_REPLAY_CAPTURE) | mgr->replayInputs->inputKey;
+    Session::ApplyLegacyFrameInput(replayInput);
     mgr->frameId += 1;
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
@@ -239,6 +222,7 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *mgr)
         mgr->replayData = new ReplayData();
         memcpy(&mgr->replayData->magic[0], "T6RP", 4);
         mgr->replayData->shottypeChara = g_GameManager.character * 2 + g_GameManager.shotType;
+        mgr->replayData->shottypeChara2 = g_GameManager.character2 * 2 + g_GameManager.shotType2;
         mgr->replayData->version = 0x102;
         mgr->replayData->difficulty = g_GameManager.difficulty;
         utils::CopyStringToFixedField(mgr->replayData->name, sizeof(mgr->replayData->name), "NO NAME");
@@ -265,6 +249,9 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *mgr)
     stageReplayData->bombsRemaining = g_GameManager.bombsRemaining;
     stageReplayData->livesRemaining = g_GameManager.livesRemaining;
     stageReplayData->power = g_GameManager.currentPower;
+    stageReplayData->bombsRemaining2 = g_GameManager.bombsRemaining2;
+    stageReplayData->livesRemaining2 = g_GameManager.livesRemaining2;
+    stageReplayData->power2 = (u8)g_GameManager.currentPower2;
     stageReplayData->rank = g_GameManager.rank;
     stageReplayData->pointItemsCollected = g_GameManager.pointItemsCollected;
     stageReplayData->randomSeed = g_GameManager.randomSeed;
@@ -305,6 +292,8 @@ ZunResult ReplayManager::AddedCallbackDemo(ReplayManager *mgr)
     replayData = mgr->replayData->stageReplayData[g_GameManager.currentStage - 1];
     g_GameManager.character = mgr->replayData->shottypeChara / 2;
     g_GameManager.shotType = mgr->replayData->shottypeChara % 2;
+    g_GameManager.character2 = mgr->replayData->shottypeChara2 / 2;
+    g_GameManager.shotType2 = mgr->replayData->shottypeChara2 % 2;
     g_GameManager.difficulty = (Difficulty)mgr->replayData->difficulty;
     g_GameManager.pointItemsCollected = replayData->pointItemsCollected;
     g_Rng.Initialize(replayData->randomSeed);
@@ -312,6 +301,9 @@ ZunResult ReplayManager::AddedCallbackDemo(ReplayManager *mgr)
     g_GameManager.livesRemaining = replayData->livesRemaining;
     g_GameManager.bombsRemaining = replayData->bombsRemaining;
     g_GameManager.currentPower = replayData->power;
+    g_GameManager.livesRemaining2 = replayData->livesRemaining2;
+    g_GameManager.bombsRemaining2 = replayData->bombsRemaining2;
+    g_GameManager.currentPower2 = replayData->power2;
     mgr->replayInputs = replayData->replayInputs;
     g_GameManager.powerItemCountForScore = replayData->powerItemCountForScore;
     if (2 <= g_GameManager.currentStage && mgr->replayData->stageReplayData[g_GameManager.currentStage - 2] != NULL)
