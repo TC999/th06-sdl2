@@ -50,6 +50,11 @@ constexpr f32 ONLINE_MENU_SCALE = 1.0f;
 constexpr f32 ONLINE_MENU_SELECTED_SCALE = 1.15f;
 char g_OnlineLabel[] = "Online";
 
+bool IsDemoPlayDisabledForCurrentSession()
+{
+    return Session::IsDualPlayerSession();
+}
+
 void DrawOnlineMenuEntry(MainMenu *menu)
 {
     if (menu->gameState != STATE_MAIN_MENU && menu->gameState != STATE_ONLINE)
@@ -165,7 +170,14 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
         }
     case STATE_PRE_INPUT:
-        menu->idleFrames = menu->idleFrames + 1;
+        if (IsDemoPlayDisabledForCurrentSession())
+        {
+            menu->idleFrames = 0;
+        }
+        else
+        {
+            menu->idleFrames = menu->idleFrames + 1;
+        }
         if ((g_CurFrameInput & 0xffff) != 0)
         {
             menu->idleFrames = 0;
@@ -183,7 +195,14 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         {
             menu->idleFrames = 0;
         }
-        menu->idleFrames = menu->idleFrames + 1;
+        if (IsDemoPlayDisabledForCurrentSession())
+        {
+            menu->idleFrames = 0;
+        }
+        else
+        {
+            menu->idleFrames = menu->idleFrames + 1;
+        }
         if (720 <= menu->idleFrames)
         {
         load_menu_rpy:
