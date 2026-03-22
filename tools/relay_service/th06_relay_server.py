@@ -25,6 +25,7 @@ class PeerRegistration:
     role: str
     proto: int
     addr: PeerAddr
+    session_id: str
     last_seen: float
 
 
@@ -106,7 +107,11 @@ def parse_packet_header(payload: bytes) -> Tuple[int, int, int, int]:
         return -1, -1, -1, -1
 
 
-def cleanup_stale(rooms: Dict[str, Dict[str, PeerRegistration]], peers_by_addr: Dict[PeerAddr, PeerRegistration]):
+def cleanup_stale(
+    rooms: Dict[str, Dict[str, PeerRegistration]],
+    peers_by_addr: Dict[PeerAddr, PeerRegistration],
+    room_locks: Dict[str, Dict[str, str]],
+):
     now = time.time()
     expired = [addr for addr, reg in peers_by_addr.items() if now - reg.last_seen > STALE_TIMEOUT_S]
     for addr in expired:
@@ -119,26 +124,60 @@ def cleanup_stale(rooms: Dict[str, Dict[str, PeerRegistration]], peers_by_addr: 
             del room[reg.role]
             if not room:
                 del rooms[reg.room]
+                room_locks.pop(reg.room, None)
+
+
+def remove_registration(
+    rooms: Dict[str, Dict[str, PeerRegistration]],
+    peers_by_addr: Dict[PeerAddr, PeerRegistration],
+    room_locks: Dict[str, Dict[str, str]],
+    registration: PeerRegistration,
+):
+    peers_by_addr.pop(registration.addr, None)
+    room = rooms.get(registration.room)
+    if room and room.get(registration.role) and room[registration.role].addr == registration.addr:
+        del room[registration.role]
+        if not room:
+            del rooms[registration.room]
+            room_locks.pop(registration.room, None)
 
 
 def replace_registration(
     rooms: Dict[str, Dict[str, PeerRegistration]],
     peers_by_addr: Dict[PeerAddr, PeerRegistration],
+    room_locks: Dict[str, Dict[str, str]],
     registration: PeerRegistration,
 ):
     old = peers_by_addr.get(registration.addr)
     if old is not None:
-        old_room = rooms.get(old.room)
-        if old_room and old_room.get(old.role) and old_room[old.role].addr == old.addr:
-            del old_room[old.role]
-            if not old_room:
-                del rooms[old.room]
+        remove_registration(rooms, peers_by_addr, room_locks, old)
 
     room = rooms.setdefault(registration.room, {})
+    old_role_peer = room.get(registration.role)
+    if old_role_peer is not None and old_role_peer.addr != registration.addr:
+        remove_registration(rooms, peers_by_addr, room_locks, old_role_peer)
+        room = rooms.setdefault(registration.room, {})
     room[registration.role] = registration
     peers_by_addr[registration.addr] = registration
     LOG.info("registered room=%s role=%s proto=%d addr=%s", registration.room, registration.role,
              registration.proto, addr_text(registration.addr))
+
+
+def is_room_occupied(
+    rooms: Dict[str, Dict[str, PeerRegistration]],
+    room_locks: Dict[str, Dict[str, str]],
+    registration: PeerRegistration,
+) -> bool:
+    locked_room = room_locks.get(registration.room)
+    if locked_room is not None:
+        return locked_room.get(registration.role) != registration.session_id
+
+    room = rooms.get(registration.room)
+    if room is None or "host" not in room or "guest" not in room:
+        return False
+
+    current_peer = room.get(registration.role)
+    return current_peer is None or current_peer.addr != registration.addr
 
 
 def log_room_ready(room: str, host: PeerRegistration, guest: PeerRegistration):
@@ -214,8 +253,14 @@ def log_traffic(
     counter.last_log_time = now
 
 
-def send_room_state(sock: socket.socket, registration: PeerRegistration, rooms: Dict[str, Dict[str, PeerRegistration]], nonce: str,
-                    payload: bytes):
+def send_room_state(
+    sock: socket.socket,
+    registration: PeerRegistration,
+    rooms: Dict[str, Dict[str, PeerRegistration]],
+    room_locks: Dict[str, Dict[str, str]],
+    nonce: str,
+    payload: bytes,
+):
     room = rooms.get(registration.room, {})
     other_role = "guest" if registration.role == "host" else "host"
     other = room.get(other_role)
@@ -233,6 +278,11 @@ def send_room_state(sock: socket.socket, registration: PeerRegistration, rooms: 
         send_text(sock, registration.addr, f"THR1 VERSION_MISMATCH {other.proto}")
         send_text(sock, other.addr, f"THR1 VERSION_MISMATCH {registration.proto}")
         return
+
+    room_locks[registration.room] = {
+        "host": room["host"].session_id,
+        "guest": room["guest"].session_id,
+    }
 
     send_text(
         sock,
@@ -257,6 +307,7 @@ def handle_control(
     addr: PeerAddr,
     rooms: Dict[str, Dict[str, PeerRegistration]],
     peers_by_addr: Dict[PeerAddr, PeerRegistration],
+    room_locks: Dict[str, Dict[str, str]],
 ):
     tokens = text.split()
     if len(tokens) >= 4 and tokens[0] == "THR1" and tokens[1] == "PROBE":
@@ -279,9 +330,15 @@ def handle_control(
             send_text(sock, addr, "THR1 REGISTER_FAILED bad_role")
             return
 
-        registration = PeerRegistration(room=room, role=role, proto=proto, addr=addr, last_seen=time.time())
-        replace_registration(rooms, peers_by_addr, registration)
-        send_room_state(sock, registration, rooms, room, payload)
+        session_id = tokens[5] if len(tokens) >= 6 else addr_text(addr)
+        registration = PeerRegistration(room=room, role=role, proto=proto, addr=addr, session_id=session_id,
+                                        last_seen=time.time())
+        if is_room_occupied(rooms, room_locks, registration):
+            LOG.info("room occupied room=%s role=%s addr=%s", registration.room, registration.role, addr_text(addr))
+            send_text(sock, addr, f"THR1 REGISTER_FAILED room_occupied {registration.room}")
+            return
+        replace_registration(rooms, peers_by_addr, room_locks, registration)
+        send_room_state(sock, registration, rooms, room_locks, room, payload)
         return
 
     if len(tokens) >= 3 and tokens[0] == "THR1" and tokens[1] == "LEAVE":
@@ -294,6 +351,7 @@ def handle_control(
             del room[reg.role]
             if not room:
                 del rooms[reg.room]
+                room_locks.pop(reg.room, None)
         return
 
 
@@ -309,17 +367,23 @@ def handle_gameplay(
 ):
     registration = peers_by_addr.get(addr)
     if registration is None:
-        LOG.info("drop gameplay bytes=%d sha=%s addr=%s reason=unregistered",
-                 len(payload), payload_sha_prefix(payload), addr_text(addr))
+        LOG.debug("drop gameplay bytes=%d sha=%s addr=%s reason=unregistered",
+                  len(payload), payload_sha_prefix(payload), addr_text(addr))
         return
 
     registration.last_seen = time.time()
     room = rooms.get(registration.room, {})
+    current_peer = room.get(registration.role)
+    if current_peer is None or current_peer.addr != addr:
+        LOG.debug("drop gameplay room=%s role=%s bytes=%d sha=%s reason=stale_registration",
+                  registration.room, registration.role, len(payload), payload_sha_prefix(payload))
+        return
+
     other_role = "guest" if registration.role == "host" else "host"
     other = room.get(other_role)
     if other is None:
-        LOG.info("drop gameplay room=%s role=%s bytes=%d sha=%s reason=missing_peer",
-                 registration.room, registration.role, len(payload), payload_sha_prefix(payload))
+        LOG.debug("drop gameplay room=%s role=%s bytes=%d sha=%s reason=missing_peer",
+                  registration.room, registration.role, len(payload), payload_sha_prefix(payload))
         return
 
     other.last_seen = time.time()
@@ -340,13 +404,14 @@ def serve(host: str, port: int, traffic_log_mode: str, traffic_summary_interval:
 
     rooms: Dict[str, Dict[str, PeerRegistration]] = {}
     peers_by_addr: Dict[PeerAddr, PeerRegistration] = {}
+    room_locks: Dict[str, Dict[str, str]] = {}
     traffic_counters: Dict[Tuple[str, str], TrafficCounter] = {}
 
     LOG.info("relay listening on [%s]:%d/udp traffic_log_mode=%s summary_interval=%.2fs",
              host, port, traffic_log_mode, traffic_summary_interval)
 
     while RUNNING:
-        cleanup_stale(rooms, peers_by_addr)
+        cleanup_stale(rooms, peers_by_addr, room_locks)
 
         try:
             payload, addr = sock.recvfrom(4096)
@@ -363,7 +428,7 @@ def serve(host: str, port: int, traffic_log_mode: str, traffic_summary_interval:
 
         if text.startswith("THR1 "):
             LOG.info("control from %s: %r", addr, text)
-            handle_control(sock, payload, text, addr, rooms, peers_by_addr)
+            handle_control(sock, payload, text, addr, rooms, peers_by_addr, room_locks)
         else:
             handle_gameplay(sock, payload, addr, rooms, peers_by_addr, traffic_counters, traffic_log_mode,
                             traffic_summary_interval)

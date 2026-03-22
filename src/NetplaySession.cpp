@@ -400,6 +400,8 @@ private:
     int m_localPort = 0;
     bool m_isHostRole = false;
     bool m_isReady = false;
+    bool m_registrationRejected = false;
+    std::string m_sessionId;
     Uint64 m_lastRegisterSendTick = 0;
     sockaddr_storage m_serverAddr {};
     socklen_t m_serverAddrLen = 0;
@@ -492,6 +494,7 @@ bool ParseEndpointText(const std::string &endpoint, std::string &outHost, int &o
 bool OpenRelayProbeSocket();
 void CloseRelayProbeSocket();
 void SetRelayStatus(const std::string &text);
+std::string GenerateRelaySessionId();
 bool SendRelayProbe();
 void TickRelayProbe();
 void ApplyNetplayMenuDefaults();
@@ -949,6 +952,8 @@ bool RelayConnection::Start(const std::string &serverEndpoint, const std::string
         m_localPort = localPort;
         m_isHostRole = isHostRole;
         m_isReady = false;
+        m_registrationRejected = false;
+        m_sessionId = GenerateRelaySessionId();
         m_lastRegisterSendTick = 0;
         m_serverAddr = serverAddr;
         m_serverAddrLen = serverAddrLen;
@@ -980,6 +985,8 @@ void RelayConnection::Reset()
     m_localPort = 0;
     m_isHostRole = false;
     m_isReady = false;
+    m_registrationRejected = false;
+    m_sessionId.clear();
     m_lastRegisterSendTick = 0;
     m_serverAddr = {};
     m_serverAddrLen = 0;
@@ -1012,14 +1019,14 @@ void RelayConnection::SendLeave()
 
 void RelayConnection::SendRegister()
 {
-    if (m_roomCode.empty())
+    if (m_roomCode.empty() || m_registrationRejected)
     {
         return;
     }
 
     char buffer[256] = {};
-    std::snprintf(buffer, sizeof(buffer), "THR1 REGISTER %s %s %d", m_roomCode.c_str(),
-                  m_isHostRole ? "host" : "guest", kProtocolVersion);
+    std::snprintf(buffer, sizeof(buffer), "THR1 REGISTER %s %s %d %s", m_roomCode.c_str(),
+                  m_isHostRole ? "host" : "guest", kProtocolVersion, m_sessionId.c_str());
     if (SendText(buffer))
     {
         m_lastRegisterSendTick = SDL_GetTicks64();
@@ -1047,12 +1054,14 @@ void RelayConnection::HandleControl(const std::string &text)
 
     if (tokens[1] == "REGISTERED")
     {
+        m_registrationRejected = false;
         SetStatus(m_isHostRole ? "waiting relay guest..." : "waiting relay host...");
         return;
     }
 
     if (tokens[1] == "WAIT")
     {
+        m_registrationRejected = false;
         SetStatus(m_isHostRole ? "waiting relay guest..." : "waiting relay host...");
         return;
     }
@@ -1060,6 +1069,7 @@ void RelayConnection::HandleControl(const std::string &text)
     if (tokens[1] == "READY")
     {
         m_isReady = true;
+        m_registrationRejected = false;
         EnterConnectedState();
         return;
     }
@@ -1073,6 +1083,20 @@ void RelayConnection::HandleControl(const std::string &text)
 
     if (tokens[1] == "REGISTER_FAILED")
     {
+        if (tokens.size() >= 3 && tokens[2] == "room_occupied")
+        {
+            m_isReady = false;
+            m_registrationRejected = true;
+            g_State.isConnected = false;
+            CloseSocket();
+            m_serverAddrValid = false;
+            SetStatus("relay room occupied");
+            return;
+        }
+        m_isReady = false;
+        g_State.isConnected = false;
+        CloseSocket();
+        m_serverAddrValid = false;
         SetStatus("relay register failed");
         return;
     }
@@ -1091,7 +1115,8 @@ void RelayConnection::Tick()
     }
 
     const Uint64 now = SDL_GetTicks64();
-    if (!m_isReady && (m_lastRegisterSendTick == 0 || now - m_lastRegisterSendTick >= kPeriodicPingMs))
+    if (!m_isReady && !m_registrationRejected &&
+        (m_lastRegisterSendTick == 0 || now - m_lastRegisterSendTick >= kPeriodicPingMs))
     {
         SendRegister();
     }
@@ -1196,6 +1221,17 @@ void ClearRemoteRuntimeCaches()
 void SetStatus(const std::string &text)
 {
     g_State.statusText = text;
+}
+
+std::string GenerateRelaySessionId()
+{
+    static unsigned int s_counter = 0;
+    char buffer[64] = {};
+    const Uint64 ticks = SDL_GetTicks64();
+    const Uint64 perf = SDL_GetPerformanceCounter();
+    std::snprintf(buffer, sizeof(buffer), "%08x%08x%08x", (unsigned int)(ticks & 0xffffffffu),
+                  (unsigned int)(perf & 0xffffffffu), ++s_counter);
+    return buffer;
 }
 
 std::string BuildPacketSummary(const Pack &pack)
@@ -1856,7 +1892,6 @@ void HandleLauncherPacket(const Pack &pack)
 
     if (pack.type != PACK_PING && pack.type != PACK_PONG)
     {
-        SetStatus("unexpected launcher packet");
         return;
     }
 
@@ -1950,7 +1985,10 @@ void ProcessLauncherHost()
             return;
         }
     }
-    SendPeriodicPing();
+    if (!g_State.useRelayTransport || g_State.relay.IsReady())
+    {
+        SendPeriodicPing();
+    }
 }
 
 void ProcessLauncherGuest()
@@ -2505,7 +2543,7 @@ Snapshot GetSnapshot()
     snapshot.isSync = g_State.isSync;
     snapshot.isTryingReconnect = g_State.isTryingReconnect;
     snapshot.isVersionMatched = g_State.versionMatched;
-    snapshot.canStartGame = g_State.isConnected;
+    snapshot.canStartGame = g_State.isConnected && (!g_State.useRelayTransport || g_State.relay.IsReady());
     snapshot.hostIsPlayer1 = g_State.hostIsPlayer1;
     snapshot.delayLocked = g_State.isGuest;
     snapshot.targetDelay = g_State.delay;
@@ -2738,7 +2776,7 @@ void CancelPendingConnection()
 
 bool RequestStartGame()
 {
-    if (!g_State.isConnected)
+    if (!g_State.isConnected || (g_State.useRelayTransport && !g_State.relay.IsReady()))
     {
         return false;
     }

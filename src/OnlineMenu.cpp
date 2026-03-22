@@ -158,6 +158,10 @@ std::string LocalizeStatusText(const std::string &raw)
     {
         return Tr("中转注册失败", "relay register failed", "中継登録失敗");
     }
+    if (raw == "relay room occupied")
+    {
+        return Tr("房间被占用", "room occupied", "ルーム使用中");
+    }
     if (raw == "relay endpoint/room required")
     {
         return Tr("中转地址和房间码必须同时填写", "relay endpoint and room code are both required",

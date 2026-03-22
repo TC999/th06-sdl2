@@ -17,14 +17,20 @@ Protocol:
 
 - Client -> server:
   - `THR1 PROBE <nonce> <protocol_version>`
-  - `THR1 REGISTER <room> <host|guest> <protocol_version>`
+  - `THR1 REGISTER <room> <host|guest> <protocol_version> <session_id>`
 - Server -> client:
   - `THR1 PROBE_ACK <nonce>`
   - `THR1 META <nonce> <timestamp_ms> <sha256>`
   - `THR1 TRACE <timestamp_ms> <sha256>`
   - `THR1 REGISTERED <room> <role>`
+  - `THR1 REGISTER_FAILED room_occupied <room>`
   - `THR1 WAIT <room>`
   - `THR1 READY <room> <role> <peer_ip> <peer_port>`
+
+Room locking:
+
+- Once a room has successfully paired both `host` and `guest`, the relay locks that room to the same two launcher sessions
+- If one side temporarily disconnects, only that same side may reclaim the slot; a third launcher will receive `REGISTER_FAILED room_occupied <room>`
 
 Gameplay forwarding:
 
