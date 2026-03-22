@@ -95,11 +95,14 @@ set(TH06_GAME_SOURCES
     ${TH06_ROOT}/src/MainMenu.cpp
     ${TH06_ROOT}/src/MidiOutput.cpp
     ${TH06_ROOT}/src/MusicRoom.cpp
+    ${TH06_ROOT}/src/NetplaySession.cpp
+    ${TH06_ROOT}/src/OnlineMenu.cpp
     ${TH06_ROOT}/src/Player.cpp
     ${TH06_ROOT}/src/ReplayManager.cpp
     ${TH06_ROOT}/src/ResultScreen.cpp
     ${TH06_ROOT}/src/Rng.cpp
     ${TH06_ROOT}/src/ScreenEffect.cpp
+    ${TH06_ROOT}/src/Session.cpp
     ${TH06_ROOT}/src/SoundPlayer.cpp
     ${TH06_ROOT}/src/Stage.cpp
     ${TH06_ROOT}/src/Supervisor.cpp

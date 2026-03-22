@@ -122,6 +122,11 @@ target_link_libraries(th06_sdl2_test PRIVATE
     SDL2_mixer::SDL2_mixer
 )
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(th06_sdl2_test PRIVATE -m32)
+    target_link_options(th06_sdl2_test PRIVATE -m32)
+endif()
+
 # Windows: 复制 DLL 到测试程序输出目录
 if(WIN32)
     add_custom_command(TARGET th06_sdl2_test POST_BUILD
