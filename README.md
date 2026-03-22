@@ -40,8 +40,10 @@ cmake -B build_sdl2 -A Win32 -DUSE_GLES=ON
 cmake --build build_sdl2 --config Release
 
 # Linux (32-bit GLES)
-PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig \
-cmake -B build_linux_gles -DCMAKE_BUILD_TYPE=Release -DUSE_GLES=ON
+cmake -B build_linux_gles \
+  -DCMAKE_C_FLAGS="-m32" \
+  -DCMAKE_CXX_FLAGS="-m32" \
+  -DCMAKE_EXE_LINKER_FLAGS="-m32"
 cmake --build build_linux_gles
 ```
 
