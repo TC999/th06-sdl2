@@ -6,6 +6,23 @@ namespace th06
 {
 namespace EnemyEclInstr
 {
+struct RuntimeState
+{
+    i32 playerShot;
+    f32 playerDistance;
+    f32 playerAngle;
+    f32 starAngleTable[6];
+    D3DXVECTOR3 enemyPosVector;
+    D3DXVECTOR3 playerPosVector;
+    i32 eclLiteralInts[16];
+    f32 eclLiteralFloats[16];
+    i32 eclLiteralIntCursor;
+    i32 eclLiteralFloatCursor;
+};
+
+RuntimeState CaptureRuntimeState();
+void RestoreRuntimeState(const RuntimeState &state);
+
 i32 *GetVar(Enemy *enemy, EclVarId *varId, EclValueType *valueType);
 f32 *GetVarFloat(Enemy *enemy, f32 *varId, EclValueType *valueType);
 void SetVar(Enemy *enemy, EclVarId lhs, void *rhs);

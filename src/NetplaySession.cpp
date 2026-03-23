@@ -5,12 +5,17 @@
 #include "Controller.hpp"
 #include "EclManager.hpp"
 #include "EffectManager.hpp"
+#include "EnemyEclInstr.hpp"
 #include "EnemyManager.hpp"
 #include "GameManager.hpp"
+#include "GameWindow.hpp"
+#include "GamePaths.hpp"
 #include "Gui.hpp"
 #include "ItemManager.hpp"
 #include "Player.hpp"
 #include "Rng.hpp"
+#include "ScreenEffect.hpp"
+#include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "ZunColor.hpp"
@@ -18,17 +23,20 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <cstdarg>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <deque>
-#include <sstream>
 #include <map>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
+#include <process.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "Ws2_32.lib")
@@ -45,11 +53,12 @@ namespace th06::Netplay
 {
 namespace
 {
+constexpr int kDefaultDelay = 2;
 constexpr int kMaxDelay = 10;
 constexpr int kKeyPackFrameCount = 15;
-constexpr int kFrameCacheSize = 180;
+constexpr int kFrameCacheSize = 360;
 constexpr int kRollbackSnapshotInterval = 15;
-constexpr int kRollbackMaxSnapshots = 8;
+constexpr int kRollbackMaxSnapshots = 16;
 constexpr int kRelayDefaultPort = 3478;
 constexpr Uint64 kPeriodicPingMs = 1000;
 constexpr Uint64 kReconnectPingMs = 100;
@@ -74,6 +83,11 @@ enum PackType
     PACK_PING = 2,
     PACK_PONG = 3,
     PACK_USUAL = 4
+};
+
+enum InitSettingFlags
+{
+    InitSettingFlag_PredictionRollback = 1 << 0
 };
 
 template <int NBits> struct Bits
@@ -109,6 +123,7 @@ struct CtrlPack
         {
             int delay;
             int ver;
+            int flags;
         } initSetting;
         struct
         {
@@ -136,6 +151,44 @@ struct Pack
 
 struct RollbackSnapshot
 {
+    struct SupervisorRuntimeState
+    {
+        i32 calcCount = 0;
+        i32 wantedState = 0;
+        i32 curState = 0;
+        i32 wantedState2 = 0;
+        i32 unk194 = 0;
+        i32 unk198 = 0;
+        ZunBool isInEnding = false;
+        i32 vsyncEnabled = 0;
+        i32 lastFrameTime = 0;
+        f32 effectiveFramerateMultiplier = 1.0f;
+        f32 framerateMultiplier = 1.0f;
+        f32 unk1b4 = 0.0f;
+        f32 unk1b8 = 0.0f;
+        u32 startupTimeBeforeMenuMusic = 0;
+    };
+
+    struct GameWindowRuntimeState
+    {
+        i32 tickCountToEffectiveFramerate = 0;
+        double lastFrameTime = 0.0;
+        u8 curFrame = 0;
+    };
+
+    struct StageRuntimeState
+    {
+        std::vector<RawStageObjectInstance> objectInstances;
+        std::vector<AnmVm> quadVms;
+    };
+
+    struct SoundRuntimeState
+    {
+        i32 soundBuffersToPlay[3] {};
+        i32 queuedSfxState[128] {};
+        i32 isLooping = 0;
+    };
+
     int frame = 0;
     int stage = 0;
     int delay = 1;
@@ -155,6 +208,13 @@ struct RollbackSnapshot
     Stage stageState;
     EclManager eclManager;
     Rng rng;
+    EnemyEclInstr::RuntimeState enemyEclRuntimeState;
+    ScreenEffect::RuntimeState screenEffectRuntimeState;
+    Controller::RuntimeState controllerRuntimeState;
+    SupervisorRuntimeState supervisorRuntimeState;
+    GameWindowRuntimeState gameWindowRuntimeState;
+    StageRuntimeState stageRuntimeState;
+    SoundRuntimeState soundRuntimeState;
 
     u16 lastFrameInput = 0;
     u16 curFrameInput = 0;
@@ -430,17 +490,29 @@ struct RuntimeState
     bool savedDefaultDifficultyValid = false;
     u8 savedDefaultDifficulty = NORMAL;
 
-    int delay = 1;
+    int delay = kDefaultDelay;
     int currentDelayCooldown = 0;
     int resyncTargetFrame = 0;
     bool resyncTriggered = false;
     int lastFrame = -1;
     int lastConfirmedSyncFrame = 0;
+    int pendingRollbackFrame = -1;
     int rollbackTargetFrame = 0;
+    int rollbackSendFrame = -1;
     int rollbackStage = -1;
+    int rollbackEpochStartFrame = 0;
+    int lastRollbackMismatchFrame = -1;
+    int lastRollbackSnapshotFrame = -1;
+    int lastRollbackTargetFrame = -1;
+    int seedValidationIgnoreUntilFrame = -1;
+    int lastSeedRetryMismatchFrame = -1;
+    int lastSeedRetryOlderThanSnapshotFrame = -1;
+    u16 lastSeedRetryLocalSeed = 0;
+    u16 lastSeedRetryRemoteSeed = 0;
     int sessionBaseCalcCount = 0;
     int currentNetFrame = 0;
     Uint64 lastPeriodicPingTick = 0;
+    Uint64 lastRuntimeReceiveTick = 0;
     Uint64 guestWaitStartTick = 0;
     int lastRttMs = -1;
     unsigned int nextSeq = 1;
@@ -452,12 +524,19 @@ struct RuntimeState
 
     std::map<int, Bits<16>> localInputs;
     std::map<int, Bits<16>> remoteInputs;
+    std::map<int, Bits<16>> predictedRemoteInputs;
     std::map<int, u16> localSeeds;
     std::map<int, u16> remoteSeeds;
     std::map<int, InGameCtrlType> localCtrls;
     std::map<int, InGameCtrlType> remoteCtrls;
+    std::map<int, InGameCtrlType> predictedRemoteCtrls;
+    std::set<int> remoteFramesPendingRollbackCheck;
     std::deque<RollbackSnapshot> rollbackSnapshots;
+    bool predictionRollbackEnabled = true;
     bool rollbackActive = false;
+    bool stallFrameRequested = false;
+    bool hasKnownUiState = false;
+    bool knownUiState = false;
 };
 
 RuntimeState g_State;
@@ -486,6 +565,7 @@ void ClearRuntimeCaches();
 void SetStatus(const std::string &text);
 std::string BuildPacketSummary(const Pack &pack);
 void TraceLauncherPacket(const char *phase, const Pack &pack);
+void TraceDiagnostic(const char *event, const char *fmt, ...);
 std::string TrimString(std::string text);
 bool ResolveIpPortToSockAddr(const std::string &ip, int port, int family, sockaddr_storage &outStorage,
                              socklen_t &outLen);
@@ -502,15 +582,32 @@ void RestoreNetplayMenuDefaults();
 bool UsingHostConnection();
 bool SendPacket(const Pack &pack);
 bool PollPacket(Pack &pack, bool &hasData);
+bool IsCurrentUiFrame();
+bool CanUseRollbackSnapshots();
 void ResetLauncherState();
 void PruneOldFrameData(int frame);
 InGameCtrlType CaptureControlKeys();
 Pack MakePing(Control ctrlType);
 int CurrentNetFrame();
+int OldestRollbackSnapshotFrame();
+bool IsRollbackFrameTooOld(int frame, int *outOldestSnapshotFrame = nullptr);
+bool QueueRollbackFromFrame(int frame, const char *reason);
+bool IsRollbackEpochFrame(int frame);
+void ResetRollbackEpoch(int frame, const char *reason, int nextEpochStartFrame);
+bool HasRollbackReplayHistory(int snapshotFrame, int rollbackTargetFrame, int *outRequiredStartFrame = nullptr,
+                              int *outMissingLocalFrame = nullptr, int *outMissingRemoteFrame = nullptr);
+void AdvanceConfirmedSyncFrame();
+bool HasConsumedRemoteFrame(int frame);
+bool ResolveRemoteFrameInput(int frame, u16 &outInput, InGameCtrlType &outCtrl, bool allowPrediction,
+                             bool &outUsedPrediction);
+bool FrameHasMenuBit(const std::map<int, Bits<16>> &inputMap, int frame);
+bool TryStartQueuedRollback(int currentFrame);
+void RefreshRollbackFrameState(int frame);
+bool IsMenuTransitionFrame(int frame);
 void CaptureRollbackSnapshot(int frame);
 bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlType &outCtrl);
 bool RestoreRollbackSnapshot(const RollbackSnapshot &snapshot);
-bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame);
+bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderThanSnapshotFrame = -1);
 void SendPeriodicPing();
 void ActivateNetplaySession();
 void BeginSessionStartupWait();
@@ -526,6 +623,7 @@ void SendStartupBootstrapPacket();
 void SendKeyPacket(int frame);
 void SendResyncPacket();
 void HandleDesync(int frame);
+bool TryBeginStartupWaitFromRuntimePacket(const Pack &pack);
 u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &outRollbackStarted);
 void ApplyDelayControl();
 void TryReconnect(int frame);
@@ -953,7 +1051,10 @@ bool RelayConnection::Start(const std::string &serverEndpoint, const std::string
         m_isHostRole = isHostRole;
         m_isReady = false;
         m_registrationRejected = false;
-        m_sessionId = GenerateRelaySessionId();
+        if (m_sessionId.empty())
+        {
+            m_sessionId = GenerateRelaySessionId();
+        }
         m_lastRegisterSendTick = 0;
         m_serverAddr = serverAddr;
         m_serverAddrLen = serverAddrLen;
@@ -986,7 +1087,6 @@ void RelayConnection::Reset()
     m_isHostRole = false;
     m_isReady = false;
     m_registrationRejected = false;
-    m_sessionId.clear();
     m_lastRegisterSendTick = 0;
     m_serverAddr = {};
     m_serverAddrLen = 0;
@@ -1191,35 +1291,88 @@ bool RelayConnection::IsReady() const
 
 void ClearRuntimeCaches()
 {
+    TraceDiagnostic("clear-runtime-caches", "-");
     g_State.localInputs.clear();
     g_State.remoteInputs.clear();
+    g_State.predictedRemoteInputs.clear();
     g_State.localSeeds.clear();
     g_State.remoteSeeds.clear();
     g_State.localCtrls.clear();
     g_State.remoteCtrls.clear();
+    g_State.predictedRemoteCtrls.clear();
+    g_State.remoteFramesPendingRollbackCheck.clear();
     g_State.rollbackSnapshots.clear();
+    g_State.pendingRollbackFrame = -1;
     g_State.rollbackActive = false;
+    g_State.stallFrameRequested = false;
     g_State.rollbackTargetFrame = 0;
+    g_State.rollbackSendFrame = -1;
     g_State.rollbackStage = -1;
+    g_State.rollbackEpochStartFrame = 0;
+    g_State.lastRollbackMismatchFrame = -1;
+    g_State.lastRollbackSnapshotFrame = -1;
+    g_State.lastRollbackTargetFrame = -1;
+    g_State.seedValidationIgnoreUntilFrame = -1;
+    g_State.lastSeedRetryMismatchFrame = -1;
+    g_State.lastSeedRetryOlderThanSnapshotFrame = -1;
+    g_State.lastSeedRetryLocalSeed = 0;
+    g_State.lastSeedRetryRemoteSeed = 0;
     g_State.lastConfirmedSyncFrame = 0;
     g_State.currentCtrl = IGC_NONE;
+    g_State.hasKnownUiState = false;
+    g_State.knownUiState = false;
 }
 
 void ClearRemoteRuntimeCaches()
 {
+    TraceDiagnostic("clear-remote-runtime-caches", "-");
     g_State.remoteInputs.clear();
+    g_State.predictedRemoteInputs.clear();
     g_State.remoteSeeds.clear();
     g_State.remoteCtrls.clear();
+    g_State.predictedRemoteCtrls.clear();
+    g_State.remoteFramesPendingRollbackCheck.clear();
+    g_State.pendingRollbackFrame = -1;
     g_State.currentCtrl = IGC_NONE;
     g_State.isSync = true;
     g_State.isTryingReconnect = false;
+    g_State.stallFrameRequested = false;
     g_State.reconnectIssued = false;
+    g_State.rollbackSendFrame = -1;
+    g_State.lastRollbackMismatchFrame = -1;
+    g_State.lastRollbackSnapshotFrame = -1;
+    g_State.lastRollbackTargetFrame = -1;
+    g_State.seedValidationIgnoreUntilFrame = -1;
+    g_State.lastSeedRetryMismatchFrame = -1;
+    g_State.lastSeedRetryOlderThanSnapshotFrame = -1;
+    g_State.lastSeedRetryLocalSeed = 0;
+    g_State.lastSeedRetryRemoteSeed = 0;
     g_State.resyncTriggered = false;
     g_State.resyncTargetFrame = 0;
 }
 
+void ResetGameplayRuntimeStream()
+{
+    TraceDiagnostic("reset-gameplay-runtime-stream", "oldFrame=%d oldNet=%d", g_State.lastFrame, g_State.currentNetFrame);
+    ClearRuntimeCaches();
+    g_State.lastFrame = -1;
+    g_State.currentNetFrame = 0;
+    g_State.sessionBaseCalcCount = 0;
+    g_State.lastRuntimeReceiveTick = SDL_GetTicks64();
+    g_State.isTryingReconnect = false;
+    g_State.reconnectIssued = false;
+    g_State.isSync = true;
+    g_State.resyncTriggered = false;
+    g_State.resyncTargetFrame = 0;
+    SetStatus("connected");
+}
+
 void SetStatus(const std::string &text)
 {
+    if (g_State.statusText != text)
+    {
+        TraceDiagnostic("status", "from=%s to=%s", g_State.statusText.c_str(), text.c_str());
+    }
     g_State.statusText = text;
 }
 
@@ -1232,6 +1385,210 @@ std::string GenerateRelaySessionId()
     std::snprintf(buffer, sizeof(buffer), "%08x%08x%08x", (unsigned int)(ticks & 0xffffffffu),
                   (unsigned int)(perf & 0xffffffffu), ++s_counter);
     return buffer;
+}
+
+unsigned long GetDiagnosticProcessId()
+{
+#ifdef _WIN32
+    return (unsigned long)_getpid();
+#else
+    return (unsigned long)getpid();
+#endif
+}
+
+const char *ControlToString(Control control)
+{
+    switch (control)
+    {
+    case Ctrl_No_Ctrl:
+        return "none";
+    case Ctrl_Start_Game:
+        return "start_game";
+    case Ctrl_Key:
+        return "key";
+    case Ctrl_Set_InitSetting:
+        return "init_setting";
+    case Ctrl_Try_Resync:
+        return "try_resync";
+    default:
+        return "unknown";
+    }
+}
+
+const char *InGameCtrlToString(InGameCtrlType ctrl)
+{
+    switch (ctrl)
+    {
+    case Quick_Quit:
+        return "quick_quit";
+    case Quick_Restart:
+        return "quick_restart";
+    case Inf_Life:
+        return "inf_life";
+    case Inf_Bomb:
+        return "inf_bomb";
+    case Inf_Power:
+        return "inf_power";
+    case Add_Delay:
+        return "add_delay";
+    case Dec_Delay:
+        return "dec_delay";
+    case IGC_NONE:
+        return "none";
+    default:
+        return "unknown";
+    }
+}
+
+const char *SessionRoleTag()
+{
+    if (g_State.isHost)
+    {
+        return "host";
+    }
+    if (g_State.isGuest)
+    {
+        return "guest";
+    }
+    return "idle";
+}
+
+void AppendButtonName(char *buffer, size_t size, size_t &offset, bool active, const char *name)
+{
+    if (!active || buffer == nullptr || size == 0 || offset >= size - 1)
+    {
+        return;
+    }
+
+    const int written =
+        std::snprintf(buffer + offset, size - offset, offset == 0 ? "%s" : "|%s", name);
+    if (written <= 0)
+    {
+        return;
+    }
+
+    const size_t consumed = (size_t)written;
+    offset = consumed >= size - offset ? size - 1 : offset + consumed;
+}
+
+std::string FormatInputBits(u16 input)
+{
+    char names[160] = {};
+    size_t offset = 0;
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_SHOOT) != 0, "shoot");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_BOMB) != 0, "bomb");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_FOCUS) != 0, "focus");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_MENU) != 0, "menu");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_UP) != 0, "up");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_DOWN) != 0, "down");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_LEFT) != 0, "left");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_RIGHT) != 0, "right");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_SKIP) != 0, "skip");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_SHOOT2) != 0, "shoot2");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_BOMB2) != 0, "bomb2");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_FOCUS2) != 0, "focus2");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_UP2) != 0, "up2");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_DOWN2) != 0, "down2");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_LEFT2) != 0, "left2");
+    AppendButtonName(names, sizeof(names), offset, (input & TH_BUTTON_RIGHT2) != 0, "right2");
+    if (offset == 0)
+    {
+        std::snprintf(names, sizeof(names), "none");
+    }
+
+    char summary[192] = {};
+    std::snprintf(summary, sizeof(summary), "0x%04X[%s]", input, names);
+    return summary;
+}
+
+std::string BuildCtrlPacketWindowSummary(const CtrlPack &ctrl, int count)
+{
+    std::ostringstream stream;
+    const int frameCount = std::max(0, std::min(count, kKeyPackFrameCount));
+    for (int i = 0; i < frameCount; ++i)
+    {
+        if (i != 0)
+        {
+            stream << ' ';
+        }
+        stream << (ctrl.frame - i) << ':' << FormatInputBits(WriteToInt(ctrl.keys[i])) << '/'
+               << ctrl.rngSeed[i] << '/' << InGameCtrlToString(ctrl.inGameCtrl[i]);
+    }
+    return stream.str();
+}
+
+std::string BuildRuntimeStateSummary()
+{
+    const bool inGameManager = g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER;
+    const bool isInGameMenu = inGameManager && g_GameManager.isInGameMenu;
+    const bool isInRetryMenu = inGameManager && g_GameManager.isInRetryMenu;
+    const bool isInUi = !inGameManager || isInGameMenu || isInRetryMenu;
+
+    char summary[640] = {};
+    std::snprintf(summary, sizeof(summary),
+                  "role=%s sup=%d gf=%d ui=%d menu=%d retry=%d net=%d last=%d delay=%d sync=%d conn=%d reconn=%d "
+                  "rb=%d pend=%d tgt=%d send=%d stall=%d ctrl=%s lastIn=%s curIn=%s status=%s",
+                  SessionRoleTag(), (int)g_Supervisor.curState, inGameManager ? g_GameManager.gameFrames : -1,
+                  isInUi ? 1 : 0, isInGameMenu ? 1 : 0, isInRetryMenu ? 1 : 0, g_State.currentNetFrame,
+                  g_State.lastFrame, g_State.delay, g_State.isSync ? 1 : 0, g_State.isConnected ? 1 : 0,
+                  g_State.isTryingReconnect ? 1 : 0, g_State.rollbackActive ? 1 : 0,
+                  g_State.pendingRollbackFrame, g_State.rollbackTargetFrame, g_State.rollbackSendFrame,
+                  g_State.stallFrameRequested ? 1 : 0, InGameCtrlToString(g_State.currentCtrl),
+                  FormatInputBits(g_LastFrameInput).c_str(), FormatInputBits(g_CurFrameInput).c_str(),
+                  g_State.statusText.c_str());
+    return summary;
+}
+
+FILE *OpenDiagnosticLogFile()
+{
+    static FILE *file = nullptr;
+    static bool firstOpen = true;
+    static char resolvedPath[512] = {};
+
+    if (file != nullptr)
+    {
+        return file;
+    }
+
+    if (resolvedPath[0] == '\0')
+    {
+        char relativePath[128] = {};
+        std::snprintf(relativePath, sizeof(relativePath), "netplay_diag_%lu.log", GetDiagnosticProcessId());
+        GamePaths::Resolve(resolvedPath, sizeof(resolvedPath), relativePath);
+    }
+
+    GamePaths::EnsureParentDir(resolvedPath);
+    file = std::fopen(resolvedPath, firstOpen ? "wt" : "at");
+    if (file == nullptr)
+    {
+        return nullptr;
+    }
+
+    firstOpen = false;
+    std::fprintf(file, "==== netplay diagnostic log pid=%lu ====\n", GetDiagnosticProcessId());
+    std::fflush(file);
+    return file;
+}
+
+void TraceDiagnostic(const char *event, const char *fmt, ...)
+{
+    FILE *file = OpenDiagnosticLogFile();
+    if (file == nullptr)
+    {
+        return;
+    }
+
+    char message[1536] = {};
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    static Uint64 eventCounter = 0;
+    std::fprintf(file, "#%llu t=%llu %s event=%s %s\n", (unsigned long long)++eventCounter,
+                 (unsigned long long)SDL_GetTicks64(), BuildRuntimeStateSummary().c_str(), event,
+                 message[0] != '\0' ? message : "-");
+    std::fflush(file);
 }
 
 std::string BuildPacketSummary(const Pack &pack)
@@ -1258,10 +1615,10 @@ std::string BuildPacketSummary(const Pack &pack)
 
     char summary[384] = {};
     std::snprintf(summary, sizeof(summary),
-                  "from=%s:%d bytes=%d type=%d ctrl=%d delay=%d ver=%d seq=%u raw=%s",
+                  "from=%s:%d bytes=%d type=%d ctrl=%d delay=%d ver=%d flags=%d seq=%u raw=%s",
                   g_State.lastPacketFromIp.empty() ? "?" : g_State.lastPacketFromIp.c_str(), g_State.lastPacketFromPort,
                   g_State.lastPacketBytes, pack.type, (int)pack.ctrl.ctrlType, pack.ctrl.initSetting.delay,
-                  pack.ctrl.initSetting.ver, pack.seq, bytes);
+                  pack.ctrl.initSetting.ver, pack.ctrl.initSetting.flags, pack.seq, bytes);
     return summary;
 }
 
@@ -1270,11 +1627,13 @@ void TraceLauncherPacket(const char *phase, const Pack &pack)
     FILE *file = std::fopen("netplay_trace.log", "a");
     if (file == nullptr)
     {
+        TraceDiagnostic("launcher-packet", "phase=%s summary=%s", phase, BuildPacketSummary(pack).c_str());
         return;
     }
 
     std::fprintf(file, "[%s] %s\n", phase, BuildPacketSummary(pack).c_str());
     std::fclose(file);
+    TraceDiagnostic("launcher-packet", "phase=%s summary=%s", phase, BuildPacketSummary(pack).c_str());
 }
 
 void SetRelayStatus(const std::string &text)
@@ -1489,8 +1848,42 @@ bool PollPacket(Pack &pack, bool &hasData)
     return g_State.guest.PollReceive(pack, hasData);
 }
 
+bool IsCurrentUiFrame()
+{
+    return g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER || g_GameManager.isInGameMenu ||
+           g_GameManager.isInRetryMenu;
+}
+
+int GetDisplayedRttMs()
+{
+    if (g_State.lastRttMs >= 0)
+    {
+        return g_State.lastRttMs;
+    }
+
+    if (g_State.useRelayTransport && g_Relay.lastRttMs >= 0)
+    {
+        return g_Relay.lastRttMs;
+    }
+
+    return -1;
+}
+
+bool CanUseRollbackSnapshots()
+{
+    return g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER && !g_GameManager.demoMode && !IsCurrentUiFrame();
+}
+
+void ForceDeterministicNetplayStep()
+{
+    // Remote lockstep must not depend on per-process render pacing.
+    g_Supervisor.framerateMultiplier = 1.0f;
+    g_Supervisor.effectiveFramerateMultiplier = 1.0f;
+}
+
 void ResetLauncherState()
 {
+    TraceDiagnostic("reset-launcher-state", "-");
     RestoreNetplayMenuDefaults();
     g_State.host.Reset();
     g_State.guest.Reset();
@@ -1509,16 +1902,18 @@ void ResetLauncherState()
     g_State.useRelayTransport = false;
     g_State.isWaitingForStartup = false;
     g_State.titleColdStartRequested = false;
-    g_State.delay = 1;
+    g_State.delay = kDefaultDelay;
     g_State.currentDelayCooldown = 0;
     g_State.resyncTargetFrame = 0;
     g_State.resyncTriggered = false;
     g_State.lastFrame = -1;
     g_State.sessionBaseCalcCount = 0;
     g_State.lastPeriodicPingTick = 0;
+    g_State.lastRuntimeReceiveTick = 0;
     g_State.guestWaitStartTick = 0;
     g_State.lastRttMs = -1;
     g_State.nextSeq = 1;
+    g_State.predictionRollbackEnabled = true;
     SetStatus("no connection");
     ClearRuntimeCaches();
 }
@@ -1550,10 +1945,260 @@ void PruneOldFrameData(int frame)
     const int pruneFrame = frame - kFrameCacheSize;
     g_State.localInputs.erase(pruneFrame);
     g_State.remoteInputs.erase(pruneFrame);
+    g_State.predictedRemoteInputs.erase(pruneFrame);
     g_State.localSeeds.erase(pruneFrame);
     g_State.remoteSeeds.erase(pruneFrame);
     g_State.localCtrls.erase(pruneFrame);
     g_State.remoteCtrls.erase(pruneFrame);
+    g_State.predictedRemoteCtrls.erase(pruneFrame);
+    g_State.remoteFramesPendingRollbackCheck.erase(pruneFrame);
+}
+
+int OldestRollbackSnapshotFrame()
+{
+    for (const RollbackSnapshot &snapshot : g_State.rollbackSnapshots)
+    {
+        if (snapshot.stage == g_GameManager.currentStage)
+        {
+            return snapshot.frame;
+        }
+    }
+
+    return -1;
+}
+
+bool IsRollbackFrameTooOld(int frame, int *outOldestSnapshotFrame)
+{
+    const int oldestSnapshotFrame = OldestRollbackSnapshotFrame();
+    if (outOldestSnapshotFrame != nullptr)
+    {
+        *outOldestSnapshotFrame = oldestSnapshotFrame;
+    }
+
+    return frame >= 0 && oldestSnapshotFrame >= 0 && frame < oldestSnapshotFrame;
+}
+
+bool QueueRollbackFromFrame(int frame, const char *reason)
+{
+    if (frame < 0)
+    {
+        return false;
+    }
+
+    if (!IsRollbackEpochFrame(frame))
+    {
+        TraceDiagnostic("rollback-queue-drop-epoch", "frame=%d epochStart=%d reason=%s", frame,
+                        g_State.rollbackEpochStartFrame, reason != nullptr ? reason : "-");
+        return false;
+    }
+
+    int oldestSnapshotFrame = -1;
+    if (IsRollbackFrameTooOld(frame, &oldestSnapshotFrame))
+    {
+        TraceDiagnostic("rollback-queue-drop-too-old", "frame=%d oldestSnapshot=%d reason=%s", frame,
+                        oldestSnapshotFrame, reason != nullptr ? reason : "-");
+        return false;
+    }
+
+    if (g_State.pendingRollbackFrame < 0 || frame < g_State.pendingRollbackFrame)
+    {
+        g_State.pendingRollbackFrame = frame;
+    }
+
+    return true;
+}
+
+bool IsRollbackEpochFrame(int frame)
+{
+    return frame >= g_State.rollbackEpochStartFrame;
+}
+
+void ResetRollbackEpoch(int frame, const char *reason, int nextEpochStartFrame)
+{
+    TraceDiagnostic("rollback-epoch-reset",
+                    "frame=%d nextStart=%d reason=%s active=%d pending=%d snapshots=%d", frame,
+                    std::max(0, nextEpochStartFrame), reason != nullptr ? reason : "-",
+                    g_State.rollbackActive ? 1 : 0, g_State.pendingRollbackFrame,
+                    (int)g_State.rollbackSnapshots.size());
+
+    g_State.rollbackActive = false;
+    g_State.pendingRollbackFrame = -1;
+    g_State.rollbackTargetFrame = 0;
+    g_State.rollbackSendFrame = -1;
+    g_State.rollbackStage = -1;
+    g_State.lastRollbackMismatchFrame = -1;
+    g_State.lastRollbackSnapshotFrame = -1;
+    g_State.lastRollbackTargetFrame = -1;
+    g_State.seedValidationIgnoreUntilFrame = -1;
+    g_State.lastSeedRetryMismatchFrame = -1;
+    g_State.lastSeedRetryOlderThanSnapshotFrame = -1;
+    g_State.lastSeedRetryLocalSeed = 0;
+    g_State.lastSeedRetryRemoteSeed = 0;
+    g_State.rollbackSnapshots.clear();
+    g_State.predictedRemoteInputs.clear();
+    g_State.predictedRemoteCtrls.clear();
+    g_State.remoteFramesPendingRollbackCheck.clear();
+    g_State.stallFrameRequested = false;
+    g_State.rollbackEpochStartFrame = std::max(0, nextEpochStartFrame);
+
+    if (g_State.isConnected && !g_State.isTryingReconnect)
+    {
+        SetStatus("connected");
+    }
+}
+
+bool HasRollbackReplayHistory(int snapshotFrame, int rollbackTargetFrame, int *outRequiredStartFrame,
+                              int *outMissingLocalFrame, int *outMissingRemoteFrame)
+{
+    if (outRequiredStartFrame != nullptr)
+    {
+        *outRequiredStartFrame = std::max(0, snapshotFrame - g_State.delay);
+    }
+    if (outMissingLocalFrame != nullptr)
+    {
+        *outMissingLocalFrame = -1;
+    }
+    if (outMissingRemoteFrame != nullptr)
+    {
+        *outMissingRemoteFrame = -1;
+    }
+
+    const int startFrame = std::max(0, snapshotFrame - g_State.delay);
+    const int endFrame = rollbackTargetFrame - g_State.delay;
+    if (endFrame < startFrame)
+    {
+        return true;
+    }
+
+    for (int storedFrame = startFrame; storedFrame <= endFrame; ++storedFrame)
+    {
+        if (g_State.localInputs.find(storedFrame) == g_State.localInputs.end())
+        {
+            if (outMissingLocalFrame != nullptr)
+            {
+                *outMissingLocalFrame = storedFrame;
+            }
+            return false;
+        }
+
+        if (g_State.remoteInputs.find(storedFrame) == g_State.remoteInputs.end())
+        {
+            if (outMissingRemoteFrame != nullptr)
+            {
+                *outMissingRemoteFrame = storedFrame;
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool HasConsumedRemoteFrame(int frame)
+{
+    return frame < CurrentNetFrame() - g_State.delay;
+}
+
+void AdvanceConfirmedSyncFrame()
+{
+    while (true)
+    {
+        const int nextFrame = g_State.lastConfirmedSyncFrame + 1;
+        const auto remoteInputIt = g_State.remoteInputs.find(nextFrame);
+        if (remoteInputIt == g_State.remoteInputs.end())
+        {
+            break;
+        }
+        g_State.lastConfirmedSyncFrame = nextFrame;
+    }
+}
+
+bool ResolveRemoteFrameInput(int frame, u16 &outInput, InGameCtrlType &outCtrl, bool allowPrediction,
+                             bool &outUsedPrediction)
+{
+    outInput = 0;
+    outCtrl = IGC_NONE;
+    outUsedPrediction = false;
+
+    const auto remoteIt = g_State.remoteInputs.find(frame);
+    if (remoteIt != g_State.remoteInputs.end())
+    {
+        outInput = WriteToInt(remoteIt->second);
+        const auto remoteCtrlIt = g_State.remoteCtrls.find(frame);
+        if (remoteCtrlIt != g_State.remoteCtrls.end())
+        {
+            outCtrl = remoteCtrlIt->second;
+        }
+        return true;
+    }
+
+    if (!allowPrediction || !g_State.predictionRollbackEnabled)
+    {
+        return false;
+    }
+
+    auto predictedIt = g_State.predictedRemoteInputs.find(frame);
+    if (predictedIt == g_State.predictedRemoteInputs.end())
+    {
+        u16 predictedInput = 0;
+        InGameCtrlType predictedCtrl = IGC_NONE;
+        const char *predictionSource = "zero";
+        const auto prevRemoteIt = g_State.remoteInputs.find(frame - 1);
+        if (prevRemoteIt != g_State.remoteInputs.end())
+        {
+            predictedInput = WriteToInt(prevRemoteIt->second);
+            predictionSource = "remote-prev";
+        }
+        else
+        {
+            const auto prevPredictedIt = g_State.predictedRemoteInputs.find(frame - 1);
+            if (prevPredictedIt != g_State.predictedRemoteInputs.end())
+            {
+                predictedInput = WriteToInt(prevPredictedIt->second);
+                predictionSource = "pred-prev";
+            }
+        }
+
+        // Do not predict a repeated pause/menu edge across frames.
+        predictedInput &= (u16)~TH_BUTTON_MENU;
+
+        const auto prevRemoteCtrlIt = g_State.remoteCtrls.find(frame - 1);
+        if (prevRemoteCtrlIt != g_State.remoteCtrls.end())
+        {
+            predictedCtrl = prevRemoteCtrlIt->second;
+        }
+        else
+        {
+            const auto prevPredictedCtrlIt = g_State.predictedRemoteCtrls.find(frame - 1);
+            if (prevPredictedCtrlIt != g_State.predictedRemoteCtrls.end())
+            {
+                predictedCtrl = prevPredictedCtrlIt->second;
+            }
+        }
+
+        Bits<16> predictedBits;
+        ReadFromInt(predictedBits, predictedInput);
+        g_State.predictedRemoteInputs[frame] = predictedBits;
+        g_State.predictedRemoteCtrls[frame] = predictedCtrl;
+        predictedIt = g_State.predictedRemoteInputs.find(frame);
+        TraceDiagnostic("predict-remote-frame", "frame=%d source=%s input=%s ctrl=%s", frame, predictionSource,
+                        FormatInputBits(predictedInput).c_str(), InGameCtrlToString(predictedCtrl));
+    }
+
+    outInput = WriteToInt(predictedIt->second);
+    const auto predictedCtrlIt = g_State.predictedRemoteCtrls.find(frame);
+    if (predictedCtrlIt != g_State.predictedRemoteCtrls.end())
+    {
+        outCtrl = predictedCtrlIt->second;
+    }
+    outUsedPrediction = true;
+    return true;
+}
+
+bool FrameHasMenuBit(const std::map<int, Bits<16>> &inputMap, int frame)
+{
+    const auto it = inputMap.find(frame);
+    return it != inputMap.end() && (WriteToInt(it->second) & TH_BUTTON_MENU) != 0;
 }
 
 InGameCtrlType CaptureControlKeys()
@@ -1599,6 +2244,7 @@ Pack MakePing(Control ctrlType)
     pack.ctrl.ctrlType = ctrlType;
     pack.ctrl.initSetting.delay = g_State.delay;
     pack.ctrl.initSetting.ver = kProtocolVersion;
+    pack.ctrl.initSetting.flags = g_State.predictionRollbackEnabled ? InitSettingFlag_PredictionRollback : 0;
     TraceLauncherPacket("launcher-send-ping", pack);
     return pack;
 }
@@ -1615,7 +2261,7 @@ void CaptureRollbackSnapshot(int frame)
         return;
     }
 
-    if (g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER || g_GameManager.demoMode || g_State.rollbackActive)
+    if (!CanUseRollbackSnapshots() || g_State.rollbackActive)
     {
         return;
     }
@@ -1632,7 +2278,7 @@ void CaptureRollbackSnapshot(int frame)
         return;
     }
 
-    if (frame != 0 && frame % kRollbackSnapshotInterval != 0)
+    if (!g_State.rollbackSnapshots.empty() && frame != 0 && frame % kRollbackSnapshotInterval != 0)
     {
         return;
     }
@@ -1661,6 +2307,42 @@ void CaptureRollbackSnapshot(int frame)
     snapshot.stageState = g_Stage;
     snapshot.eclManager = g_EclManager;
     snapshot.rng = g_Rng;
+    snapshot.enemyEclRuntimeState = EnemyEclInstr::CaptureRuntimeState();
+    snapshot.screenEffectRuntimeState = ScreenEffect::CaptureRuntimeState();
+    snapshot.controllerRuntimeState = Controller::CaptureRuntimeState();
+    snapshot.supervisorRuntimeState.calcCount = g_Supervisor.calcCount;
+    snapshot.supervisorRuntimeState.wantedState = g_Supervisor.wantedState;
+    snapshot.supervisorRuntimeState.curState = g_Supervisor.curState;
+    snapshot.supervisorRuntimeState.wantedState2 = g_Supervisor.wantedState2;
+    snapshot.supervisorRuntimeState.unk194 = g_Supervisor.unk194;
+    snapshot.supervisorRuntimeState.unk198 = g_Supervisor.unk198;
+    snapshot.supervisorRuntimeState.isInEnding = g_Supervisor.isInEnding;
+    snapshot.supervisorRuntimeState.vsyncEnabled = g_Supervisor.vsyncEnabled;
+    snapshot.supervisorRuntimeState.lastFrameTime = g_Supervisor.lastFrameTime;
+    snapshot.supervisorRuntimeState.effectiveFramerateMultiplier = g_Supervisor.effectiveFramerateMultiplier;
+    snapshot.supervisorRuntimeState.framerateMultiplier = g_Supervisor.framerateMultiplier;
+    snapshot.supervisorRuntimeState.unk1b4 = g_Supervisor.unk1b4;
+    snapshot.supervisorRuntimeState.unk1b8 = g_Supervisor.unk1b8;
+    snapshot.supervisorRuntimeState.startupTimeBeforeMenuMusic = g_Supervisor.startupTimeBeforeMenuMusic;
+    snapshot.gameWindowRuntimeState.tickCountToEffectiveFramerate = g_TickCountToEffectiveFramerate;
+    snapshot.gameWindowRuntimeState.lastFrameTime = g_LastFrameTime;
+    snapshot.gameWindowRuntimeState.curFrame = g_GameWindow.curFrame;
+    snapshot.stageRuntimeState.objectInstances.clear();
+    snapshot.stageRuntimeState.quadVms.clear();
+    if (g_Stage.objectInstances != nullptr && g_Stage.objectsCount > 0)
+    {
+        snapshot.stageRuntimeState.objectInstances.assign(g_Stage.objectInstances,
+                                                         g_Stage.objectInstances + g_Stage.objectsCount);
+    }
+    if (g_Stage.quadVms != nullptr && g_Stage.quadCount > 0)
+    {
+        snapshot.stageRuntimeState.quadVms.assign(g_Stage.quadVms, g_Stage.quadVms + g_Stage.quadCount);
+    }
+    std::memcpy(snapshot.soundRuntimeState.soundBuffersToPlay, g_SoundPlayer.soundBuffersToPlay,
+                sizeof(snapshot.soundRuntimeState.soundBuffersToPlay));
+    std::memcpy(snapshot.soundRuntimeState.queuedSfxState, g_SoundPlayer.unk408,
+                sizeof(snapshot.soundRuntimeState.queuedSfxState));
+    snapshot.soundRuntimeState.isLooping = g_SoundPlayer.isLooping;
     snapshot.lastFrameInput = g_LastFrameInput;
     snapshot.curFrameInput = g_CurFrameInput;
     snapshot.eighthFrameHeldInput = g_IsEigthFrameOfHeldInput;
@@ -1695,6 +2377,48 @@ bool RestoreRollbackSnapshot(const RollbackSnapshot &snapshot)
     g_Stage = snapshot.stageState;
     g_EclManager = snapshot.eclManager;
     g_Rng = snapshot.rng;
+    if (!snapshot.stageRuntimeState.objectInstances.empty())
+    {
+        if (g_Stage.objectInstances == nullptr || (int)snapshot.stageRuntimeState.objectInstances.size() != g_Stage.objectsCount)
+        {
+            return false;
+        }
+        std::memcpy(g_Stage.objectInstances, snapshot.stageRuntimeState.objectInstances.data(),
+                    snapshot.stageRuntimeState.objectInstances.size() * sizeof(RawStageObjectInstance));
+    }
+    if (!snapshot.stageRuntimeState.quadVms.empty())
+    {
+        if (g_Stage.quadVms == nullptr || (int)snapshot.stageRuntimeState.quadVms.size() != g_Stage.quadCount)
+        {
+            return false;
+        }
+        std::memcpy(g_Stage.quadVms, snapshot.stageRuntimeState.quadVms.data(),
+                    snapshot.stageRuntimeState.quadVms.size() * sizeof(AnmVm));
+    }
+    EnemyEclInstr::RestoreRuntimeState(snapshot.enemyEclRuntimeState);
+    ScreenEffect::RestoreRuntimeState(snapshot.screenEffectRuntimeState);
+    Controller::RestoreRuntimeState(snapshot.controllerRuntimeState);
+    g_Supervisor.calcCount = snapshot.supervisorRuntimeState.calcCount;
+    g_Supervisor.wantedState = snapshot.supervisorRuntimeState.wantedState;
+    g_Supervisor.curState = snapshot.supervisorRuntimeState.curState;
+    g_Supervisor.wantedState2 = snapshot.supervisorRuntimeState.wantedState2;
+    g_Supervisor.unk194 = snapshot.supervisorRuntimeState.unk194;
+    g_Supervisor.unk198 = snapshot.supervisorRuntimeState.unk198;
+    g_Supervisor.isInEnding = snapshot.supervisorRuntimeState.isInEnding;
+    g_Supervisor.vsyncEnabled = snapshot.supervisorRuntimeState.vsyncEnabled;
+    g_Supervisor.lastFrameTime = snapshot.supervisorRuntimeState.lastFrameTime;
+    g_Supervisor.effectiveFramerateMultiplier = snapshot.supervisorRuntimeState.effectiveFramerateMultiplier;
+    g_Supervisor.framerateMultiplier = snapshot.supervisorRuntimeState.framerateMultiplier;
+    g_Supervisor.unk1b4 = snapshot.supervisorRuntimeState.unk1b4;
+    g_Supervisor.unk1b8 = snapshot.supervisorRuntimeState.unk1b8;
+    g_Supervisor.startupTimeBeforeMenuMusic = snapshot.supervisorRuntimeState.startupTimeBeforeMenuMusic;
+    g_TickCountToEffectiveFramerate = snapshot.gameWindowRuntimeState.tickCountToEffectiveFramerate;
+    g_LastFrameTime = snapshot.gameWindowRuntimeState.lastFrameTime;
+    g_GameWindow.curFrame = snapshot.gameWindowRuntimeState.curFrame;
+    std::memcpy(g_SoundPlayer.soundBuffersToPlay, snapshot.soundRuntimeState.soundBuffersToPlay,
+                sizeof(g_SoundPlayer.soundBuffersToPlay));
+    std::memcpy(g_SoundPlayer.unk408, snapshot.soundRuntimeState.queuedSfxState, sizeof(g_SoundPlayer.unk408));
+    g_SoundPlayer.isLooping = snapshot.soundRuntimeState.isLooping;
     g_LastFrameInput = snapshot.lastFrameInput;
     g_CurFrameInput = snapshot.curFrameInput;
     g_IsEigthFrameOfHeldInput = snapshot.eighthFrameHeldInput;
@@ -1739,13 +2463,6 @@ bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlTy
     }
     const u16 selfInput = WriteToInt(selfIt->second);
 
-    const auto remoteIt = g_State.remoteInputs.find(delayedFrame);
-    if (remoteIt == g_State.remoteInputs.end())
-    {
-        return false;
-    }
-    const u16 remoteInput = WriteToInt(remoteIt->second);
-
     InGameCtrlType selfCtrl = IGC_NONE;
     const auto selfCtrlIt = g_State.localCtrls.find(delayedFrame);
     if (selfCtrlIt != g_State.localCtrls.end())
@@ -1753,11 +2470,12 @@ bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlTy
         selfCtrl = selfCtrlIt->second;
     }
 
+    u16 remoteInput = 0;
     InGameCtrlType remoteCtrl = IGC_NONE;
-    const auto remoteCtrlIt = g_State.remoteCtrls.find(delayedFrame);
-    if (remoteCtrlIt != g_State.remoteCtrls.end())
+    bool usedPrediction = false;
+    if (!ResolveRemoteFrameInput(delayedFrame, remoteInput, remoteCtrl, false, usedPrediction))
     {
-        remoteCtrl = remoteCtrlIt->second;
+        return false;
     }
 
     if (selfCtrl != IGC_NONE && remoteCtrl != IGC_NONE)
@@ -1786,43 +2504,92 @@ bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlTy
     return true;
 }
 
-bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame)
+bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderThanSnapshotFrame)
 {
-    if (g_State.rollbackActive || g_State.rollbackSnapshots.empty() || mismatchFrame <= 0)
+    if (g_State.rollbackActive || g_State.rollbackSnapshots.empty() || mismatchFrame < 0)
     {
+        TraceDiagnostic("rollback-start-skip", "current=%d mismatch=%d active=%d snapshots=%d", currentFrame,
+                        mismatchFrame, g_State.rollbackActive ? 1 : 0, (int)g_State.rollbackSnapshots.size());
         return false;
     }
 
-    int lastSynchronizedFrame = std::min(g_State.lastConfirmedSyncFrame, mismatchFrame - 1);
-    while (lastSynchronizedFrame >= 0)
+    if (!IsRollbackEpochFrame(mismatchFrame))
     {
-        const auto localSeedIt = g_State.localSeeds.find(lastSynchronizedFrame);
-        const auto remoteSeedIt = g_State.remoteSeeds.find(lastSynchronizedFrame);
-        if (localSeedIt != g_State.localSeeds.end() && remoteSeedIt != g_State.remoteSeeds.end() &&
-            localSeedIt->second == remoteSeedIt->second)
+        TraceDiagnostic("rollback-start-drop-epoch", "current=%d mismatch=%d epochStart=%d", currentFrame,
+                        mismatchFrame, g_State.rollbackEpochStartFrame);
+        if (g_State.pendingRollbackFrame == mismatchFrame)
         {
-            break;
+            g_State.pendingRollbackFrame = -1;
         }
-        --lastSynchronizedFrame;
-    }
-
-    if (lastSynchronizedFrame < 0)
-    {
         return false;
     }
+
+    int oldestSnapshotFrame = -1;
+    if (IsRollbackFrameTooOld(mismatchFrame, &oldestSnapshotFrame))
+    {
+        TraceDiagnostic("rollback-start-drop-too-old", "current=%d mismatch=%d oldestSnapshot=%d", currentFrame,
+                        mismatchFrame, oldestSnapshotFrame);
+        if (g_State.pendingRollbackFrame == mismatchFrame)
+        {
+            g_State.pendingRollbackFrame = -1;
+        }
+        return false;
+    }
+
+    const int rollbackFrame = std::max(0, mismatchFrame);
+    int availableRemoteFrame = std::max(0, rollbackFrame - 1);
+    while (g_State.remoteInputs.find(availableRemoteFrame + 1) != g_State.remoteInputs.end())
+    {
+        ++availableRemoteFrame;
+    }
+
+    const int rollbackTargetFrame =
+        g_State.predictionRollbackEnabled ? std::min(currentFrame, availableRemoteFrame + g_State.delay) : currentFrame;
 
     const RollbackSnapshot *snapshot = nullptr;
     for (auto it = g_State.rollbackSnapshots.rbegin(); it != g_State.rollbackSnapshots.rend(); ++it)
     {
-        if (it->stage == g_GameManager.currentStage && it->frame <= lastSynchronizedFrame)
+        if (it->stage == g_GameManager.currentStage && it->frame <= rollbackFrame &&
+            (olderThanSnapshotFrame < 0 || it->frame < olderThanSnapshotFrame) && IsRollbackEpochFrame(it->frame))
         {
             snapshot = &(*it);
             break;
         }
     }
 
-    if (snapshot == nullptr || snapshot->frame >= currentFrame || !RestoreRollbackSnapshot(*snapshot))
+    int requiredStartFrame = -1;
+    int missingLocalFrame = -1;
+    int missingRemoteFrame = -1;
+    if (snapshot == nullptr || snapshot->frame > rollbackTargetFrame)
     {
+        TraceDiagnostic("rollback-start-fail",
+                        "current=%d mismatch=%d rollbackFrame=%d target=%d availableRemote=%d snapshot=%d olderThan=%d",
+                        currentFrame, mismatchFrame, rollbackFrame, rollbackTargetFrame, availableRemoteFrame,
+                        snapshot != nullptr ? snapshot->frame : -1, olderThanSnapshotFrame);
+        return false;
+    }
+
+    if (!HasRollbackReplayHistory(snapshot->frame, rollbackTargetFrame, &requiredStartFrame, &missingLocalFrame,
+                                  &missingRemoteFrame))
+    {
+        TraceDiagnostic(
+            "rollback-start-drop-history",
+            "current=%d mismatch=%d snapshot=%d target=%d requiredStart=%d missingLocal=%d missingRemote=%d",
+            currentFrame, mismatchFrame, snapshot->frame, rollbackTargetFrame, requiredStartFrame, missingLocalFrame,
+            missingRemoteFrame);
+        if (g_State.pendingRollbackFrame == mismatchFrame)
+        {
+            g_State.pendingRollbackFrame = -1;
+        }
+        return false;
+    }
+
+    if (!RestoreRollbackSnapshot(*snapshot))
+    {
+        TraceDiagnostic("rollback-start-fail",
+                        "current=%d mismatch=%d rollbackFrame=%d target=%d availableRemote=%d snapshot=%d",
+                        currentFrame, mismatchFrame, rollbackFrame, rollbackTargetFrame, availableRemoteFrame,
+                        snapshot->frame);
         return false;
     }
 
@@ -1832,16 +2599,91 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame)
     }
 
     g_State.rollbackActive = true;
-    g_State.rollbackTargetFrame = currentFrame;
+    g_State.rollbackTargetFrame = rollbackTargetFrame;
+    g_State.rollbackSendFrame = currentFrame;
+    g_State.lastRollbackMismatchFrame = mismatchFrame;
+    g_State.lastRollbackSnapshotFrame = snapshot->frame;
+    g_State.lastRollbackTargetFrame = rollbackTargetFrame;
+    g_State.seedValidationIgnoreUntilFrame =
+        std::max(g_State.seedValidationIgnoreUntilFrame, availableRemoteFrame + g_State.delay);
     g_State.currentNetFrame = snapshot->frame;
     g_State.lastFrame = snapshot->frame - 1;
-    g_State.lastConfirmedSyncFrame = lastSynchronizedFrame;
+    g_State.lastConfirmedSyncFrame = availableRemoteFrame;
     g_State.resyncTriggered = false;
     g_State.resyncTargetFrame = 0;
     g_State.isSync = true;
     g_State.currentCtrl = IGC_NONE;
+    TraceDiagnostic("rollback-start",
+                    "current=%d mismatch=%d rollbackFrame=%d snapshot=%d target=%d available=%d olderThan=%d",
+                    currentFrame, mismatchFrame, rollbackFrame, snapshot->frame, rollbackTargetFrame,
+                    availableRemoteFrame, olderThanSnapshotFrame);
     SetStatus("rollback catchup...");
     return true;
+}
+
+bool TryStartQueuedRollback(int currentFrame)
+{
+    if (!g_State.predictionRollbackEnabled || g_State.rollbackActive || g_State.pendingRollbackFrame < 0)
+    {
+        return false;
+    }
+
+    if (!CanUseRollbackSnapshots())
+    {
+        TraceDiagnostic("rollback-queued-deferred", "current=%d pending=%d canUseSnapshots=0", currentFrame,
+                        g_State.pendingRollbackFrame);
+        return false;
+    }
+
+    int oldestSnapshotFrame = -1;
+    if (IsRollbackFrameTooOld(g_State.pendingRollbackFrame, &oldestSnapshotFrame))
+    {
+        TraceDiagnostic("rollback-queued-clear-too-old", "current=%d pending=%d oldestSnapshot=%d", currentFrame,
+                        g_State.pendingRollbackFrame, oldestSnapshotFrame);
+        g_State.pendingRollbackFrame = -1;
+        if (!g_State.rollbackActive)
+        {
+            SetStatus("connected");
+        }
+        return false;
+    }
+
+    const int mismatchFrame = g_State.pendingRollbackFrame;
+    if (TryStartAutomaticRollback(currentFrame, mismatchFrame))
+    {
+        g_State.pendingRollbackFrame = -1;
+        return true;
+    }
+
+    return false;
+}
+
+void RefreshRollbackFrameState(int frame)
+{
+    if (frame < 0)
+    {
+        return;
+    }
+
+    g_State.localSeeds[frame] = g_Rng.seed;
+}
+
+void CommitProcessedFrameState(int frame)
+{
+    if (frame < 0)
+    {
+        return;
+    }
+
+    // localSeeds[N] is sampled at the beginning of frame N. Once frame N has
+    // finished, we already know the exact pre-frame seed for N+1.
+    g_State.localSeeds[frame + 1] = g_Rng.seed;
+}
+
+bool IsMenuTransitionFrame(int frame)
+{
+    return FrameHasMenuBit(g_State.localInputs, frame) || FrameHasMenuBit(g_State.remoteInputs, frame) ||
+           FrameHasMenuBit(g_State.predictedRemoteInputs, frame);
 }
 
 void SendPeriodicPing()
@@ -1871,6 +2713,7 @@ void BeginSessionStartupWait()
     g_State.currentNetFrame = 0;
     ClearRuntimeCaches();
     Session::SetActiveSession(g_NetSession);
+    TraceDiagnostic("begin-startup-wait", "-");
     SetStatus("waiting for peer startup...");
 }
 
@@ -1879,11 +2722,33 @@ void HandleStartGameHandshake()
     BeginSessionStartupWait();
 }
 
+bool TryBeginStartupWaitFromRuntimePacket(const Pack &pack)
+{
+    if (g_State.isSessionActive || g_State.isWaitingForStartup)
+    {
+        return false;
+    }
+    if (pack.type != PACK_USUAL || pack.ctrl.ctrlType != Ctrl_Key)
+    {
+        return false;
+    }
+
+    BeginSessionStartupWait();
+    TraceDiagnostic("startup-wait-from-runtime-packet", "frame=%d seq=%u", pack.ctrl.frame, pack.seq);
+    return true;
+}
+
 void EnterConnectedState()
 {
     g_State.isConnected = true;
     g_State.lastPeriodicPingTick = 0;
+    if (g_State.lastRttMs < 0 && g_State.useRelayTransport && g_Relay.lastRttMs >= 0)
+    {
+        g_State.lastRttMs = g_Relay.lastRttMs;
+    }
+    TraceDiagnostic("enter-connected", "-");
     SetStatus("connected");
+    SendPeriodicPing();
 }
 
 void HandleLauncherPacket(const Pack &pack)
@@ -1914,6 +2779,8 @@ void HandleLauncherPacket(const Pack &pack)
         {
             reply.ctrl.initSetting.delay = g_State.delay;
             reply.ctrl.initSetting.ver = kProtocolVersion;
+            reply.ctrl.initSetting.flags =
+                g_State.predictionRollbackEnabled ? InitSettingFlag_PredictionRollback : 0;
         }
         SendPacket(reply);
         TraceLauncherPacket("launcher-send-pong", reply);
@@ -1928,6 +2795,7 @@ void HandleLauncherPacket(const Pack &pack)
         else if (g_State.isGuest && pack.ctrl.ctrlType == Ctrl_Set_InitSetting)
         {
             g_State.delay = std::clamp(pack.ctrl.initSetting.delay, 0, kMaxDelay);
+            SetPredictionRollbackEnabled((pack.ctrl.initSetting.flags & InitSettingFlag_PredictionRollback) != 0);
         }
         return;
     }
@@ -1946,6 +2814,7 @@ void HandleLauncherPacket(const Pack &pack)
         else if (g_State.isGuest && pack.ctrl.ctrlType == Ctrl_Set_InitSetting)
         {
             g_State.delay = std::clamp(pack.ctrl.initSetting.delay, 0, kMaxDelay);
+            SetPredictionRollbackEnabled((pack.ctrl.initSetting.flags & InitSettingFlag_PredictionRollback) != 0);
         }
     }
 }
@@ -1967,6 +2836,10 @@ void ProcessLauncherHost()
         if (!hasData)
         {
             break;
+        }
+        if (TryBeginStartupWaitFromRuntimePacket(pack))
+        {
+            return;
         }
         HandleLauncherPacket(pack);
         if (!g_State.versionMatched)
@@ -2011,6 +2884,10 @@ void ProcessLauncherGuest()
             break;
         }
         gotAnyData = true;
+        if (TryBeginStartupWaitFromRuntimePacket(pack))
+        {
+            return;
+        }
         HandleLauncherPacket(pack);
         if (!g_State.versionMatched)
         {
@@ -2056,13 +2933,109 @@ void ProcessLauncherGuest()
 
 void StoreRemoteKeyPacket(const Pack &pack)
 {
+    TraceDiagnostic("recv-key-packet", "frame=%d seq=%u window=%s", pack.ctrl.frame, pack.seq,
+                    BuildCtrlPacketWindowSummary(pack.ctrl, 4).c_str());
+    if (g_State.isSessionActive && !g_State.isWaitingForStartup)
+    {
+        const int currentFrame = CurrentNetFrame();
+        const int maxAcceptedFrame = currentFrame + kFrameCacheSize;
+        if (pack.ctrl.frame > maxAcceptedFrame)
+        {
+            TraceDiagnostic("recv-key-packet-drop-future", "frame=%d current=%d maxAccepted=%d", pack.ctrl.frame,
+                            currentFrame, maxAcceptedFrame);
+            return;
+        }
+    }
     for (int i = 0; i < kKeyPackFrameCount; ++i)
     {
         const int frame = pack.ctrl.frame - i;
+        const Bits<16> actualBits = pack.ctrl.keys[i];
+        const InGameCtrlType actualCtrl = pack.ctrl.inGameCtrl[i];
+        const u16 actualSeed = pack.ctrl.rngSeed[i];
+        const bool consumedFrame = g_State.predictionRollbackEnabled && HasConsumedRemoteFrame(frame);
+        const auto existingInputIt = g_State.remoteInputs.find(frame);
+        const auto existingSeedIt = g_State.remoteSeeds.find(frame);
+        const auto existingCtrlIt = g_State.remoteCtrls.find(frame);
+        const bool actualChanged =
+            existingInputIt == g_State.remoteInputs.end() ||
+            WriteToInt(existingInputIt->second) != WriteToInt(actualBits) ||
+            existingSeedIt == g_State.remoteSeeds.end() || existingSeedIt->second != actualSeed ||
+            existingCtrlIt == g_State.remoteCtrls.end() || existingCtrlIt->second != actualCtrl;
+
         g_State.remoteInputs[frame] = pack.ctrl.keys[i];
-        g_State.remoteSeeds[frame] = pack.ctrl.rngSeed[i];
-        g_State.remoteCtrls[frame] = pack.ctrl.inGameCtrl[i];
+        g_State.remoteSeeds[frame] = actualSeed;
+        g_State.remoteCtrls[frame] = actualCtrl;
+
+        if (actualChanged)
+        {
+            g_State.remoteFramesPendingRollbackCheck.insert(frame);
+        }
+
+        const auto pendingCheckIt = g_State.remoteFramesPendingRollbackCheck.find(frame);
+        if (pendingCheckIt == g_State.remoteFramesPendingRollbackCheck.end())
+        {
+            continue;
+        }
+        if (!consumedFrame)
+        {
+            if (actualChanged)
+            {
+                TraceDiagnostic("recv-key-frame-buffered",
+                                "frame=%d input=%s seed=%u ctrl=%s consumed=0 pendingCheck=1", frame,
+                                FormatInputBits(WriteToInt(actualBits)).c_str(), actualSeed,
+                                InGameCtrlToString(actualCtrl));
+            }
+            continue;
+        }
+
+        const auto predictedIt = g_State.predictedRemoteInputs.find(frame);
+        const auto predictedCtrlIt = g_State.predictedRemoteCtrls.find(frame);
+        bool queuedRollback = false;
+        bool predictedMismatch = false;
+        const bool isRollbackEpochFrame = IsRollbackEpochFrame(frame);
+        if (predictedIt != g_State.predictedRemoteInputs.end() || predictedCtrlIt != g_State.predictedRemoteCtrls.end())
+        {
+            const u16 predictedInput =
+                predictedIt != g_State.predictedRemoteInputs.end() ? WriteToInt(predictedIt->second) : 0;
+            const InGameCtrlType predictedCtrl =
+                predictedCtrlIt != g_State.predictedRemoteCtrls.end() ? predictedCtrlIt->second : IGC_NONE;
+            predictedMismatch = predictedInput != WriteToInt(actualBits) || predictedCtrl != actualCtrl;
+            if (predictedMismatch && !IsCurrentUiFrame() && isRollbackEpochFrame)
+            {
+                queuedRollback = QueueRollbackFromFrame(frame, "recv-prediction");
+            }
+            TraceDiagnostic("recv-key-frame-prediction-check",
+                            "frame=%d actual=%s/%u/%s predicted=%s/%s mismatch=%d ui=%d epoch=%d queued=%d", frame,
+                            FormatInputBits(WriteToInt(actualBits)).c_str(), actualSeed,
+                            InGameCtrlToString(actualCtrl), FormatInputBits(predictedInput).c_str(),
+                            InGameCtrlToString(predictedCtrl), predictedMismatch ? 1 : 0, IsCurrentUiFrame() ? 1 : 0,
+                            isRollbackEpochFrame ? 1 : 0, queuedRollback ? 1 : 0);
+            g_State.predictedRemoteInputs.erase(frame);
+            g_State.predictedRemoteCtrls.erase(frame);
+        }
+
+        const auto localSeedIt = g_State.localSeeds.find(frame);
+        const bool seedMismatch = localSeedIt != g_State.localSeeds.end() && localSeedIt->second != actualSeed;
+        if (seedMismatch && !predictedMismatch && !IsCurrentUiFrame() && isRollbackEpochFrame)
+        {
+            TraceDiagnostic("recv-key-frame-seed-mismatch",
+                            "frame=%d input=%s localSeed=%u remoteSeed=%u ctrl=%s ignored=1", frame,
+                            FormatInputBits(WriteToInt(actualBits)).c_str(), localSeedIt->second, actualSeed,
+                            InGameCtrlToString(actualCtrl));
+        }
+        TraceDiagnostic("recv-key-frame-commit",
+                        "frame=%d changed=%d consumed=1 input=%s seed=%u ctrl=%s localSeed=%d seedMismatch=%d "
+                        "queued=%d",
+                        frame,
+                        actualChanged ? 1 : 0, FormatInputBits(WriteToInt(actualBits)).c_str(), actualSeed,
+                        InGameCtrlToString(actualCtrl),
+                        localSeedIt != g_State.localSeeds.end() ? (int)localSeedIt->second : -1,
+                        seedMismatch ? 1 : 0,
+                        queuedRollback ? 1 : 0);
+        g_State.remoteFramesPendingRollbackCheck.erase(frame);
     }
+
+    AdvanceConfirmedSyncFrame();
 }
 
 bool TryActivateFromStartupPacket()
@@ -2106,8 +3079,11 @@ bool ReceiveRuntimePackets()
             break;
         }
         gotAnyData = true;
+        g_State.lastRuntimeReceiveTick = SDL_GetTicks64();
         if (pack.type != PACK_USUAL)
         {
+            TraceDiagnostic("recv-runtime-packet-skip", "type=%d ctrl=%s seq=%u", pack.type,
+                            ControlToString(pack.ctrl.ctrlType), pack.seq);
             continue;
         }
         if (pack.ctrl.ctrlType == Ctrl_Key)
@@ -2124,6 +3100,17 @@ bool ReceiveRuntimePackets()
                 g_State.resyncTriggered = true;
                 g_State.resyncTargetFrame = frameToResync;
             }
+            TraceDiagnostic("recv-resync-packet", "frameToResync=%d current=%d accepted=%d", frameToResync,
+                            currentFrame,
+                            (frameToResync > currentFrame &&
+                             frameToResync <= currentFrame + g_State.delay * 2 + 2)
+                                ? 1
+                                : 0);
+        }
+        else
+        {
+            TraceDiagnostic("recv-runtime-packet", "type=%d ctrl=%s seq=%u", pack.type,
+                            ControlToString(pack.ctrl.ctrlType), pack.seq);
         }
     }
     return gotAnyData;
@@ -2167,6 +3154,7 @@ void SendKeyPacket(int frame)
         const auto ctrlIt = g_State.localCtrls.find(srcFrame);
         pack.ctrl.inGameCtrl[i] = ctrlIt != g_State.localCtrls.end() ? ctrlIt->second : IGC_NONE;
     }
+    TraceDiagnostic("send-key-packet", "frame=%d window=%s", frame, BuildCtrlPacketWindowSummary(pack.ctrl, 4).c_str());
     SendPacket(pack);
 }
 
@@ -2176,6 +3164,7 @@ void SendResyncPacket()
     pack.type = PACK_USUAL;
     pack.ctrl.ctrlType = Ctrl_Try_Resync;
     pack.ctrl.resyncSetting.frameToResync = g_State.resyncTargetFrame;
+    TraceDiagnostic("send-resync-packet", "frameToResync=%d", g_State.resyncTargetFrame);
     SendPacket(pack);
 }
 
@@ -2186,14 +3175,22 @@ void HandleDesync(int frame)
         return;
     }
 
+    if (g_State.predictionRollbackEnabled)
+    {
+        return;
+    }
+
     if (g_State.resyncTriggered && g_State.resyncTargetFrame <= frame)
     {
         g_State.resyncTriggered = false;
         ReceiveRuntimePackets();
         g_Rng.seed = 0;
         g_State.remoteInputs.clear();
+        g_State.predictedRemoteInputs.clear();
         g_State.remoteSeeds.clear();
         g_State.remoteCtrls.clear();
+        g_State.predictedRemoteCtrls.clear();
+        g_State.pendingRollbackFrame = -1;
         g_State.currentCtrl = IGC_NONE;
         g_State.isSync = true;
         return;
@@ -2252,63 +3249,240 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
 
     u16 remoteInput = 0;
     InGameCtrlType remoteCtrl = IGC_NONE;
-    bool hasRemoteData = false;
-    const Uint64 waitUntil = SDL_GetTicks64() + kDisconnectTimeoutMs;
-    Uint64 nextResendTick = SDL_GetTicks64() + kReconnectPingMs;
+    bool usedPrediction = false;
+    const bool rollbackEpochBarrier = !isInUi && !IsRollbackEpochFrame(delayedFrame);
+    const bool remoteMenuBarrier =
+        !isInUi && (FrameHasMenuBit(g_State.remoteInputs, delayedFrame - 1) ||
+                    FrameHasMenuBit(g_State.predictedRemoteInputs, delayedFrame - 1));
+    const bool requiresAccurateRemoteInput =
+        !isInUi && (rollbackEpochBarrier || ((selfInput & TH_BUTTON_MENU) != 0) || remoteMenuBarrier);
+    const bool allowPrediction =
+        g_State.predictionRollbackEnabled && CanUseRollbackSnapshots() && !isInUi && !requiresAccurateRemoteInput;
+    const bool canRollbackNow =
+        g_State.predictionRollbackEnabled && CanUseRollbackSnapshots() && !isInUi && !rollbackEpochBarrier;
+    TraceDiagnostic("resolve-frame-begin",
+                    "frame=%d delayed=%d ui=%d self=%s selfCtrl=%s allowPrediction=%d epochBarrier=%d "
+                    "remoteMenuBarrier=%d requiresAccurate=%d canRollbackNow=%d",
+                    frame, delayedFrame, isInUi ? 1 : 0, FormatInputBits(selfInput).c_str(),
+                    InGameCtrlToString(selfCtrl), allowPrediction ? 1 : 0, rollbackEpochBarrier ? 1 : 0,
+                    remoteMenuBarrier ? 1 : 0,
+                    requiresAccurateRemoteInput ? 1 : 0, canRollbackNow ? 1 : 0);
+    const auto tryCompareSyncForFrame = [&](int syncFrame) -> bool {
+        const auto remoteSeedIt = g_State.remoteSeeds.find(syncFrame);
+        const auto localSeedIt = g_State.localSeeds.find(syncFrame);
+        if (remoteSeedIt == g_State.remoteSeeds.end() || localSeedIt == g_State.localSeeds.end())
+        {
+            TraceDiagnostic("resolve-frame-sync-missing-seed", "frame=%d remoteSeed=%d localSeed=%d", syncFrame,
+                            remoteSeedIt != g_State.remoteSeeds.end() ? (int)remoteSeedIt->second : -1,
+                            localSeedIt != g_State.localSeeds.end() ? (int)localSeedIt->second : -1);
+            return false;
+        }
 
-    while (SDL_GetTicks64() < waitUntil)
+        if (remoteSeedIt->second == localSeedIt->second)
+        {
+            g_State.isSync = true;
+            if (syncFrame >= g_State.seedValidationIgnoreUntilFrame)
+            {
+                g_State.seedValidationIgnoreUntilFrame = -1;
+            }
+            AdvanceConfirmedSyncFrame();
+            TraceDiagnostic("resolve-frame-sync-match", "frame=%d seed=%u", syncFrame, remoteSeedIt->second);
+            return false;
+        }
+
+        TraceDiagnostic("resolve-frame-sync-mismatch", "frame=%d remoteSeed=%u localSeed=%u canRollback=%d ui=%d",
+                        syncFrame, remoteSeedIt->second, localSeedIt->second, canRollbackNow ? 1 : 0,
+                        IsCurrentUiFrame() ? 1 : 0);
+
+        if (g_State.predictionRollbackEnabled)
+        {
+            if (!canRollbackNow)
+            {
+                TraceDiagnostic("resolve-frame-sync-seed-mismatch",
+                                "frame=%d remoteSeed=%u localSeed=%u pending=%d canRollback=%d ignored=1 "
+                                "reason=unrollbackable",
+                                syncFrame, remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
+                                canRollbackNow ? 1 : 0);
+                return false;
+            }
+
+            if (syncFrame <= g_State.seedValidationIgnoreUntilFrame)
+            {
+                TraceDiagnostic("resolve-frame-sync-seed-mismatch",
+                                "frame=%d remoteSeed=%u localSeed=%u pending=%d canRollback=%d ignored=1 "
+                                "reason=rollback-grace graceUntil=%d",
+                                syncFrame, remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
+                                canRollbackNow ? 1 : 0, g_State.seedValidationIgnoreUntilFrame);
+                g_State.isSync = true;
+                return false;
+            }
+
+            g_State.isSync = false;
+            const auto trySeedMismatchRollbackRetry = [&](int olderThanSnapshotFrame, const char *reason) -> bool {
+                const bool repeatedRetry = g_State.lastSeedRetryMismatchFrame == syncFrame &&
+                                           g_State.lastSeedRetryOlderThanSnapshotFrame == olderThanSnapshotFrame &&
+                                           g_State.lastSeedRetryLocalSeed == localSeedIt->second &&
+                                           g_State.lastSeedRetryRemoteSeed == remoteSeedIt->second;
+                TraceDiagnostic("resolve-frame-sync-seed-mismatch-retry",
+                                "frame=%d remoteSeed=%u localSeed=%u olderThan=%d reason=%s repeated=%d",
+                                syncFrame, remoteSeedIt->second, localSeedIt->second, olderThanSnapshotFrame,
+                                reason != nullptr ? reason : "-", repeatedRetry ? 1 : 0);
+                if (repeatedRetry)
+                {
+                    return false;
+                }
+
+                g_State.lastSeedRetryMismatchFrame = syncFrame;
+                g_State.lastSeedRetryOlderThanSnapshotFrame = olderThanSnapshotFrame;
+                g_State.lastSeedRetryLocalSeed = localSeedIt->second;
+                g_State.lastSeedRetryRemoteSeed = remoteSeedIt->second;
+
+                if (!TryStartAutomaticRollback(frame, syncFrame, olderThanSnapshotFrame))
+                {
+                    return false;
+                }
+
+                outRollbackStarted = true;
+                return true;
+            };
+            const bool canRetryFromOlderSnapshot =
+                g_State.lastRollbackSnapshotFrame >= 0 && g_State.lastRollbackTargetFrame > g_State.lastRollbackSnapshotFrame &&
+                syncFrame >= g_State.lastRollbackSnapshotFrame && syncFrame <= g_State.lastRollbackTargetFrame;
+            const bool canRetryPostRollbackDrift =
+                g_State.lastRollbackSnapshotFrame >= 0 && g_State.lastRollbackTargetFrame > g_State.lastRollbackSnapshotFrame &&
+                syncFrame > g_State.lastRollbackTargetFrame &&
+                syncFrame <= g_State.lastRollbackTargetFrame + kRollbackSnapshotInterval;
+            if (canRetryFromOlderSnapshot)
+            {
+                TraceDiagnostic("resolve-frame-sync-seed-mismatch-retry-older",
+                                "frame=%d remoteSeed=%u localSeed=%u lastRollbackMismatch=%d lastSnapshot=%d "
+                                "lastTarget=%d",
+                                syncFrame, remoteSeedIt->second, localSeedIt->second,
+                                g_State.lastRollbackMismatchFrame, g_State.lastRollbackSnapshotFrame,
+                                g_State.lastRollbackTargetFrame);
+                if (trySeedMismatchRollbackRetry(g_State.lastRollbackSnapshotFrame, "within-last-rollback"))
+                {
+                    return true;
+                }
+
+                // When a just-finished rollback still has late remote packet corrections draining in,
+                // the first live seed check can fire before the matching input correction is applied.
+                // In that narrow window, immediately demoting the session to desynced is premature:
+                // the same frame may still queue a normal prediction rollback on the next receive pass.
+                TraceDiagnostic("resolve-frame-sync-seed-mismatch-defer-post-rollback",
+                                "frame=%d remoteSeed=%u localSeed=%u pending=%d lastRollbackMismatch=%d "
+                                "lastSnapshot=%d lastTarget=%d",
+                                syncFrame, remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
+                                g_State.lastRollbackMismatchFrame, g_State.lastRollbackSnapshotFrame,
+                                g_State.lastRollbackTargetFrame);
+                g_State.isSync = true;
+                return false;
+            }
+            if (canRetryPostRollbackDrift &&
+                trySeedMismatchRollbackRetry(g_State.lastRollbackSnapshotFrame, "post-rollback-latent-drift"))
+            {
+                return true;
+            }
+            TraceDiagnostic("resolve-frame-sync-seed-mismatch",
+                            "frame=%d remoteSeed=%u localSeed=%u pending=%d canRollback=%d ignored=1", syncFrame,
+                            remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
+                            canRollbackNow ? 1 : 0);
+            SetStatus(g_State.pendingRollbackFrame >= 0 ? "rollback pending..." : "desynced");
+            return false;
+        }
+
+        if (!canRollbackNow)
+        {
+            g_State.isSync = isInUi;
+            return false;
+        }
+
+        g_State.isSync = false;
+        if (TryStartAutomaticRollback(frame, syncFrame))
+        {
+            outRollbackStarted = true;
+            return true;
+        }
+        return false;
+    };
+
+    if (!allowPrediction)
     {
-        const auto remoteIt = g_State.remoteInputs.find(delayedFrame);
-        if (remoteIt != g_State.remoteInputs.end())
+        const Uint64 waitUntil = SDL_GetTicks64() + kDisconnectTimeoutMs;
+        Uint64 nextResendTick = SDL_GetTicks64() + kReconnectPingMs;
+
+        while (SDL_GetTicks64() < waitUntil)
         {
-            remoteInput = WriteToInt(remoteIt->second);
-            const auto remoteSeedIt = g_State.remoteSeeds.find(delayedFrame);
-            const auto localSeedIt = g_State.localSeeds.find(delayedFrame);
-            if (remoteSeedIt != g_State.remoteSeeds.end() && localSeedIt != g_State.localSeeds.end())
+            if (ResolveRemoteFrameInput(delayedFrame, remoteInput, remoteCtrl, false, usedPrediction))
             {
-                if (remoteSeedIt->second == localSeedIt->second)
+                if (tryCompareSyncForFrame(delayedFrame))
                 {
-                    g_State.isSync = true;
-                    g_State.lastConfirmedSyncFrame = delayedFrame;
+                    return 0;
                 }
-                else
-                {
-                    g_State.isSync = false;
-                    if (TryStartAutomaticRollback(frame, delayedFrame))
-                    {
-                        outRollbackStarted = true;
-                        return 0;
-                    }
-                }
+                break;
             }
 
-            const auto remoteCtrlIt = g_State.remoteCtrls.find(delayedFrame);
-            if (remoteCtrlIt != g_State.remoteCtrls.end())
+            ReceiveRuntimePackets();
+            const Uint64 now = SDL_GetTicks64();
+            if (now >= nextResendTick)
             {
-                remoteCtrl = remoteCtrlIt->second;
+                nextResendTick = now + kReconnectPingMs;
+                SendKeyPacket(frame);
             }
-            hasRemoteData = true;
-            break;
+            SDL_Delay(1);
         }
-
-        ReceiveRuntimePackets();
-        const Uint64 now = SDL_GetTicks64();
-        if (now >= nextResendTick)
+        if (!ResolveRemoteFrameInput(delayedFrame, remoteInput, remoteCtrl, false, usedPrediction))
         {
-            nextResendTick = now + kReconnectPingMs;
-            SendKeyPacket(frame);
+            TraceDiagnostic("resolve-frame-disconnect", "frame=%d delayed=%d reason=missing-remote-no-prediction", frame,
+                            delayedFrame);
+            g_State.isConnected = false;
+            g_State.isTryingReconnect = true;
+            g_State.reconnectIssued = false;
+            g_State.currentCtrl = IGC_NONE;
+            SetStatus("disconnected");
+            return 0;
         }
-        SDL_Delay(1);
     }
-
-    if (!hasRemoteData)
+    else
     {
-        g_State.isConnected = false;
-        g_State.isTryingReconnect = true;
-        g_State.reconnectIssued = false;
-        g_State.currentCtrl = IGC_NONE;
-        SetStatus("disconnected");
-        return 0;
+        if (TryStartQueuedRollback(frame))
+        {
+            outRollbackStarted = true;
+            return 0;
+        }
+
+        if (!ResolveRemoteFrameInput(delayedFrame, remoteInput, remoteCtrl, true, usedPrediction))
+        {
+            TraceDiagnostic("resolve-frame-disconnect", "frame=%d delayed=%d reason=missing-remote-with-prediction", frame,
+                            delayedFrame);
+            g_State.isConnected = false;
+            g_State.isTryingReconnect = true;
+            g_State.reconnectIssued = false;
+            g_State.currentCtrl = IGC_NONE;
+            SetStatus("disconnected");
+            return 0;
+        }
+
+        if (usedPrediction)
+        {
+            if (g_State.lastRuntimeReceiveTick != 0 &&
+                SDL_GetTicks64() - g_State.lastRuntimeReceiveTick >= kDisconnectTimeoutMs)
+            {
+                TraceDiagnostic("resolve-frame-disconnect",
+                                "frame=%d delayed=%d reason=prediction-timeout lastRecvAgo=%llu", frame, delayedFrame,
+                                (unsigned long long)(SDL_GetTicks64() - g_State.lastRuntimeReceiveTick));
+                g_State.isConnected = false;
+                g_State.isTryingReconnect = true;
+                g_State.reconnectIssued = false;
+                g_State.currentCtrl = IGC_NONE;
+                SetStatus("disconnected");
+                return 0;
+            }
+        }
+        else if (tryCompareSyncForFrame(delayedFrame))
+        {
+            return 0;
+        }
     }
 
     if (selfCtrl != IGC_NONE && remoteCtrl != IGC_NONE)
@@ -2322,14 +3496,34 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
 
     if (isInUi)
     {
-        return selfInput | remoteInput;
+        const u16 finalUiInput = selfInput | remoteInput;
+        TraceDiagnostic("resolve-frame-result",
+                        "frame=%d delayed=%d ui=1 self=%s remote=%s usedPrediction=%d remoteCtrl=%s outCtrl=%s final=%s",
+                        frame, delayedFrame, FormatInputBits(selfInput).c_str(), FormatInputBits(remoteInput).c_str(),
+                        usedPrediction ? 1 : 0, InGameCtrlToString(remoteCtrl), InGameCtrlToString(outCtrl),
+                        FormatInputBits(finalUiInput).c_str());
+        return finalUiInput;
     }
 
     if (localIsPlayer1)
     {
-        return selfInput | mapToPlayer2(remoteInput);
+        const u16 finalInput = selfInput | mapToPlayer2(remoteInput);
+        TraceDiagnostic("resolve-frame-result",
+                        "frame=%d delayed=%d ui=0 p1local=1 self=%s remote=%s usedPrediction=%d remoteCtrl=%s "
+                        "outCtrl=%s final=%s",
+                        frame, delayedFrame, FormatInputBits(selfInput).c_str(), FormatInputBits(remoteInput).c_str(),
+                        usedPrediction ? 1 : 0, InGameCtrlToString(remoteCtrl), InGameCtrlToString(outCtrl),
+                        FormatInputBits(finalInput).c_str());
+        return finalInput;
     }
-    return remoteInput | mapToPlayer2(selfInput);
+    const u16 finalInput = remoteInput | mapToPlayer2(selfInput);
+    TraceDiagnostic("resolve-frame-result",
+                    "frame=%d delayed=%d ui=0 p1local=0 self=%s remote=%s usedPrediction=%d remoteCtrl=%s outCtrl=%s "
+                    "final=%s",
+                    frame, delayedFrame, FormatInputBits(selfInput).c_str(), FormatInputBits(remoteInput).c_str(),
+                    usedPrediction ? 1 : 0, InGameCtrlToString(remoteCtrl), InGameCtrlToString(outCtrl),
+                    FormatInputBits(finalInput).c_str());
+    return finalInput;
 }
 
 void ApplyDelayControl()
@@ -2357,6 +3551,7 @@ void TryReconnect(int frame)
 {
     Session::ApplyLegacyFrameInput(0);
     g_State.currentCtrl = IGC_NONE;
+    TraceDiagnostic("reconnect-tick", "frame=%d issued=%d", frame, g_State.reconnectIssued ? 1 : 0);
 
     if (!g_State.reconnectIssued)
     {
@@ -2379,10 +3574,14 @@ void TryReconnect(int frame)
         g_State.isTryingReconnect = false;
         g_State.reconnectIssued = false;
         g_State.remoteInputs.clear();
+        g_State.predictedRemoteInputs.clear();
         g_State.remoteSeeds.clear();
         g_State.remoteCtrls.clear();
+        g_State.predictedRemoteCtrls.clear();
+        g_State.pendingRollbackFrame = -1;
         g_State.currentCtrl = IGC_NONE;
         g_State.isSync = true;
+        TraceDiagnostic("reconnect-success", "frame=%d", frame);
         SetStatus("connected");
     }
 }
@@ -2403,25 +3602,33 @@ void NetSession::ResetInputState()
 
 void NetSession::AdvanceFrameInput()
 {
+    g_State.stallFrameRequested = false;
+
     if (g_State.isWaitingForStartup && !g_State.isSessionActive)
     {
+        TraceDiagnostic("advance-startup-wait", "-");
         SendStartupBootstrapPacket();
         if (!TryActivateFromStartupPacket())
         {
             Session::ApplyLegacyFrameInput(0);
+            TraceDiagnostic("advance-startup-wait-no-activate", "applied=0");
             return;
         }
     }
 
     if (!g_State.isSessionActive)
     {
-        Session::ApplyLegacyFrameInput(Controller::GetInput());
+        const u16 localInput = Controller::GetInput();
+        TraceDiagnostic("advance-local-only", "input=%s", FormatInputBits(localInput).c_str());
+        Session::ApplyLegacyFrameInput(localInput);
         return;
     }
 
     const int frame = CurrentNetFrame();
+    TraceDiagnostic("advance-begin", "frame=%d", frame);
     if (g_State.lastFrame >= 0 && frame < g_State.lastFrame && !g_State.rollbackActive)
     {
+        TraceDiagnostic("advance-frame-reset", "frame=%d lastFrame=%d", frame, g_State.lastFrame);
         ClearRuntimeCaches();
     }
 
@@ -2432,34 +3639,141 @@ void NetSession::AdvanceFrameInput()
         return;
     }
 
-    const bool isInUi =
-        g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER ||
-        (g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER && g_GameManager.isInGameMenu);
+    ForceDeterministicNetplayStep();
 
-    CaptureRollbackSnapshot(frame);
+    bool isInUi = IsCurrentUiFrame();
+    bool uiStateChanged = !g_State.hasKnownUiState || g_State.knownUiState != isInUi;
+    if (uiStateChanged && isInUi && g_State.pendingRollbackFrame >= 0 &&
+        IsMenuTransitionFrame(g_State.pendingRollbackFrame))
+    {
+        const int pendingFrame = g_State.pendingRollbackFrame;
+        TraceDiagnostic("ui-enter-pending-rollback", "frame=%d pending=%d", frame, pendingFrame);
+        if (TryStartAutomaticRollback(frame, pendingFrame))
+        {
+            g_State.pendingRollbackFrame = -1;
+            isInUi = IsCurrentUiFrame();
+            uiStateChanged = !g_State.hasKnownUiState || g_State.knownUiState != isInUi;
+            TraceDiagnostic("ui-enter-pending-rollback-started",
+                            "frame=%d pending=%d restoredUi=%d target=%d", frame, pendingFrame, isInUi ? 1 : 0,
+                            g_State.rollbackTargetFrame);
+        }
+    }
+    if (uiStateChanged)
+    {
+        TraceDiagnostic("ui-transition", "from=%d to=%d menu=%d retry=%d", g_State.hasKnownUiState ? (g_State.knownUiState ? 1 : 0) : -1,
+                        isInUi ? 1 : 0,
+                        (g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER && g_GameManager.isInGameMenu) ? 1 : 0,
+                        (g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER && g_GameManager.isInRetryMenu) ? 1 : 0);
+        g_State.hasKnownUiState = true;
+        g_State.knownUiState = isInUi;
+        // Treat the first frame after a UI boundary as a transition frame. In logs this frame can
+        // still carry menu/start-confirm side effects even though both peers converge one frame later,
+        // so letting rollback/sync checks start immediately at ui-exit produces false desyncs.
+        ResetRollbackEpoch(frame, isInUi ? "ui-enter" : "ui-exit", frame + 1);
+    }
 
-    if (g_State.rollbackActive)
+    if (isInUi)
+    {
+        g_State.predictedRemoteInputs.clear();
+        g_State.predictedRemoteCtrls.clear();
+        if (g_State.pendingRollbackFrame >= 0 && IsMenuTransitionFrame(g_State.pendingRollbackFrame))
+        {
+            TraceDiagnostic("ui-clear-menu-pending-rollback", "pending=%d", g_State.pendingRollbackFrame);
+            g_State.pendingRollbackFrame = -1;
+        }
+        TraceDiagnostic("ui-clear-prediction-cache", "-");
+    }
+
+    if (!CanUseRollbackSnapshots())
+    {
+        if (g_State.rollbackActive)
+        {
+            TraceDiagnostic("rollback-cancel-ui", "frame=%d target=%d", frame, g_State.rollbackTargetFrame);
+            g_State.rollbackActive = false;
+            g_State.rollbackTargetFrame = 0;
+            g_State.rollbackSendFrame = -1;
+            SetStatus("connected");
+        }
+    }
+
+    if (!g_State.rollbackActive)
+    {
+        CaptureRollbackSnapshot(frame);
+    }
+
+    if (TryStartQueuedRollback(frame))
     {
         InGameCtrlType currentCtrl = IGC_NONE;
         u16 finalInput = 0;
-        if (!ResolveStoredFrameInput(frame, isInUi, finalInput, currentCtrl))
+        const int processedFrame = CurrentNetFrame();
+        const bool rollbackIsInUi = IsCurrentUiFrame();
+        if (!ResolveStoredFrameInput(processedFrame, rollbackIsInUi, finalInput, currentCtrl))
         {
-            g_State.rollbackActive = false;
-            SetStatus("rollback aborted");
-            Session::ApplyLegacyFrameInput(0);
+            if (g_State.isConnected && !g_State.isTryingReconnect)
+            {
+                SendKeyPacket(g_State.rollbackSendFrame >= 0 ? g_State.rollbackSendFrame : processedFrame);
+            }
+            SetStatus("rollback waiting...");
+            Session::ApplyLegacyFrameInput(g_CurFrameInput);
+            TraceDiagnostic("rollback-wait", "phase=queued processed=%d rollbackUi=%d reappliedCur=%s", processedFrame,
+                            rollbackIsInUi ? 1 : 0, FormatInputBits(g_CurFrameInput).c_str());
+            g_State.stallFrameRequested = true;
             return;
         }
 
+        RefreshRollbackFrameState(processedFrame);
         g_State.currentCtrl = currentCtrl;
         ApplyDelayControl();
         Session::ApplyLegacyFrameInput(finalInput);
+        CommitProcessedFrameState(processedFrame);
+        g_State.lastFrame = processedFrame;
+        g_State.currentNetFrame = processedFrame + 1;
+        if (g_State.currentNetFrame >= g_State.rollbackTargetFrame)
+        {
+            g_State.rollbackActive = false;
+            g_State.rollbackSendFrame = -1;
+            SetStatus("connected");
+        }
+        TraceDiagnostic("rollback-step-finished", "phase=queued processed=%d final=%s ctrl=%s", processedFrame,
+                        FormatInputBits(finalInput).c_str(), InGameCtrlToString(currentCtrl));
+        return;
+    }
+
+    if (g_State.rollbackActive)
+    {
+        ReceiveRuntimePackets();
+        InGameCtrlType currentCtrl = IGC_NONE;
+        u16 finalInput = 0;
+        const bool rollbackIsInUi = IsCurrentUiFrame();
+        if (!ResolveStoredFrameInput(frame, rollbackIsInUi, finalInput, currentCtrl))
+        {
+            if (g_State.isConnected && !g_State.isTryingReconnect)
+            {
+                SendKeyPacket(g_State.rollbackSendFrame >= 0 ? g_State.rollbackSendFrame : frame);
+            }
+            SetStatus("rollback waiting...");
+            Session::ApplyLegacyFrameInput(g_CurFrameInput);
+            TraceDiagnostic("rollback-wait", "phase=active frame=%d rollbackUi=%d reappliedCur=%s", frame,
+                            rollbackIsInUi ? 1 : 0, FormatInputBits(g_CurFrameInput).c_str());
+            g_State.stallFrameRequested = true;
+            return;
+        }
+
+        RefreshRollbackFrameState(frame);
+        g_State.currentCtrl = currentCtrl;
+        ApplyDelayControl();
+        Session::ApplyLegacyFrameInput(finalInput);
+        CommitProcessedFrameState(frame);
         g_State.lastFrame = frame;
         g_State.currentNetFrame = frame + 1;
         if (g_State.currentNetFrame >= g_State.rollbackTargetFrame)
         {
             g_State.rollbackActive = false;
+            g_State.rollbackSendFrame = -1;
             SetStatus("connected");
         }
+        TraceDiagnostic("rollback-step-finished", "phase=active frame=%d final=%s ctrl=%s", frame,
+                        FormatInputBits(finalInput).c_str(), InGameCtrlToString(currentCtrl));
         return;
     }
 
@@ -2471,6 +3785,8 @@ void NetSession::AdvanceFrameInput()
     g_State.localInputs[frame] = localBits;
     g_State.localSeeds[frame] = g_Rng.seed;
     g_State.localCtrls[frame] = CaptureControlKeys();
+    TraceDiagnostic("capture-local-frame", "frame=%d input=%s seed=%u ctrl=%s", frame,
+                    FormatInputBits(localInput).c_str(), g_Rng.seed, InGameCtrlToString(g_State.localCtrls[frame]));
     PruneOldFrameData(frame);
 
     SendKeyPacket(frame);
@@ -2483,22 +3799,43 @@ void NetSession::AdvanceFrameInput()
     if (rollbackStarted)
     {
         processedFrame = CurrentNetFrame();
-        if (!ResolveStoredFrameInput(processedFrame, isInUi, finalInput, currentCtrl))
+        const bool rollbackIsInUi = IsCurrentUiFrame();
+        if (!ResolveStoredFrameInput(processedFrame, rollbackIsInUi, finalInput, currentCtrl))
         {
-            g_State.rollbackActive = false;
-            SetStatus("rollback aborted");
-            Session::ApplyLegacyFrameInput(0);
+            if (g_State.isConnected && !g_State.isTryingReconnect)
+            {
+                SendKeyPacket(g_State.rollbackSendFrame >= 0 ? g_State.rollbackSendFrame : processedFrame);
+            }
+            SetStatus("rollback waiting...");
+            Session::ApplyLegacyFrameInput(g_CurFrameInput);
+            TraceDiagnostic("rollback-wait", "phase=post-start processed=%d rollbackUi=%d reappliedCur=%s",
+                            processedFrame, rollbackIsInUi ? 1 : 0, FormatInputBits(g_CurFrameInput).c_str());
+            g_State.stallFrameRequested = true;
             return;
         }
+    }
+    if (rollbackStarted)
+    {
+        RefreshRollbackFrameState(processedFrame);
     }
     g_State.currentCtrl = currentCtrl;
     ApplyDelayControl();
     Session::ApplyLegacyFrameInput(finalInput);
+    CommitProcessedFrameState(processedFrame);
     g_State.lastFrame = processedFrame;
     if (g_State.isConnected && !g_State.isTryingReconnect)
     {
         g_State.currentNetFrame = processedFrame + 1;
+        if (g_State.rollbackActive && g_State.currentNetFrame >= g_State.rollbackTargetFrame)
+        {
+            g_State.rollbackActive = false;
+            g_State.rollbackSendFrame = -1;
+            SetStatus("connected");
+        }
     }
+    TraceDiagnostic("advance-end", "frame=%d processed=%d final=%s ctrl=%s rollbackStarted=%d", frame, processedFrame,
+                    FormatInputBits(finalInput).c_str(), InGameCtrlToString(currentCtrl),
+                    rollbackStarted ? 1 : 0);
 }
 
 void ActivateNetplaySession()
@@ -2515,8 +3852,10 @@ void ActivateNetplaySession()
     g_State.lastFrame = -1;
     g_State.sessionBaseCalcCount = 0;
     g_State.currentNetFrame = 0;
+    g_State.lastRuntimeReceiveTick = SDL_GetTicks64();
     ClearRuntimeCaches();
     Session::SetActiveSession(g_NetSession);
+    TraceDiagnostic("activate-session", "-");
     SetStatus("connected");
 }
 
@@ -2546,8 +3885,9 @@ Snapshot GetSnapshot()
     snapshot.canStartGame = g_State.isConnected && (!g_State.useRelayTransport || g_State.relay.IsReady());
     snapshot.hostIsPlayer1 = g_State.hostIsPlayer1;
     snapshot.delayLocked = g_State.isGuest;
+    snapshot.predictionRollbackEnabled = g_State.predictionRollbackEnabled;
     snapshot.targetDelay = g_State.delay;
-    snapshot.lastRttMs = g_State.lastRttMs;
+    snapshot.lastRttMs = GetDisplayedRttMs();
     snapshot.statusText = g_State.statusText;
     return snapshot;
 }
@@ -2859,7 +4199,18 @@ bool IsSync()
 
 bool NeedsRollbackCatchup()
 {
-    return g_State.rollbackActive;
+    return g_State.rollbackActive && !g_State.stallFrameRequested;
+}
+
+bool ConsumeFrameStallRequested()
+{
+    const bool requested = g_State.stallFrameRequested;
+    g_State.stallFrameRequested = false;
+    if (requested)
+    {
+        TraceDiagnostic("consume-frame-stall", "-");
+    }
+    return requested;
 }
 
 int GetDelay()
@@ -2870,6 +4221,19 @@ int GetDelay()
 void SetDelay(int delay)
 {
     g_State.delay = std::clamp(delay, 0, kMaxDelay);
+}
+
+void SetPredictionRollbackEnabled(bool enabled)
+{
+    TraceDiagnostic("set-prediction-rollback", "enabled=%d old=%d", enabled ? 1 : 0,
+                    g_State.predictionRollbackEnabled ? 1 : 0);
+    g_State.predictionRollbackEnabled = enabled;
+    if (!enabled)
+    {
+        g_State.predictedRemoteInputs.clear();
+        g_State.predictedRemoteCtrls.clear();
+        g_State.pendingRollbackFrame = -1;
+    }
 }
 
 void SetHostPlayer1(bool hostIsPlayer1)
@@ -2891,7 +4255,7 @@ void PrepareGameplayStart()
     {
         return;
     }
-    ClearRemoteRuntimeCaches();
+    ResetGameplayRuntimeStream();
 }
 
 InGameCtrlType ConsumeInGameControl()
@@ -2924,6 +4288,18 @@ void DrawOverlay()
                                      g_State.isSync ? "sync" : "desynced", CurrentNetFrame(),
                                      g_GameManager.gameFrames, g_State.resyncTargetFrame,
                                      g_State.resyncTriggered ? 1 : 0);
+    }
+
+    pos.x = 500.0f;
+    pos.y = 428.0f;
+    const int displayedRttMs = GetDisplayedRttMs();
+    if (displayedRttMs >= 0)
+    {
+        g_AsciiManager.AddFormatText(&pos, "RTT %dms", displayedRttMs);
+    }
+    else
+    {
+        g_AsciiManager.AddFormatText(&pos, "RTT --");
     }
 
     pos.x = 500.0f;

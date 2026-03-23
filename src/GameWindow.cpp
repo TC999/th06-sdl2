@@ -34,7 +34,7 @@ IRenderer *g_Renderer = nullptr;
 constexpr int kRollbackCatchupCalcLimit = 32;
 
 static double GetFrameTime() {
-    float speed = THPrac::THPracGetSpeedMultiplier();
+    float speed = Session::IsRemoteNetplaySession() ? 1.0f : THPrac::THPracGetSpeedMultiplier();
     return (speed > 0.01f) ? (FRAME_TIME / speed) : FRAME_TIME;
 }
 
@@ -367,7 +367,7 @@ void GameWindow::Present()
         u32 curTime = timeGetTime();
         if (s_lastPresentTime != 0)
         {
-            float speedMul = THPrac::THPracGetSpeedMultiplier();
+            float speedMul = Session::IsRemoteNetplaySession() ? 1.0f : THPrac::THPracGetSpeedMultiplier();
             u32 targetMs = (speedMul > 0.01f) ? (u32)(16.0f / speedMul) : 16;
             u32 elapsed = curTime - s_lastPresentTime;
             if (elapsed < targetMs)

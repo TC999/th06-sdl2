@@ -5,9 +5,95 @@
 #include "Rng.hpp"
 #include "Supervisor.hpp"
 #include "sdl2_renderer.hpp"
+#include <algorithm>
+#include <vector>
 
 namespace th06
 {
+namespace
+{
+std::vector<ScreenEffect *> g_ActiveScreenEffects;
+
+void RegisterActiveEffect(ScreenEffect *effect)
+{
+    if (effect == nullptr)
+    {
+        return;
+    }
+
+    if (std::find(g_ActiveScreenEffects.begin(), g_ActiveScreenEffects.end(), effect) == g_ActiveScreenEffects.end())
+    {
+        g_ActiveScreenEffects.push_back(effect);
+    }
+}
+
+void UnregisterActiveEffect(ScreenEffect *effect)
+{
+    const auto it = std::remove(g_ActiveScreenEffects.begin(), g_ActiveScreenEffects.end(), effect);
+    if (it != g_ActiveScreenEffects.end())
+    {
+        g_ActiveScreenEffects.erase(it, g_ActiveScreenEffects.end());
+    }
+}
+
+void ClearActiveEffects()
+{
+    while (!g_ActiveScreenEffects.empty())
+    {
+        ScreenEffect *effect = g_ActiveScreenEffects.back();
+        g_ActiveScreenEffects.pop_back();
+        if (effect != nullptr && effect->calcChainElement != nullptr)
+        {
+            g_Chain.Cut(effect->calcChainElement);
+        }
+    }
+}
+} // namespace
+
+ScreenEffect::RuntimeState ScreenEffect::CaptureRuntimeState()
+{
+    RuntimeState state {};
+    state.activeEffects.reserve(g_ActiveScreenEffects.size());
+
+    for (ScreenEffect *effect : g_ActiveScreenEffects)
+    {
+        if (effect == nullptr || effect->calcChainElement == nullptr)
+        {
+            continue;
+        }
+
+        RuntimeEffectState effectState {};
+        effectState.usedEffect = effect->usedEffect;
+        effectState.fadeAlpha = effect->fadeAlpha;
+        effectState.effectLength = effect->effectLength;
+        effectState.genericParam = effect->genericParam;
+        effectState.shakinessParam = effect->shakinessParam;
+        effectState.unusedParam = effect->unusedParam;
+        effectState.timer = effect->timer;
+        state.activeEffects.push_back(effectState);
+    }
+
+    return state;
+}
+
+void ScreenEffect::RestoreRuntimeState(const RuntimeState &state)
+{
+    ClearActiveEffects();
+
+    for (const RuntimeEffectState &effectState : state.activeEffects)
+    {
+        ScreenEffect *effect =
+            RegisterChain(effectState.usedEffect, effectState.effectLength, effectState.genericParam,
+                          effectState.shakinessParam, effectState.unusedParam);
+        if (effect == nullptr)
+        {
+            continue;
+        }
+
+        effect->fadeAlpha = effectState.fadeAlpha;
+        effect->timer = effectState.timer;
+    }
+}
 
 void ScreenEffect::Clear(D3DCOLOR color)
 {
@@ -168,6 +254,7 @@ ScreenEffect *ScreenEffect::RegisterChain(i32 effect, u32 ticks, u32 effectParam
 
     createdEffect->calcChainElement = calcChainElem;
     createdEffect->drawChainElement = drawChainElem;
+    RegisterActiveEffect(createdEffect);
     return createdEffect;
 }
 
@@ -270,6 +357,7 @@ ZunResult ScreenEffect::AddedCallback(ScreenEffect *effect)
 
 ZunResult ScreenEffect::DeletedCallback(ScreenEffect *effect)
 {
+    UnregisterActiveEffect(effect);
     effect->calcChainElement->deletedCallback = NULL;
     g_Chain.Cut(effect->drawChainElement);
     effect->drawChainElement = NULL;

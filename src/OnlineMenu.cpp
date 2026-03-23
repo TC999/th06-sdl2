@@ -33,6 +33,7 @@ struct State
     int hostPort = kDefaultPort;
     int listenPort = kDefaultPort;
     int targetDelay = kDefaultDelay;
+    bool predictionRollbackEnabled = true;
     char hostIp[128] = "::1";
     char relayServer[256] = "";
     char relayRoom[64] = "";
@@ -54,9 +55,18 @@ const char *Tr(const char *zh, const char *en, const char *ja)
     }
 }
 
+void ShowWrappedTooltip(const char *text, float wrapWidth = 320.0f)
+{
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrapWidth);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
 std::string GetLauncherTitle()
 {
-    return std::string(Tr("联机启动器", "Game Launcher", "ネットワーク起動")) + " [ver=3.8.0]";
+    return std::string(Tr("联机启动器", "Game Launcher", "ネットワーク起動")) + " [ver=3.8.1]";
 }
 
 const char *GetHostIpLabel() { return Tr("主机 IP:", "Host IP:", "ホスト IP:"); }
@@ -74,12 +84,19 @@ const char *GetRelayTooltip()
 }
 const char *GetCurStateLabel() { return Tr("当前状态:", "cur state:", "現在の状態:"); }
 const char *GetTargetDelayLabel() { return Tr("目标延迟:", "target delay:", "目標遅延:"); }
+const char *GetPredictionRollbackLabel() { return Tr("预测回滚:", "prediction rollback:", "予測ロールバック:"); }
 const char *GetAutoDelayLabel() { return Tr("自动", "Auto", "自動"); }
 const char *GetAutoDelayTooltip()
 {
     return Tr("根据当前 RTT 自动估算一次目标延迟。算法使用“半 RTT + 1 帧安全裕量”，只会填入一次，不会持续改动。",
               "Estimate target delay once from the current RTT. Uses \"half RTT + one frame of safety\" and only fills the field once.",
               "現在の RTT から目標遅延を一度だけ自動推定します。\"RTT の半分 + 1 フレームの余裕\" を使い、継続的には変更しません。");
+}
+const char *GetPredictionRollbackTooltip()
+{
+    return Tr("由 host 控制。开启后，如果远端该帧输入还没到达，就默认沿用远端上一帧输入；真实输入到达且不一致时，会回滚到最近一致处重新计算。",
+              "Host-controlled. When enabled, missing remote input is predicted from the previous remote frame; if the real input arrives and differs, gameplay rolls back to the latest confirmed frame and re-simulates.",
+              "host 側で制御します。有効時は未着の相手入力を前フレームと同じだと予測し、実入力が異なれば直近の一致フレームまで巻き戻して再計算します。");
 }
 const char *GetRttLabel() { return "RTT"; }
 const char *GetStartGameLabel() { return Tr("开始游戏", "Start Game", "ゲーム開始"); }
@@ -288,6 +305,7 @@ void LoadConfig()
     {
         ClampState();
         Netplay::SetDelay(g_State.targetDelay);
+        Netplay::SetPredictionRollbackEnabled(g_State.predictionRollbackEnabled);
         return;
     }
 
@@ -337,6 +355,10 @@ void LoadConfig()
         {
             g_State.targetDelay = std::atoi(value.c_str());
         }
+        else if (key == "prediction_rollback")
+        {
+            g_State.predictionRollbackEnabled = std::atoi(value.c_str()) != 0;
+        }
         else if (key == "relay_server")
         {
             std::snprintf(g_State.relayServer, sizeof(g_State.relayServer), "%s", value.c_str());
@@ -349,6 +371,7 @@ void LoadConfig()
 
     ClampState();
     Netplay::SetDelay(g_State.targetDelay);
+    Netplay::SetPredictionRollbackEnabled(g_State.predictionRollbackEnabled);
 }
 
 void SaveConfig()
@@ -371,6 +394,7 @@ void SaveConfig()
     file << "port_host=" << g_State.hostPort << '\n';
     file << "port_listen=" << g_State.listenPort << '\n';
     file << "target_delay=" << g_State.targetDelay << '\n';
+    file << "prediction_rollback=" << (g_State.predictionRollbackEnabled ? 1 : 0) << '\n';
     file << "relay_server=" << g_State.relayServer << '\n';
     file << "relay_room=" << g_State.relayRoom << '\n';
 }
@@ -477,11 +501,12 @@ void UpdateImGui()
     const Netplay::Snapshot snapshot = Netplay::GetSnapshot();
     const Netplay::RelaySnapshot relaySnapshot = Netplay::GetRelaySnapshot();
     g_State.targetDelay = snapshot.targetDelay;
+    g_State.predictionRollbackEnabled = snapshot.predictionRollbackEnabled;
     const std::string launcherTitle = GetLauncherTitle();
     const std::string localizedStatusText = LocalizeStatusText(snapshot.statusText);
     const std::string localizedRelayStatusText = LocalizeRelayStatusText(relaySnapshot.statusText);
 
-    ImGui::SetNextWindowSize(ImVec2(430.0f, 458.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 490.0f), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImVec2(320.0f, 240.0f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
     bool keepOpen = true;
@@ -525,7 +550,7 @@ void UpdateImGui()
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
-        ImGui::SetTooltip("%s", GetRelayTooltip());
+        ShowWrappedTooltip(GetRelayTooltip());
     }
     ImGui::SameLine(110.0f);
     ImGui::SetNextItemWidth(178.0f);
@@ -535,7 +560,7 @@ void UpdateImGui()
     }
     if (ImGui::IsItemHovered())
     {
-        ImGui::SetTooltip("%s", GetRelayTooltip());
+        ShowWrappedTooltip(GetRelayTooltip());
     }
     ImGui::SameLine();
     if (ImGui::Button(GetRelayConnectLabel(), ImVec2(86.0f, 0.0f)))
@@ -619,7 +644,7 @@ void UpdateImGui()
     }
     if (ImGui::IsItemHovered())
     {
-        ImGui::SetTooltip("%s", GetAutoDelayTooltip());
+        ShowWrappedTooltip(GetAutoDelayTooltip());
     }
     if (availableRttMs < 0)
     {
@@ -637,6 +662,28 @@ void UpdateImGui()
     else
     {
         ImGui::Text("%s: --", GetRttLabel());
+    }
+
+    ImGui::TextUnformatted(GetPredictionRollbackLabel());
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ShowWrappedTooltip(GetPredictionRollbackTooltip());
+    }
+    ImGui::SameLine(110.0f);
+    if (snapshot.delayLocked)
+    {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Checkbox("##online_prediction_rollback", &g_State.predictionRollbackEnabled))
+    {
+        Netplay::SetPredictionRollbackEnabled(g_State.predictionRollbackEnabled);
+        g_State.dirty = true;
+    }
+    if (snapshot.delayLocked)
+    {
+        ImGui::EndDisabled();
     }
 
     if (!snapshot.canStartGame)

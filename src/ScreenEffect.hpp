@@ -7,6 +7,7 @@
 #include "ZunResult.hpp"
 #include "ZunTimer.hpp"
 #include "inttypes.hpp"
+#include <vector>
 
 namespace th06
 {
@@ -27,11 +28,30 @@ enum ScreenEffects
 
 struct ScreenEffect
 {
+    struct RuntimeEffectState
+    {
+        i32 usedEffect = SCREEN_EFFECT_FADE_IN;
+        i32 fadeAlpha = 0;
+        i32 effectLength = 0;
+        i32 genericParam = 0;
+        i32 shakinessParam = 0;
+        i32 unusedParam = 0;
+        ZunTimer timer;
+    };
+
+    struct RuntimeState
+    {
+        std::vector<RuntimeEffectState> activeEffects;
+    };
+
     // In fade effects, effectParam1 is an RGB color to fade to
     // In shake effects, effectParam1 controls the "base" view offset, and effectParam2 controls the shakiness
     // multiplier over time
     static ScreenEffect *RegisterChain(i32 effect, u32 ticks, u32 effectParam1, u32 effectParam2,
                                        u32 unusedEffectParam);
+
+    static RuntimeState CaptureRuntimeState();
+    static void RestoreRuntimeState(const RuntimeState &state);
 
     static ZunResult AddedCallback(ScreenEffect *effect);
     static ZunResult DeletedCallback(ScreenEffect *effect);

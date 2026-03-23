@@ -6,6 +6,7 @@
 #include "Controller.hpp"
 #include "GameManager.hpp"
 #include "Gui.hpp"
+#include "NetplaySession.hpp"
 #include "Session.hpp"
 #include "Supervisor.hpp"
 #include "sdl2_renderer.hpp"
@@ -795,6 +796,10 @@ i32 StageMenu::OnUpdateRetryMenu()
             g_Gui.flags.flag3 = 2;
             g_Gui.flags.flag4 = 2;
             g_Gui.flags.flag2 = 2;
+            if (Session::IsRemoteNetplaySession())
+            {
+                Netplay::PrepareGameplayStart();
+            }
             return 0;
         }
         break;

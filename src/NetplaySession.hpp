@@ -6,7 +6,7 @@
 
 namespace th06::Netplay
 {
-constexpr int kProtocolVersion = 3800;
+constexpr int kProtocolVersion = 3801;
 
 enum InGameCtrlType
 {
@@ -32,7 +32,8 @@ struct Snapshot
     bool canStartGame = false;
     bool hostIsPlayer1 = true;
     bool delayLocked = false;
-    int targetDelay = 1;
+    bool predictionRollbackEnabled = true;
+    int targetDelay = 2;
     int lastRttMs = -1;
     std::string statusText = "no connection";
 };
@@ -73,8 +74,10 @@ bool IsHost();
 bool IsLocalPlayer1();
 bool IsSync();
 bool NeedsRollbackCatchup();
+bool ConsumeFrameStallRequested();
 int GetDelay();
 void SetDelay(int delay);
+void SetPredictionRollbackEnabled(bool enabled);
 void SetHostPlayer1(bool hostIsPlayer1);
 bool ConsumeTitleColdStartRequested();
 void PrepareGameplayStart();

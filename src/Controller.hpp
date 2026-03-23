@@ -45,6 +45,14 @@ enum TouhouButton
 
 namespace Controller
 {
+struct RuntimeState
+{
+    u16 focusButtonConflictState;
+};
+
+RuntimeState CaptureRuntimeState();
+void RestoreRuntimeState(const RuntimeState &state);
+
 u16 GetJoystickCaps(void);
 u32 SetButtonFromControllerInputs(u16 *outButtons, i16 controllerButtonToTest, enum TouhouButton touhouButton,
                                   u32 inputButtons);

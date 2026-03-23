@@ -61,6 +61,10 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
     }
     Session::AdvanceFrameInput();
     Netplay::DrawOverlay();
+    if (Session::IsRemoteNetplaySession() && Netplay::ConsumeFrameStallRequested())
+    {
+        return CHAIN_CALLBACK_RESULT_BREAK;
+    }
 
     if (s->wantedState != s->curState)
     {

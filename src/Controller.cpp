@@ -15,6 +15,18 @@ namespace th06
 {
 DIFFABLE_STATIC(u16, g_FocusButtonConflictState)
 
+Controller::RuntimeState Controller::CaptureRuntimeState()
+{
+    RuntimeState state {};
+    state.focusButtonConflictState = g_FocusButtonConflictState;
+    return state;
+}
+
+void Controller::RestoreRuntimeState(const RuntimeState &state)
+{
+    g_FocusButtonConflictState = state.focusButtonConflictState;
+}
+
 static SDL_GameController *g_SDLController = NULL;
 static SDL_Joystick *g_SDLJoystick = NULL;
 static i32 g_SDLJoystickNumButtons = 0;

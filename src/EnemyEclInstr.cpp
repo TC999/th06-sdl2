@@ -43,6 +43,36 @@ DIFFABLE_STATIC_ARRAY_ASSIGN(f32, 16, g_EclLiteralFloats) = {};
 DIFFABLE_STATIC(i32, g_EclLiteralIntCursor);
 DIFFABLE_STATIC(i32, g_EclLiteralFloatCursor);
 
+RuntimeState CaptureRuntimeState()
+{
+    RuntimeState state {};
+    state.playerShot = g_PlayerShot;
+    state.playerDistance = g_PlayerDistance;
+    state.playerAngle = g_PlayerAngle;
+    std::memcpy(state.starAngleTable, g_StarAngleTable, sizeof(state.starAngleTable));
+    state.enemyPosVector = g_EnemyPosVector;
+    state.playerPosVector = g_PlayerPosVector;
+    std::memcpy(state.eclLiteralInts, g_EclLiteralInts, sizeof(state.eclLiteralInts));
+    std::memcpy(state.eclLiteralFloats, g_EclLiteralFloats, sizeof(state.eclLiteralFloats));
+    state.eclLiteralIntCursor = g_EclLiteralIntCursor;
+    state.eclLiteralFloatCursor = g_EclLiteralFloatCursor;
+    return state;
+}
+
+void RestoreRuntimeState(const RuntimeState &state)
+{
+    g_PlayerShot = state.playerShot;
+    g_PlayerDistance = state.playerDistance;
+    g_PlayerAngle = state.playerAngle;
+    std::memcpy(g_StarAngleTable, state.starAngleTable, sizeof(g_StarAngleTable));
+    g_EnemyPosVector = state.enemyPosVector;
+    g_PlayerPosVector = state.playerPosVector;
+    std::memcpy(g_EclLiteralInts, state.eclLiteralInts, sizeof(g_EclLiteralInts));
+    std::memcpy(g_EclLiteralFloats, state.eclLiteralFloats, sizeof(g_EclLiteralFloats));
+    g_EclLiteralIntCursor = state.eclLiteralIntCursor;
+    g_EclLiteralFloatCursor = state.eclLiteralFloatCursor;
+}
+
 static inline bool IsAlignedForWord(const void *ptr)
 {
     return (reinterpret_cast<size_t>(ptr) & (alignof(i32) - 1)) == 0;
