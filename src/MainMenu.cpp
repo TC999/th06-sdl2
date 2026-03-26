@@ -37,6 +37,10 @@ namespace THPrac { namespace TH06 {
     void THPracMenuCancel();
     int  THPracMenuApply();
     bool THPracIsActive();
+    bool THPracIsDeveloperModeEnabled();
+    bool THPracConsumeEndingShortcut();
+    void THPracResetEndingShortcut();
+    void THPracPrepareDebugEndingJump();
     void THPracResetParams();
 }}
 
@@ -48,7 +52,13 @@ constexpr f32 ONLINE_MENU_POS_X = 452.0f;
 constexpr f32 ONLINE_MENU_POS_Y = 404.0f;
 constexpr f32 ONLINE_MENU_SCALE = 1.0f;
 constexpr f32 ONLINE_MENU_SELECTED_SCALE = 1.15f;
+constexpr Uint32 ENDING_SHORTCUT_TIMEOUT_MS = 1500;
 char g_OnlineLabel[] = "Online";
+int g_MainMenuEndingShortcutProgress = 0;
+Uint32 g_MainMenuEndingShortcutLastTick = 0;
+bool g_MainMenuEndingShortcutPrevE = false;
+bool g_MainMenuEndingShortcutPrevN = false;
+bool g_MainMenuEndingShortcutPrevD = false;
 
 bool IsDemoPlayDisabledForCurrentSession()
 {
@@ -87,6 +97,149 @@ void DrawOnlineMenuEntry(MainMenu *menu)
     g_AsciiManager.scale = prevScale;
     g_AsciiManager.isSelected = prevIsSelected;
     g_AsciiManager.isGui = prevIsGui;
+}
+
+bool IsEndingShortcutContext(const MainMenu *menu)
+{
+    if (!THPrac::TH06::THPracIsDeveloperModeEnabled())
+    {
+        return false;
+    }
+
+    if (OnlineMenu::IsOpen())
+    {
+        return true;
+    }
+
+    if (menu->gameState == STATE_ONLINE)
+    {
+        return true;
+    }
+
+    return menu->gameState == STATE_MAIN_MENU && menu->cursor == 8;
+}
+
+void ResetEndingShortcutContext()
+{
+    g_MainMenuEndingShortcutProgress = 0;
+    g_MainMenuEndingShortcutLastTick = 0;
+    g_MainMenuEndingShortcutPrevE = false;
+    g_MainMenuEndingShortcutPrevN = false;
+    g_MainMenuEndingShortcutPrevD = false;
+}
+
+bool ConsumeEndingShortcutContext()
+{
+    const Uint8 *keyboardState = SDL_GetKeyboardState(nullptr);
+    const bool rawE = keyboardState[SDL_SCANCODE_E] != 0;
+    const bool rawN = keyboardState[SDL_SCANCODE_N] != 0;
+    const bool rawD = keyboardState[SDL_SCANCODE_D] != 0;
+    const bool pressE = rawE && !g_MainMenuEndingShortcutPrevE;
+    const bool pressN = rawN && !g_MainMenuEndingShortcutPrevN;
+    const bool pressD = rawD && !g_MainMenuEndingShortcutPrevD;
+
+    g_MainMenuEndingShortcutPrevE = rawE;
+    g_MainMenuEndingShortcutPrevN = rawN;
+    g_MainMenuEndingShortcutPrevD = rawD;
+
+    const Uint32 now = SDL_GetTicks();
+    if (g_MainMenuEndingShortcutProgress != 0 &&
+        now - g_MainMenuEndingShortcutLastTick > ENDING_SHORTCUT_TIMEOUT_MS)
+    {
+        g_MainMenuEndingShortcutProgress = 0;
+    }
+
+    switch (g_MainMenuEndingShortcutProgress)
+    {
+    case 0:
+        if (pressE)
+        {
+            g_MainMenuEndingShortcutProgress = 1;
+            g_MainMenuEndingShortcutLastTick = now;
+        }
+        break;
+    case 1:
+        if (pressN)
+        {
+            g_MainMenuEndingShortcutProgress = 2;
+            g_MainMenuEndingShortcutLastTick = now;
+        }
+        else if (pressE)
+        {
+            g_MainMenuEndingShortcutLastTick = now;
+        }
+        else if (pressD)
+        {
+            g_MainMenuEndingShortcutProgress = 0;
+        }
+        break;
+    case 2:
+        if (pressD)
+        {
+            ResetEndingShortcutContext();
+            return true;
+        }
+        if (pressE)
+        {
+            g_MainMenuEndingShortcutProgress = 1;
+            g_MainMenuEndingShortcutLastTick = now;
+        }
+        else if (pressN)
+        {
+            g_MainMenuEndingShortcutLastTick = now;
+        }
+        break;
+    default:
+        g_MainMenuEndingShortcutProgress = 0;
+        break;
+    }
+
+    return false;
+}
+
+void ActivateEndingShortcut(MainMenu *menu)
+{
+    Netplay::ActivateUiSession();
+    THPrac::TH06::THPracPrepareDebugEndingJump();
+    OnlineMenu::Close();
+    menu->idleFrames = 0;
+    menu->stateTimer = 0;
+    g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+    g_Supervisor.curState = SUPERVISOR_STATE_ENDING;
+}
+
+bool TryActivateEndingShortcut(MainMenu *menu)
+{
+    if (Netplay::ConsumeRequestedDebugEndingJump())
+    {
+        ActivateEndingShortcut(menu);
+        return true;
+    }
+
+    if (!IsEndingShortcutContext(menu))
+    {
+        ResetEndingShortcutContext();
+        return false;
+    }
+
+    if (!ConsumeEndingShortcutContext())
+    {
+        return false;
+    }
+
+    if (Netplay::IsConnected())
+    {
+        if (!Netplay::RequestDebugEndingJump())
+        {
+            return false;
+        }
+
+        ActivateEndingShortcut(menu);
+        return true;
+    }
+
+    ActivateEndingShortcut(menu);
+    return true;
 }
 } // namespace
 
@@ -170,6 +323,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
         }
     case STATE_PRE_INPUT:
+        THPrac::TH06::THPracResetEndingShortcut();
         if (IsDemoPlayDisabledForCurrentSession())
         {
             menu->idleFrames = 0;
@@ -190,6 +344,10 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             break;
         menu->idleFrames = 0;
     case STATE_MAIN_MENU:
+        if (TryActivateEndingShortcut(menu))
+        {
+            return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+        }
         menu->DrawStartMenu();
         if ((g_CurFrameInput & 0xffff) != 0)
         {
@@ -218,6 +376,10 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         }
         break;
     case STATE_ONLINE:
+        if (TryActivateEndingShortcut(menu))
+        {
+            return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+        }
         menu->idleFrames = 0;
         if (OnlineMenu::ConsumeCloseRequested() ||
             (OnlineMenu::AllowsBackShortcut() && WAS_PRESSED(TH_BUTTON_BOMB)))
@@ -247,18 +409,21 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
     case STATE_REPLAY_ANIM:
     case STATE_REPLAY_UNLOAD:
     case STATE_REPLAY_SELECT:
+        THPrac::TH06::THPracResetEndingShortcut();
         if (menu->ReplayHandling() != 0)
         {
             return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
         }
         break;
     case STATE_OPTIONS:
+        THPrac::TH06::THPracResetEndingShortcut();
         if (menu->OnUpdateOptionsMenu() != 0)
         {
             return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
         }
         break;
     case STATE_KEYCONFIG:
+        THPrac::TH06::THPracResetEndingShortcut();
         MoveCursor(menu, 11);
         vmList = &menu->vm[34];
         for (i = 0; i < 11; i++, vmList++)

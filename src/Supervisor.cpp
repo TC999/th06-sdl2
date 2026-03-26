@@ -795,7 +795,10 @@ i32 Supervisor::PlayMidiFile(i32 midiFileIdx)
         {
             globalMidiController = g_Supervisor.midiOutput;
             globalMidiController->StopPlayback();
-            globalMidiController->ParseFile(midiFileIdx);
+            if (globalMidiController->ParseFile(midiFileIdx) != ZUN_SUCCESS)
+            {
+                return FALSE;
+            }
             globalMidiController->Play();
         }
 
@@ -838,8 +841,11 @@ ZunResult Supervisor::PlayAudio(char *path)
         {
             MidiOutput *midiOutput = g_Supervisor.midiOutput;
             midiOutput->StopPlayback();
-            midiOutput->LoadFile(path);
-            midiOutput->Play();
+            if (midiOutput->LoadFile(path) != ZUN_SUCCESS)
+            {
+                return ZUN_ERROR;
+            }
+            return midiOutput->Play();
         }
     }
     else if (g_Supervisor.cfg.musicMode == WAV)

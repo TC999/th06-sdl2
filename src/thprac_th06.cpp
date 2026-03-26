@@ -13,6 +13,7 @@
 #endif
 
 #include "thprac_utils.h"
+#include <algorithm>
 #include <fstream>
 #include <random>
 #include <string>
@@ -27,6 +28,7 @@
 #include "EclManager.hpp"
 #include "AnmManager.hpp"
 #include "MainMenu.hpp"
+#include "NetplaySession.hpp"
 #include "OnlineMenu.hpp"
 #include "BulletManager.hpp"
 #include "Rng.hpp"
@@ -289,6 +291,89 @@ namespace TH06 {
         return TrLocal("（联机中锁定）", "(locked by netplay)", "（ネット対戦中は固定）");
     }
 
+    const char* DeveloperModeLabel()
+    {
+        return TrLocal("开发者模式", "Developer Mode", "開発者モード");
+    }
+
+    const char* DeveloperModeDesc()
+    {
+        return TrLocal("开启后，F11 面板会切换成多标签页，并显示联机调试工具。",
+                       "When enabled, the F11 panel switches to tabs and shows netplay debugging tools.",
+                       "有効にすると、F11 パネルがタブ表示に切り替わり、ネット対戦デバッグ機能を表示します。");
+    }
+
+    const char* AdvancedFeaturesTabLabel()
+    {
+        return TrLocal("高级功能", "Advanced Features", "高度な機能");
+    }
+
+    const char* NetworkDebuggerTabLabel()
+    {
+        return TrLocal("网络调试器", "Network Debugger", "ネットワークデバッガ");
+    }
+
+    const char* NetworkDebuggerUnavailableHint()
+    {
+        return TrLocal("仅远程联机时可用。", "Only available during remote netplay.", "リモートネット対戦中のみ利用できます。");
+    }
+
+    const char* NetworkDebuggerSummary()
+    {
+        return TrLocal("这些设置只作用于当前进程，用于压测联机收发链路，不会影响单机逻辑。",
+                       "These settings affect only the current process and are meant for stressing the netplay packet path without touching single-player logic.",
+                       "これらの設定は現在のプロセスにのみ作用し、シングルプレイのロジックには影響せず、ネット対戦の送受信経路の負荷試験に使います。");
+    }
+
+    const char* NetDebugEnableLabel()
+    {
+        return TrLocal("启用网络仿真", "Enable Network Simulation", "ネットワークシミュレーションを有効化");
+    }
+
+    const char* NetDebugLatencyLabel()
+    {
+        return TrLocal("基础延迟", "Base Latency", "基本遅延");
+    }
+
+    const char* NetDebugJitterLabel()
+    {
+        return TrLocal("抖动", "Jitter", "ジッタ");
+    }
+
+    const char* NetDebugPacketLossLabel()
+    {
+        return TrLocal("丢包率", "Packet Loss", "パケットロス");
+    }
+
+    const char* NetDebugDuplicateLabel()
+    {
+        return TrLocal("重复包率", "Packet Duplication", "重複パケット率");
+    }
+
+    const char* NetDebugResetLabel()
+    {
+        return TrLocal("重置网络调试设置", "Reset Network Debugger", "ネットワークデバッガをリセット");
+    }
+
+    const char* NetDebugSessionStateLabel()
+    {
+        return TrLocal("当前联机状态", "Current Netplay State", "現在のネット対戦状態");
+    }
+
+    bool IsNetplayDebuggerAvailable()
+    {
+        return th06::Session::IsRemoteNetplaySession() || th06::Netplay::IsSessionActive() ||
+               th06::Netplay::IsWaitingForStartup();
+    }
+
+    void ClampDebugNetworkConfig(th06::Netplay::DebugNetworkConfig& config)
+    {
+        config.latencyMs = std::clamp(config.latencyMs, 0, 1000);
+        config.jitterMs = std::clamp(config.jitterMs, 0, 500);
+        config.packetLossPercent = std::clamp(config.packetLossPercent, 0, 100);
+        config.duplicatePercent = std::clamp(config.duplicatePercent, 0, 100);
+    }
+
     // Legacy address constants removed - use Bridge:: accessors instead
     // e.g., Bridge::GM_Lives() instead of *(int8_t*)(0x69d4ba)
 
@@ -303,6 +388,15 @@ namespace TH06 {
 
     int g_lock_timer = 0;
     float g_speed_multiplier = 1.0f;  // CE-style speed: affects frame timing, not game logic
+    bool g_developer_mode_enabled = false;
+    bool g_debug_ending_jump_active = false;
+    int g_ending_shortcut_progress = 0;
+    u32 g_ending_shortcut_last_tick = 0;
+    bool g_ending_shortcut_prev_e = false;
+    bool g_ending_shortcut_prev_n = false;
+    bool g_ending_shortcut_prev_d = false;
+
+    constexpr u32 ENDING_SHORTCUT_TIMEOUT_MS = 1500;
 
     bool THBGMTest();
     using std::pair;
@@ -1684,6 +1778,8 @@ namespace TH06 {
         // Option Related Functions
 
     private:
+        bool mDeveloperMode = false;
+
         void FpsInit()
         {
             // SDL2 build: native game speed control via framerateMultiplier
@@ -1770,131 +1866,67 @@ namespace TH06 {
                 break;
             }
         }
-        void ShowDetail(bool* isOpen)
+
+        bool RenderDebugValueRow(const char* label, const char* sliderId, const char* inputId, int* value, int minValue,
+                                 int maxValue, const char* displayFormat)
         {
-            ImGui::BeginTabBar("Detail Spell");
-            {
-                const char* tabs_diff[5] = { S(THPRAC_IGI_DIFF_E), S(THPRAC_IGI_DIFF_N), S(THPRAC_IGI_DIFF_H), S(THPRAC_IGI_DIFF_L), S(THPRAC_IGI_DIFF_EX) };
-                for (int diff = 0; diff < 5; diff++) {
-                    if (ImGui::BeginTabItem(tabs_diff[diff])) {
-                        ImGui::BeginTabBar("Player Type");
-                        const char* tabs_player[4] = { S(THPRAC_IGI_PL_ReimuA), S(THPRAC_IGI_PL_ReimuB), S(THPRAC_IGI_PL_MarisaA), S(THPRAC_IGI_PL_MarisaB) };
-                        for (int pl = 0; pl < 4; pl++) {
-                            if (ImGui::BeginTabItem(tabs_player[pl])) {
-                                // time
-                                { char _tid[128]; snprintf(_tid, sizeof(_tid), "%s%stimetable", tabs_diff[diff], tabs_player[pl]);
-                                if (ImGui::BeginTable(_tid, 4,
-                                    ImGuiTableFlags_::ImGuiTableFlags_Resizable |
-                                    ImGuiTableFlags_::ImGuiTableFlags_SizingStretchSame)) {
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_TOT));
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CUR));
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CHARACTER_TOT));
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_ALL));
-                                ImGui::TableHeadersRow();
-
-                                int64_t gametime_tot = TH06Save::singleton().GetTotalGameTime(diff,pl);
-                                int64_t gametime_cur = TH06Save::singleton().GetCurrentGameTime(diff, pl);
-                                int64_t gametime_chartot = 0;
-                                for (int i = 0; i < 5; i++)
-                                    gametime_chartot += TH06Save::singleton().GetTotalGameTime(i, pl);
-                                int64_t gametime_all = 0;
-                                for (int i = 0; i < 5; i++)
-                                    for (int j = 0; j < 4; j++)
-                                        gametime_all += TH06Save::singleton().GetTotalGameTime(i, j);
-
-                                ImGui::TableNextRow();
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_tot).c_str());
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_cur).c_str());
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_chartot).c_str());
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_all).c_str());
-
-                                ImGui::TableNextRow();
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_tot).c_str());
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_cur).c_str());
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_chartot).c_str());
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_all).c_str());
-
-                                ImGui::TableNextRow();
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped("(%lld %s)", gametime_tot, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped("(%lld %s)", gametime_cur, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped("(%lld %s)", gametime_chartot, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
-                                ImGui::TableNextColumn();
-                                ImGui::TextWrapped("(%lld %s)", gametime_all, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
-
-                                ImGui::EndTable();
-                                } }
-                                // spell capture
-                                { char _sid[128]; snprintf(_sid, sizeof(_sid), "%s%ssptable", tabs_diff[diff], tabs_player[pl]);
-                                if (ImGui::BeginTable(_sid, 5,
-                                    ImGuiTableFlags_::ImGuiTableFlags_Resizable |
-                                    ImGuiTableFlags_::ImGuiTableFlags_SizingFixedFit)) {
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_SPELL_NAME), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 100.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_TOT), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 50.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_TOT), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 30.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_CUR), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 50.0f);
-                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_CUR), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 30.0f);
-                                ImGui::TableHeadersRow();
-
-                                for (int spell = 0; spell < 65; spell++) {
-                                    if (is_spell_used[diff][spell]) {
-                                        ImGui::TableNextRow();
-                                        ImGui::TableNextColumn();
-                                        ImGui::Text("%s", th06_spells_str[Gui::LocaleGet()][spell]);
-                                        ImGui::TableNextColumn();
-
-                                        ImGui::Text("%d/%d(%.1f%%)",
-                                                    TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Capture),
-                                                    TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Attempt),
-                                            ((float)TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Capture)) /
-                                           std::fmax(1.0f,((float)TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Attempt))) * 100.0f);
-                                        ImGui::TableNextColumn();
-
-                                        ImGui::Text("%d", TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Timeout));
-                                        ImGui::TableNextColumn();
-
-                                        ImGui::Text("%d/%d(%.1f%%)",
-                                            TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Capture),
-                                            TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Attempt),
-                                            ((float)TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Capture)) / 
-                                            std::fmax(1.0f, ((float)TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Attempt))) * 100.0f);
-                                        ImGui::TableNextColumn();
-
-                                        ImGui::Text("%d", TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Timeout));
-                                    }
-                                }
-                                ImGui::EndTable();
-                                } }
-                                ImGui::EndTabItem();
-                            }
-                        }
-                        ImGui::EndTabBar();
-                        ImGui::EndTabItem();
-                    }
-                }
-            }
-            ImGui::EndTabBar();
-            if (isOpen != nullptr && ImGui::Button(S(TH_BACK))) {
-                *isOpen = false;
-            }
+            ImGui::TextUnformatted(label);
+            ImGui::SetNextItemWidth(260.0f);
+            const bool sliderChanged = ImGui::SliderInt(sliderId, value, minValue, maxValue, displayFormat);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            const bool inputChanged = ImGui::InputInt(inputId, value);
+            return sliderChanged || inputChanged;
         }
-        void ContentUpdate()
+
+        void RenderNetworkDebuggerContent()
         {
-            SV_Unk198() = 3;
-            ImGui::TextUnformatted(S(TH_ADV_OPT));
+            th06::Netplay::DebugNetworkConfig config = th06::Netplay::GetDebugNetworkConfig();
+            const bool available = IsNetplayDebuggerAvailable();
+            const th06::Netplay::Snapshot snapshot = th06::Netplay::GetSnapshot();
+
+            ImGui::TextWrapped("%s", NetworkDebuggerSummary());
+            ImGui::Spacing();
+
+            if (!available)
+            {
+                ImGui::TextDisabled("%s", NetworkDebuggerUnavailableHint());
+                return;
+            }
+
+            bool dirty = false;
+            if (ImGui::Checkbox(NetDebugEnableLabel(), &config.enabled))
+            {
+                dirty = true;
+            }
+
+            dirty |= RenderDebugValueRow(NetDebugLatencyLabel(), "##netdebug_latency_slider", "##netdebug_latency_input",
+                                         &config.latencyMs, 0, 1000, "%d ms");
+            dirty |= RenderDebugValueRow(NetDebugJitterLabel(), "##netdebug_jitter_slider", "##netdebug_jitter_input",
+                                         &config.jitterMs, 0, 500, "%d ms");
+            dirty |= RenderDebugValueRow(NetDebugPacketLossLabel(), "##netdebug_loss_slider", "##netdebug_loss_input",
+                                         &config.packetLossPercent, 0, 100, "%d%%");
+            dirty |= RenderDebugValueRow(NetDebugDuplicateLabel(), "##netdebug_dup_slider", "##netdebug_dup_input",
+                                         &config.duplicatePercent, 0, 100, "%d%%");
+
+            if (ImGui::Button(NetDebugResetLabel()))
+            {
+                config = {};
+                dirty = true;
+            }
+
+            ClampDebugNetworkConfig(config);
+            if (dirty)
+            {
+                th06::Netplay::SetDebugNetworkConfig(config);
+            }
+
             ImGui::Separator();
-            ImGui::BeginChild("Adv. Options", ImVec2(0.0f, 0.0f));
-            
+            ImGui::Text("%s: %s", NetDebugSessionStateLabel(), snapshot.statusText.c_str());
+        }
+
+        void RenderAdvancedFeaturesContent()
+        {
             if (BeginOptGroup<TH_GAME_SPEED>()) {
                 if (GameFPSOpt(mOptCtx))
                     FpsSet();
@@ -2020,6 +2052,155 @@ namespace TH06 {
             }
             InGameReactionTestOpt();
             AboutOpt();
+        }
+
+        void ShowDetail(bool* isOpen)
+        {
+            ImGui::BeginTabBar("Detail Spell");
+            {
+                const char* tabs_diff[5] = { S(THPRAC_IGI_DIFF_E), S(THPRAC_IGI_DIFF_N), S(THPRAC_IGI_DIFF_H), S(THPRAC_IGI_DIFF_L), S(THPRAC_IGI_DIFF_EX) };
+                for (int diff = 0; diff < 5; diff++) {
+                    if (ImGui::BeginTabItem(tabs_diff[diff])) {
+                        ImGui::BeginTabBar("Player Type");
+                        const char* tabs_player[4] = { S(THPRAC_IGI_PL_ReimuA), S(THPRAC_IGI_PL_ReimuB), S(THPRAC_IGI_PL_MarisaA), S(THPRAC_IGI_PL_MarisaB) };
+                        for (int pl = 0; pl < 4; pl++) {
+                            if (ImGui::BeginTabItem(tabs_player[pl])) {
+                                // time
+                                { char _tid[128]; snprintf(_tid, sizeof(_tid), "%s%stimetable", tabs_diff[diff], tabs_player[pl]);
+                                if (ImGui::BeginTable(_tid, 4,
+                                    ImGuiTableFlags_::ImGuiTableFlags_Resizable |
+                                    ImGuiTableFlags_::ImGuiTableFlags_SizingStretchSame)) {
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_TOT));
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CUR));
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_CHARACTER_TOT));
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_GAMTIME_ALL));
+                                ImGui::TableHeadersRow();
+
+                                int64_t gametime_tot = TH06Save::singleton().GetTotalGameTime(diff,pl);
+                                int64_t gametime_cur = TH06Save::singleton().GetCurrentGameTime(diff, pl);
+                                int64_t gametime_chartot = 0;
+                                for (int i = 0; i < 5; i++)
+                                    gametime_chartot += TH06Save::singleton().GetTotalGameTime(i, pl);
+                                int64_t gametime_all = 0;
+                                for (int i = 0; i < 5; i++)
+                                    for (int j = 0; j < 4; j++)
+                                        gametime_all += TH06Save::singleton().GetTotalGameTime(i, j);
+
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_tot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_cur).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_chartot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_HHMMSS(gametime_all).c_str());
+
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_tot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_cur).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_chartot).c_str());
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped(GetTime_YYMMDD_HHMMSS(gametime_all).c_str());
+
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_tot, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_cur, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_chartot, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+                                ImGui::TableNextColumn();
+                                ImGui::TextWrapped("(%lld %s)", gametime_all, S(THPRAC_INGAMEINFO_06_GAMTIME_NANOSECOND));
+
+                                ImGui::EndTable();
+                                } }
+                                // spell capture
+                                { char _sid[128]; snprintf(_sid, sizeof(_sid), "%s%ssptable", tabs_diff[diff], tabs_player[pl]);
+                                if (ImGui::BeginTable(_sid, 5,
+                                    ImGuiTableFlags_::ImGuiTableFlags_Resizable |
+                                    ImGuiTableFlags_::ImGuiTableFlags_SizingFixedFit)) {
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_SPELL_NAME), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_TOT), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 50.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_TOT), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_CAPTURE_CUR), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 50.0f);
+                                ImGui::TableSetupColumn(S(THPRAC_INGAMEINFO_06_TIMEOUT_CUR), ImGuiTableColumnFlags_::ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                                ImGui::TableHeadersRow();
+
+                                for (int spell = 0; spell < 65; spell++) {
+                                    if (is_spell_used[diff][spell]) {
+                                        ImGui::TableNextRow();
+                                        ImGui::TableNextColumn();
+                                        ImGui::Text("%s", th06_spells_str[Gui::LocaleGet()][spell]);
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d/%d(%.1f%%)",
+                                                    TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Capture),
+                                                    TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Attempt),
+                                            ((float)TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Capture)) /
+                                           std::fmax(1.0f,((float)TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Attempt))) * 100.0f);
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d", TH06Save::singleton().GetTotalSpellCardCount(spell, diff, pl, TH06Save::Timeout));
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d/%d(%.1f%%)",
+                                            TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Capture),
+                                            TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Attempt),
+                                            ((float)TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Capture)) / 
+                                            std::fmax(1.0f, ((float)TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Attempt))) * 100.0f);
+                                        ImGui::TableNextColumn();
+
+                                        ImGui::Text("%d", TH06Save::singleton().GetCurrentSpellCardCount(spell, diff, pl, TH06Save::Timeout));
+                                    }
+                                }
+                                ImGui::EndTable();
+                                } }
+                                ImGui::EndTabItem();
+                            }
+                        }
+                        ImGui::EndTabBar();
+                        ImGui::EndTabItem();
+                    }
+                }
+            }
+            ImGui::EndTabBar();
+            if (isOpen != nullptr && ImGui::Button(S(TH_BACK))) {
+                *isOpen = false;
+            }
+        }
+        void ContentUpdate()
+        {
+            SV_Unk198() = 3;
+            ImGui::TextUnformatted(S(TH_ADV_OPT));
+            ImGui::SameLine();
+            ImGui::Checkbox(DeveloperModeLabel(), &mDeveloperMode);
+            g_developer_mode_enabled = mDeveloperMode;
+            ImGui::SameLine();
+            HelpMarker(DeveloperModeDesc());
+            ImGui::Separator();
+            ImGui::BeginChild("Adv. Options", ImVec2(0.0f, 0.0f));
+            if (mDeveloperMode && ImGui::BeginTabBar("TH06DeveloperTabs"))
+            {
+                if (ImGui::BeginTabItem(AdvancedFeaturesTabLabel()))
+                {
+                    RenderAdvancedFeaturesContent();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem(NetworkDebuggerTabLabel()))
+                {
+                    RenderNetworkDebuggerContent();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+            else
+            {
+                RenderAdvancedFeaturesContent();
+            }
             ImGui::EndChild();
             ImGui::SetWindowFocus();
         }
@@ -4408,6 +4589,135 @@ namespace TH06 {
         }
 
         thPracParam._playLock = true;
+    }
+
+    bool THPracIsDeveloperModeEnabled()
+    {
+        return g_developer_mode_enabled;
+    }
+
+    bool THPracConsumeEndingShortcut()
+    {
+        if (!g_developer_mode_enabled)
+        {
+            THPracResetEndingShortcut();
+            return false;
+        }
+
+        const bool rawE = Gui::KeyboardInputGetRaw('E');
+        const bool rawN = Gui::KeyboardInputGetRaw('N');
+        const bool rawD = Gui::KeyboardInputGetRaw('D');
+        const bool pressE = rawE && !g_ending_shortcut_prev_e;
+        const bool pressN = rawN && !g_ending_shortcut_prev_n;
+        const bool pressD = rawD && !g_ending_shortcut_prev_d;
+        g_ending_shortcut_prev_e = rawE;
+        g_ending_shortcut_prev_n = rawN;
+        g_ending_shortcut_prev_d = rawD;
+
+        const u32 now = SDL_GetTicks();
+        if (g_ending_shortcut_progress != 0 && now - g_ending_shortcut_last_tick > ENDING_SHORTCUT_TIMEOUT_MS)
+        {
+            g_ending_shortcut_progress = 0;
+        }
+
+        switch (g_ending_shortcut_progress)
+        {
+        case 0:
+            if (pressE)
+            {
+                g_ending_shortcut_progress = 1;
+                g_ending_shortcut_last_tick = now;
+            }
+            break;
+        case 1:
+            if (pressN)
+            {
+                g_ending_shortcut_progress = 2;
+                g_ending_shortcut_last_tick = now;
+            }
+            else if (pressE)
+            {
+                g_ending_shortcut_last_tick = now;
+            }
+            else if (pressD)
+            {
+                g_ending_shortcut_progress = 0;
+            }
+            break;
+        case 2:
+            if (pressD)
+            {
+                THPracResetEndingShortcut();
+                return true;
+            }
+            if (pressE)
+            {
+                g_ending_shortcut_progress = 1;
+                g_ending_shortcut_last_tick = now;
+            }
+            else if (pressN)
+            {
+                g_ending_shortcut_last_tick = now;
+            }
+            break;
+        default:
+            g_ending_shortcut_progress = 0;
+            break;
+        }
+
+        return false;
+    }
+
+    void THPracResetEndingShortcut()
+    {
+        g_ending_shortcut_progress = 0;
+        g_ending_shortcut_last_tick = 0;
+        g_ending_shortcut_prev_e = false;
+        g_ending_shortcut_prev_n = false;
+        g_ending_shortcut_prev_d = false;
+    }
+
+    void THPracPrepareDebugEndingJump()
+    {
+        g_debug_ending_jump_active = true;
+
+        if (th06::g_GameManager.character > th06::CHARA_MARISA)
+        {
+            th06::g_GameManager.character = th06::CHARA_REIMU;
+        }
+        if (th06::g_GameManager.shotType > th06::SHOT_TYPE_B)
+        {
+            th06::g_GameManager.shotType = th06::SHOT_TYPE_A;
+        }
+
+        th06::g_GameManager.character2 = th06::g_GameManager.character;
+        th06::g_GameManager.shotType2 = th06::g_GameManager.shotType;
+        th06::g_GameManager.difficulty =
+            std::clamp(th06::g_GameManager.difficulty, th06::NORMAL, th06::LUNATIC);
+        th06::g_GameManager.numRetries = 0;
+        th06::g_GameManager.isInReplay = 0;
+        th06::g_GameManager.demoMode = 0;
+        th06::g_GameManager.isInPracticeMode = 0;
+        th06::g_GameManager.isInGameMenu = 0;
+        th06::g_GameManager.isInRetryMenu = 0;
+        th06::g_GameManager.isInMenu = 0;
+        th06::g_GameManager.isGameCompleted = 0;
+        th06::g_GameManager.currentStage = th06::FINAL_STAGE;
+        th06::g_GameManager.guiScore = th06::g_GameManager.score;
+
+        th06::g_Supervisor.framerateMultiplier = 1.0f;
+        th06::g_Supervisor.effectiveFramerateMultiplier = 1.0f;
+        th06::g_Supervisor.isInEnding = false;
+    }
+
+    bool THPracIsDebugEndingJumpActive()
+    {
+        return g_debug_ending_jump_active;
+    }
+
+    void THPracClearDebugEndingJump()
+    {
+        g_debug_ending_jump_active = false;
     }
 
     bool THPracIsMuteki()   { return *THOverlay::singleton().mMuteki; }

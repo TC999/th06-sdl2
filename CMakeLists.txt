@@ -174,6 +174,10 @@ set(TH06_GAME_SOURCES
     src/MidiOutput.cpp
     src/MusicRoom.cpp
     src/NetplaySession.cpp
+    src/NetplayDiagnostics.cpp
+    src/NetplayTransport.cpp
+    src/NetplayUiSync.cpp
+    src/NetplayRollback.cpp
     src/OnlineMenu.cpp
     src/Player.cpp
     src/ReplayManager.cpp

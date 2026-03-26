@@ -60,6 +60,22 @@ static bool ShouldFreezeWhenInactive()
     return !(THPrac::g_adv_igi_options.th06_run_in_background || OnlineMenu::ShouldForceRunInBackground());
 }
 
+static bool IsWindowPresentationUnavailable()
+{
+    if (g_GameWindow.sdlWindow == NULL)
+    {
+        return false;
+    }
+
+    const Uint32 windowFlags = SDL_GetWindowFlags(g_GameWindow.sdlWindow);
+    return (windowFlags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) != 0;
+}
+
+static bool ShouldRunHeadlessWhenInactive()
+{
+    return !ShouldFreezeWhenInactive() && IsWindowPresentationUnavailable();
+}
+
 #ifdef __ANDROID__
 static void LogAndroidInputEvent(const SDL_Event &event)
 {
@@ -358,33 +374,41 @@ void GameWindow::Present()
 {
     i32 unused;
 
-    g_Renderer->EndFrame();
+    const bool runHeadlessWhenInactive = ShouldRunHeadlessWhenInactive();
+
+    if (!runHeadlessWhenInactive)
+    {
+        g_Renderer->EndFrame();
 
  #ifndef __ANDROID__
-    if (g_GameWindow.screenWidth != 0)
-    {
-        static u32 s_lastPresentTime = 0;
-        u32 curTime = timeGetTime();
-        if (s_lastPresentTime != 0)
+        if (g_GameWindow.screenWidth != 0)
         {
-            float speedMul = Session::IsRemoteNetplaySession() ? 1.0f : THPrac::THPracGetSpeedMultiplier();
-            u32 targetMs = (speedMul > 0.01f) ? (u32)(16.0f / speedMul) : 16;
-            u32 elapsed = curTime - s_lastPresentTime;
-            if (elapsed < targetMs)
+            static u32 s_lastPresentTime = 0;
+            u32 curTime = timeGetTime();
+            if (s_lastPresentTime != 0)
             {
-                SDL_Delay(targetMs - elapsed);
+                float speedMul = Session::IsRemoteNetplaySession() ? 1.0f : THPrac::THPracGetSpeedMultiplier();
+                u32 targetMs = (speedMul > 0.01f) ? (u32)(16.0f / speedMul) : 16;
+                u32 elapsed = curTime - s_lastPresentTime;
+                if (elapsed < targetMs)
+                {
+                    SDL_Delay(targetMs - elapsed);
+                }
             }
+            s_lastPresentTime = timeGetTime();
         }
-        s_lastPresentTime = timeGetTime();
-    }
  #endif
+    }
     if (g_Supervisor.unk198 != 0)
     {
         g_Supervisor.unk198--;
     }
 
-    // Begin next frame (binds FBO)
-    g_Renderer->BeginFrame();
+    if (!runHeadlessWhenInactive)
+    {
+        // Begin next frame (binds FBO)
+        g_Renderer->BeginFrame();
+    }
     return;
 }
 
@@ -481,13 +505,17 @@ void GameWindow_ProcessEvents()
             g_GameWindow.isAppClosing = 1;
             break;
         case SDL_WINDOWEVENT:
-            if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
+            if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
+                event.window.event == SDL_WINDOWEVENT_RESTORED ||
+                event.window.event == SDL_WINDOWEVENT_SHOWN)
             {
                 g_GameWindow.lastActiveAppValue = 1;
                 g_GameWindow.isAppActive = 0;
                 Controller::ResetInputState();
             }
-            else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+            else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                     event.window.event == SDL_WINDOWEVENT_MINIMIZED ||
+                     event.window.event == SDL_WINDOWEVENT_HIDDEN)
             {
                 g_GameWindow.lastActiveAppValue = ShouldFreezeWhenInactive() ? 0 : 1;
                 g_GameWindow.isAppActive = ShouldFreezeWhenInactive() ? 1 : 0;

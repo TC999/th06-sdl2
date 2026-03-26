@@ -750,7 +750,10 @@ GLuint RendererGL::CreateEmptyTexture(i32 width, i32 height)
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    std::vector<u8> zeroPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, zeroPixels.data());
 
     if (this->currentTexture != 0)
         glBindTexture(GL_TEXTURE_2D, this->currentTexture);
@@ -861,6 +864,8 @@ void RendererGL::CopySurfaceToScreen(GLuint surfaceTex, i32 srcX, i32 srcY, i32 
     i32 drawW = w > 0 ? w : texW;
     i32 drawH = h > 0 ? h : texH;
 
+    SetBlendMode(BLEND_MODE_ALPHA);
+    SetColorOp(0);
     Begin2DDraw(this);
 
     glEnable(GL_TEXTURE_2D);
@@ -889,6 +894,8 @@ void RendererGL::CopySurfaceRectToScreen(GLuint surfaceTex, i32 srcX, i32 srcY, 
     f32 u1 = (f32)(srcX + srcW) / texW;
     f32 v1 = (f32)(srcY + srcH) / texH;
 
+    SetBlendMode(BLEND_MODE_ALPHA);
+    SetColorOp(0);
     Begin2DDraw(this);
 
     glEnable(GL_TEXTURE_2D);

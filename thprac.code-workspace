@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../thprac"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../thprac_utils"
+		}
+	],
+	"settings": {}
+}

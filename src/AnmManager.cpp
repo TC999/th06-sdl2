@@ -1334,10 +1334,10 @@ void AnmManager::DrawEndingRect(i32 surfaceIdx, i32 rectX, i32 rectY, i32 rectLe
     }
 
     g_Renderer->CopySurfaceRectToScreen(this->surfaces[surfaceIdx],
-                                       this->surfaceSourceInfo[surfaceIdx].Width,
-                                       this->surfaceSourceInfo[surfaceIdx].Height,
                                        rectLeft, rectTop, width, height,
-                                       rectX, rectY);
+                                       rectX, rectY,
+                                       this->surfaceSourceInfo[surfaceIdx].Width,
+                                       this->surfaceSourceInfo[surfaceIdx].Height);
 }
 
 #pragma var_order(rect, destSurface, sourceSurface)

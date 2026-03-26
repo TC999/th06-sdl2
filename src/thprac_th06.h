@@ -118,6 +118,12 @@ namespace TH06 {
     int THPracMenuApply();
     // Returns true if thprac practice mode is active (mode != 0).
     bool THPracIsActive();
+    bool THPracIsDeveloperModeEnabled();
+    bool THPracConsumeEndingShortcut();
+    void THPracResetEndingShortcut();
+    void THPracPrepareDebugEndingJump();
+    bool THPracIsDebugEndingJumpActive();
+    void THPracClearDebugEndingJump();
     // Apply practice parameters (lives, bombs, power, etc.) at stage start.
     // Called from GameManager::AddedCallback after normal initialization.
     void THPracApplyStageParams();

@@ -9,6 +9,7 @@
 #include "Player.hpp"
 #include "ScreenEffect.hpp"
 #include "Supervisor.hpp"
+#include "thprac_th06.h"
 #include "i18n.hpp"
 #include "utils.hpp"
 
@@ -522,6 +523,7 @@ ZunResult Ending::AddedCallback(Ending *ending)
 {
     i32 shotTypeAndCharacter;
     i32 unused;
+    const bool isDebugEndingJump = THPrac::TH06::THPracIsDebugEndingJumpActive();
 
     unused = g_GameManager.character * 2 + g_GameManager.shotType;
 
@@ -539,7 +541,7 @@ ZunResult Ending::AddedCallback(Ending *ending)
 
     shotTypeAndCharacter = g_GameManager.character * 2 + g_GameManager.shotType;
     ending->hasSeenEnding = false;
-    if (g_GameManager.numRetries == 0)
+    if (!isDebugEndingJump && g_GameManager.numRetries == 0)
     {
         if (g_GameManager.clrd[shotTypeAndCharacter].difficultyClearedWithRetries[g_GameManager.difficulty] == 99)
         {
@@ -548,14 +550,17 @@ ZunResult Ending::AddedCallback(Ending *ending)
 
         g_GameManager.clrd[shotTypeAndCharacter].difficultyClearedWithRetries[g_GameManager.difficulty] = 99;
     }
-    else
+    else if (!isDebugEndingJump)
     {
         if (g_GameManager.clrd[shotTypeAndCharacter].difficultyClearedWithoutRetries[g_GameManager.difficulty] == 99)
         {
             ending->hasSeenEnding = true;
         }
     }
-    g_GameManager.clrd[shotTypeAndCharacter].difficultyClearedWithoutRetries[g_GameManager.difficulty] = 99;
+    if (!isDebugEndingJump)
+    {
+        g_GameManager.clrd[shotTypeAndCharacter].difficultyClearedWithoutRetries[g_GameManager.difficulty] = 99;
+    }
     if (g_GameManager.difficulty == EASY || g_GameManager.numRetries != 0)
     {
         switch (g_GameManager.character)
@@ -617,6 +622,7 @@ ZunResult Ending::AddedCallback(Ending *ending)
 
 ZunResult Ending::DeletedCallback(Ending *ending)
 {
+    THPrac::TH06::THPracClearDebugEndingJump();
     g_AnmManager->ReleaseAnm(ANM_FILE_STAFF01);
     g_AnmManager->ReleaseAnm(ANM_FILE_STAFF02);
     g_AnmManager->ReleaseAnm(ANM_FILE_STAFF03);

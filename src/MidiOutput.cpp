@@ -11,9 +11,67 @@
 #include <SDL.h>
 #include <SDL_mixer.h>
 #include <cstring>
+#include <limits>
 
 namespace th06
 {
+namespace
+{
+bool IsMidiRangeAvailable(const u8 *cursor, size_t length, const u8 *fileEnd)
+{
+    return cursor != NULL && fileEnd != NULL && cursor <= fileEnd && length <= (size_t)(fileEnd - cursor);
+}
+
+bool TryConfigureDefaultMidiSoundFont()
+{
+    if (Mix_GetSoundFonts() != NULL)
+    {
+        return true;
+    }
+
+#ifdef _WIN32
+    static const char *kCandidateSoundFonts[] = {
+        "C:\\Windows\\SysWOW64\\drivers\\gm.dls",
+        "C:\\Windows\\System32\\drivers\\gm.dls",
+    };
+
+    for (const char *candidate : kCandidateSoundFonts)
+    {
+        SDL_RWops *rw = SDL_RWFromFile(candidate, "rb");
+        if (rw == NULL)
+        {
+            continue;
+        }
+
+        SDL_RWclose(rw);
+        if (Mix_SetSoundFonts(candidate) != 0)
+        {
+            utils::DebugPrint2("MIDI soundfont configured: %s\n", candidate);
+            return true;
+        }
+
+        utils::DebugPrint2("Mix_SetSoundFonts failed for %s: %s\n", candidate, Mix_GetError());
+    }
+#endif
+
+    return Mix_GetSoundFonts() != NULL;
+}
+
+void EnsureMidiBackendReady()
+{
+    const int midiFlags = Mix_Init(MIX_INIT_MID);
+    if ((midiFlags & MIX_INIT_MID) != MIX_INIT_MID)
+    {
+        utils::DebugPrint2("Mix_Init(MIX_INIT_MID) failed: %s\n", Mix_GetError());
+    }
+
+    TryConfigureDefaultMidiSoundFont();
+    utils::DebugPrint2("MIDI backend status: soundfonts=%s timidity=%s\n",
+                       Mix_GetSoundFonts() != NULL ? Mix_GetSoundFonts() : "(null)",
+                       Mix_GetTimidityCfg() != NULL ? Mix_GetTimidityCfg() : "(null)");
+}
+}
+
 MidiDevice::MidiDevice()
 {
     this->handle = 0;
@@ -189,6 +247,12 @@ void MidiOutput::ClearTracks()
     u8 *data;
     MidiTrack *tracks;
 
+    if (this->tracks == NULL)
+    {
+        this->numTracks = 0;
+        return;
+    }
+
     for (trackIndex = 0; trackIndex < this->numTracks; trackIndex++)
     {
         data = this->tracks[trackIndex].trackData;
@@ -211,6 +275,8 @@ ZunResult MidiOutput::ParseFile(i32 fileIdx)
     i32 trackIdx;
     u8 *fileData;
     u32 hdrLength;
+    const u8 *fileEnd;
+    u32 parsedNumTracks;
 
     this->ClearTracks();
     currentCursor = this->midiFileData[fileIdx];
@@ -221,13 +287,27 @@ ZunResult MidiOutput::ParseFile(i32 fileIdx)
         return ZUN_ERROR;
     }
 
+    fileEnd = fileData + g_LastFileSize;
+    if (!IsMidiRangeAvailable(currentCursor, sizeof(hdrRaw), fileEnd))
+    {
+        goto parse_fail;
+    }
+
     // Read midi header chunk
     // First, read the header len
     memcpy(&hdrRaw, currentCursor, 8);
+    if (memcmp(hdrRaw, "MThd", 4) != 0)
+    {
+        goto parse_fail;
+    }
 
     // Get a pointer to the end of the header chunk
     currentCursor += sizeof(hdrRaw);
     hdrLength = MidiOutput::Ntohl(utils::ReadUnaligned<u32>(hdrRaw + 4));
+    if (hdrLength < 6 || !IsMidiRangeAvailable(currentCursor, hdrLength, fileEnd))
+    {
+        goto parse_fail;
+    }
 
     endOfHeaderPointer = currentCursor;
     currentCursor += hdrLength;
@@ -244,39 +324,77 @@ ZunResult MidiOutput::ParseFile(i32 fileIdx)
     // "negative SMPTE format", which happens when the MSB is set.
     this->divisions = MidiOutput::Ntohs(utils::ReadUnaligned<u16>(endOfHeaderPointer + 4));
     // Read the number of tracks in this midi file.
-    this->numTracks = MidiOutput::Ntohs(utils::ReadUnaligned<u16>(endOfHeaderPointer + 2));
+    parsedNumTracks = MidiOutput::Ntohs(utils::ReadUnaligned<u16>(endOfHeaderPointer + 2));
+    if (parsedNumTracks == 0 || parsedNumTracks > std::numeric_limits<size_t>::max() / sizeof(MidiTrack))
+    {
+        goto parse_fail;
+    }
 
     // Allocate this->divisions * 32 bytes.
-    this->tracks = (MidiTrack *)ZunMemory::Alloc(sizeof(MidiTrack) * this->numTracks);
+    this->tracks = (MidiTrack *)ZunMemory::Alloc(sizeof(MidiTrack) * parsedNumTracks);
+    if (this->tracks == NULL)
+    {
+        goto parse_fail;
+    }
+    this->numTracks = parsedNumTracks;
     memset(this->tracks, 0, sizeof(MidiTrack) * this->numTracks);
     for (trackIdx = 0; trackIdx < this->numTracks; trackIdx += 1)
     {
+        if (!IsMidiRangeAvailable(currentCursor, 8, fileEnd))
+        {
+            goto parse_fail;
+        }
+
         currentCursorTrack = currentCursor;
+        if (memcmp(currentCursorTrack, "MTrk", 4) != 0)
+        {
+            goto parse_fail;
+        }
         currentCursor += 8;
 
         // Read a track (MTrk) chunk.
         //
         // First, read the length of the chunk
         trackLength = MidiOutput::Ntohl(utils::ReadUnaligned<u32>(currentCursorTrack + 4));
+        if (trackLength == 0 || !IsMidiRangeAvailable(currentCursor, trackLength, fileEnd))
+        {
+            goto parse_fail;
+        }
         this->tracks[trackIdx].trackLength = trackLength;
         this->tracks[trackIdx].trackData = (u8 *)ZunMemory::Alloc(trackLength);
+        if (this->tracks[trackIdx].trackData == NULL)
+        {
+            goto parse_fail;
+        }
         this->tracks[trackIdx].trackPlaying = 1;
         memcpy(this->tracks[trackIdx].trackData, currentCursor, trackLength);
         currentCursor += trackLength;
     }
     this->tempo = 1000000;
     return ZUN_SUCCESS;
+
+parse_fail:
+    utils::DebugPrint2("error : invalid MIDI file data.\n");
+    this->ClearTracks();
+    this->format = 0;
+    this->divisions = 0;
+    this->tempo = 0;
+    return ZUN_ERROR;
 }
 
 ZunResult MidiOutput::LoadFile(char *midiPath)
 {
+    ZunResult parseResult;
+
     if (this->ReadFileData(0x1f, midiPath) != ZUN_SUCCESS)
     {
         return ZUN_ERROR;
     }
 
+    EnsureMidiBackendReady();
+
     u32 fileSize = g_LastFileSize;
-    this->ParseFile(0x1f);
+    parseResult = this->ParseFile(0x1f);
 
     if (this->midiFileData[0x1f] != NULL && fileSize > 0)
     {
@@ -293,6 +411,19 @@ ZunResult MidiOutput::LoadFile(char *midiPath)
                 this->midiHeaders[0] = mus;
             }
         }
+    }
+
+    if (this->midiHeaders[0] == NULL)
+    {
+        utils::DebugPrint2("error : SDL_mixer failed to load MIDI file %s (%s)\n", midiPath, Mix_GetError());
+        this->ClearTracks();
+        this->ReleaseFileData(0x1f);
+        return ZUN_ERROR;
+    }
+
+    if (parseResult != ZUN_SUCCESS)
+    {
+        utils::DebugPrint2("warning : MIDI parser rejected %s, continuing with SDL_mixer music handle.\n", midiPath);
     }
 
     this->ReleaseFileData(0x1f);
@@ -322,17 +453,24 @@ void MidiOutput::LoadTracks()
 
 ZunResult MidiOutput::Play()
 {
-    if (this->tracks == NULL)
+    if (this->midiHeaders[0] == NULL)
     {
         return ZUN_ERROR;
     }
 
-    this->LoadTracks();
+    if (this->tracks != NULL)
+    {
+        this->LoadTracks();
+    }
 
     if (this->midiHeaders[0] != NULL)
     {
         Mix_VolumeMusic(MIX_MAX_VOLUME * 45 / 100);
-        Mix_PlayMusic((Mix_Music *)this->midiHeaders[0], -1);
+        if (Mix_PlayMusic((Mix_Music *)this->midiHeaders[0], -1) < 0)
+        {
+            utils::DebugPrint2("Mix_PlayMusic failed for MIDI: %s\n", Mix_GetError());
+            return ZUN_ERROR;
+        }
     }
 
     return ZUN_SUCCESS;
@@ -340,15 +478,10 @@ ZunResult MidiOutput::Play()
 
 ZunResult MidiOutput::StopPlayback()
 {
-    if (this->tracks == NULL)
-    {
-        return ZUN_ERROR;
-    }
-
     Mix_HaltMusic();
     this->StopTimer();
 
-    return ZUN_SUCCESS;
+    return this->tracks != NULL || this->midiHeaders[0] != NULL ? ZUN_SUCCESS : ZUN_ERROR;
 }
 
 ZunResult MidiOutput::UnprepareHeader(void *pmh)

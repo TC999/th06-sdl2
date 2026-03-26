@@ -6,7 +6,7 @@
 
 namespace th06::Netplay
 {
-constexpr int kProtocolVersion = 3801;
+constexpr int kProtocolVersion = 3803;
 
 enum InGameCtrlType
 {
@@ -48,11 +48,21 @@ struct RelaySnapshot
     std::string statusText = "not configured";
 };
 
+struct DebugNetworkConfig
+{
+    bool enabled = false;
+    int latencyMs = 0;
+    int jitterMs = 0;
+    int packetLossPercent = 0;
+    int duplicatePercent = 0;
+};
+
 ISession &GetSession();
 void Shutdown();
 
 Snapshot GetSnapshot();
 RelaySnapshot GetRelaySnapshot();
+DebugNetworkConfig GetDebugNetworkConfig();
 bool BeginHosting(int listenPort, const std::string &relayEndpoint, const std::string &roomCode,
                   std::string *errorMessage);
 bool BeginGuest(const std::string &hostIp, int hostPort, int listenPort, const std::string &relayEndpoint,
@@ -78,9 +88,13 @@ bool ConsumeFrameStallRequested();
 int GetDelay();
 void SetDelay(int delay);
 void SetPredictionRollbackEnabled(bool enabled);
+void SetDebugNetworkConfig(const DebugNetworkConfig &config);
 void SetHostPlayer1(bool hostIsPlayer1);
 bool ConsumeTitleColdStartRequested();
 void PrepareGameplayStart();
+bool RequestDebugEndingJump();
+bool ConsumeRequestedDebugEndingJump();
+void ActivateUiSession();
 
 InGameCtrlType ConsumeInGameControl();
 void DrawOverlay();

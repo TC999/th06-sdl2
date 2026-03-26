@@ -11,6 +11,7 @@
 #include <SDL_image.h>
 #include <cstring>
 #include <cstdio>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // GL 2.0 shader / FBO function pointers (loaded via SDL_GL_GetProcAddress)
@@ -1711,10 +1712,13 @@ u32 RendererGLES::CreateEmptyTexture(i32 width, i32 height)
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    std::vector<u8> zeroPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
     this->stats.textureBinds++;
     this->stats.textureUploads++;
     this->stats.textureUploadBytes += (u64)width * height * 4;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, zeroPixels.data());
 
     if (this->currentTexture != 0)
     {
@@ -1870,6 +1874,8 @@ void RendererGLES::CopySurfaceToScreen(u32 surfaceTex, i32 srcX, i32 srcY,
     i32 drawH = h > 0 ? h : texH;
 
     if (!this->in2DPass) Enter2DPass();
+    SetBlendMode(BLEND_MODE_ALPHA);
+    SetColorOp(0);
 
     u8 prevTexEnabled = this->textureEnabled;
     if (!prevTexEnabled)
@@ -1920,6 +1926,8 @@ void RendererGLES::CopySurfaceRectToScreen(u32 surfaceTex, i32 srcX, i32 srcY, i
     f32 v1 = (f32)(srcY + srcH) / texH;
 
     if (!this->in2DPass) Enter2DPass();
+    SetBlendMode(BLEND_MODE_ALPHA);
+    SetColorOp(0);
 
     u8 prevTexEnabled = this->textureEnabled;
     if (!prevTexEnabled)
