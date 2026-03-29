@@ -1,4 +1,5 @@
 ﻿#include "thprac_gui_components.h"
+#include "thprac_gui_locale.h"
 #include "imgui_internal.h"
 #include <string>
 #include <cstdio>
@@ -8,6 +9,22 @@
 
 namespace THPrac
 {
+    namespace
+    {
+        const char* TrComponents(const char* zh, const char* en, const char* ja)
+        {
+            switch (Gui::LocaleGet()) {
+            case Gui::LOCALE_ZH_CN:
+                return zh;
+            case Gui::LOCALE_JA_JP:
+                return ja;
+            case Gui::LOCALE_EN_US:
+            default:
+                return en;
+            }
+        }
+    }
+
     extern int GameGuiGeneration;
 
     int rotation_start_index;
@@ -408,9 +425,12 @@ namespace THPrac
             auto size = ImGui::GetWindowSize();
             auto& io = ImGui::GetIO();
 
-            ImGui::Text("Size: %f (%f), %f (%f)", size.x, size.x / io.DisplaySize.x, size.y, size.y / io.DisplaySize.y);
-            ImGui::Text("Pos X: %f (%f)", pos.x, pos.x / (io.DisplaySize.x - size.x));
-            ImGui::Text("Pos Y: %f (%f)", pos.y, pos.y / (io.DisplaySize.y - size.y));
+            ImGui::Text("%s: %f (%f), %f (%f)", TrComponents("尺寸", "Size", "サイズ"),
+                        size.x, size.x / io.DisplaySize.x, size.y, size.y / io.DisplaySize.y);
+            ImGui::Text("%s: %f (%f)", TrComponents("位置 X", "Pos X", "位置 X"),
+                        pos.x, pos.x / (io.DisplaySize.x - size.x));
+            ImGui::Text("%s: %f (%f)", TrComponents("位置 Y", "Pos Y", "位置 Y"),
+                        pos.y, pos.y / (io.DisplaySize.y - size.y));
         }
         std::vector<GameGuiWnd::StyleValue>::iterator GameGuiWnd::GetStyleIt(ImGuiStyleVar style)
         {

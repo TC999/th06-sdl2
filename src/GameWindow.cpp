@@ -4,6 +4,7 @@
 #include "GameErrorContext.hpp"
 #include "NetplaySession.hpp"
 #include "OnlineMenu.hpp"
+#include "PortableGameplayRestore.hpp"
 #include "RendererGLES.hpp"
 #include "ScreenEffect.hpp"
 #include "Session.hpp"
@@ -229,6 +230,7 @@ RenderResult GameWindow::Render()
     LOOP_USING_GOTO_BECAUSE_WHY_NOT:
         if (g_Supervisor.cfg.frameskipConfig <= this->curFrame)
         {
+            const bool holdPausePresentation = Netplay::IsPausePresentationHoldActive();
             // Capture the screenshot BEFORE clearing/drawing the new frame.
             // The FBO still holds the previous frame's clean game scene.
             // This must happen before Clear/DrawChain so that the pause menu
@@ -236,25 +238,29 @@ RenderResult GameWindow::Render()
             // Previously this lived in Present(), but frame-skipping could
             // skip Present() while still running DrawChain, causing the menu
             // background to show stale/undefined texture data ("texture overflow").
-            g_AnmManager->TakeScreenshotIfRequested();
-            if (g_Supervisor.IsUnknown())
+            if (!holdPausePresentation)
             {
-                viewport.X = 0;
-                viewport.Y = 0;
-                viewport.Width = 640;
-                viewport.Height = 480;
-                viewport.MinZ = 0.0;
-                viewport.MaxZ = 1.0;
-                g_Renderer->SetViewport(viewport.X, viewport.Y, viewport.Width, viewport.Height, viewport.MinZ, viewport.MaxZ);
-                g_Renderer->Clear(g_Stage.skyFog.color, 1, 1);
-                g_Renderer->SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
-                                       g_Supervisor.viewport.Width, g_Supervisor.viewport.Height,
-                                       g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
+                g_AnmManager->TakeScreenshotIfRequested();
+                if (g_Supervisor.IsUnknown() || PortableGameplayRestore::ConsumeForcedClearFrameRequested() ||
+                    PortableGameplayRestore::ShouldForceClearGameplayFrame())
+                {
+                    viewport.X = 0;
+                    viewport.Y = 0;
+                    viewport.Width = 640;
+                    viewport.Height = 480;
+                    viewport.MinZ = 0.0;
+                    viewport.MaxZ = 1.0;
+                    g_Renderer->SetViewport(viewport.X, viewport.Y, viewport.Width, viewport.Height, viewport.MinZ, viewport.MaxZ);
+                    g_Renderer->Clear(g_Stage.skyFog.color, 1, 1);
+                    g_Renderer->SetViewport(g_Supervisor.viewport.X, g_Supervisor.viewport.Y,
+                                           g_Supervisor.viewport.Width, g_Supervisor.viewport.Height,
+                                           g_Supervisor.viewport.MinZ, g_Supervisor.viewport.MaxZ);
+                }
+                g_Renderer->BeginScene();
+                g_Chain.RunDrawChain();
+                g_Renderer->EndScene();
+                g_Renderer->SetTexture(0);
             }
-            g_Renderer->BeginScene();
-            g_Chain.RunDrawChain();
-            g_Renderer->EndScene();
-            g_Renderer->SetTexture(0);
         }
 
         g_Supervisor.viewport.X = 0;

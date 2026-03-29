@@ -19,10 +19,31 @@ struct ReplayManager
     static ZunResult DeletedCallback(ReplayManager *mgr);
     static void StopRecording();
     static void SaveReplay(char *replay_path, char *param_2);
+    static ReplayData *LoadReplayData(char *replayFile, int isExternalResource);
     static ZunResult ValidateReplayData(ReplayData *data, i32 fileSize);
 
     ReplayManager()
     {
+        int idx;
+        frameId = 0;
+        replayData = NULL;
+        isDemo = 0;
+        replayFile = NULL;
+        for (idx = 0; idx < 52; ++idx)
+        {
+            unk10[idx] = 0;
+        }
+        unk44 = 0;
+        replayInputs = NULL;
+        replayHeldFrames = 0;
+        replayTraceFlags = 0;
+        for (idx = 0; idx < 7; ++idx)
+        {
+            replayInputStageBookmarks[idx] = NULL;
+        }
+        calcChain = NULL;
+        drawChain = NULL;
+        calcChainDemoHighPrio = NULL;
     }
 
     i32 IsDemo()
@@ -37,6 +58,8 @@ struct ReplayManager
     u8 unk10[52];
     u16 unk44;
     ReplayDataInput *replayInputs;
+    u16 replayHeldFrames;
+    u8 replayTraceFlags;
     ReplayDataInput *replayInputStageBookmarks[7];
     ChainElem *calcChain;
     ChainElem *drawChain;

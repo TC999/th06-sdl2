@@ -14,10 +14,12 @@
 #include "MainMenu.hpp"
 #include "NetplaySession.hpp"
 #include "MusicRoom.hpp"
+#include "PortableGameplayRestore.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
 #include "Rng.hpp"
 #include "Session.hpp"
+#include "SinglePlayerSnapshot.hpp"
 #include "SoundPlayer.hpp"
 #include "TextHelper.hpp"
 #include "i18n.hpp"
@@ -60,8 +62,17 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
         g_SoundPlayer.backgroundMusic->UpdateFadeOut();
     }
     Session::AdvanceFrameInput();
+    PortableGameplayRestore::TickPortableRestore();
+    if (PortableGameplayRestore::ConsumeFrameBreakRequested())
+    {
+        return CHAIN_CALLBACK_RESULT_BREAK;
+    }
     Netplay::DrawOverlay();
-    if (Session::IsRemoteNetplaySession() && Netplay::ConsumeFrameStallRequested())
+    SinglePlayerSnapshot::DrawQuickSnapshotOverlay();
+    const bool netplayStallRequested = Session::IsRemoteNetplaySession() && Netplay::ConsumeFrameStallRequested();
+    const bool allowTransitionWhileStalled =
+        netplayStallRequested && PortableGameplayRestore::ShouldAdvanceSupervisorTransitionWhileStalled();
+    if (netplayStallRequested && !allowTransitionWhileStalled)
     {
         return CHAIN_CALLBACK_RESULT_BREAK;
     }
@@ -220,6 +231,10 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
 
     s->wantedState = s->curState;
     s->calcCount++;
+    if (netplayStallRequested)
+    {
+        return CHAIN_CALLBACK_RESULT_BREAK;
+    }
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 

@@ -14,6 +14,7 @@
 #include "Stage.hpp"
 #include "ZunColor.hpp"
 #include "sdl2_renderer.hpp"
+#include "thprac_th06.h"
 #include "utils.hpp"
 
 namespace th06
@@ -24,6 +25,15 @@ DIFFABLE_STATIC(ChainElem, g_GuiDrawChain);
 
 namespace
 {
+void NormalizeStaticChainElem(ChainElem &elem)
+{
+    g_Chain.Cut(&elem);
+    elem.prev = NULL;
+    elem.next = NULL;
+    elem.unkPtr = &elem;
+    elem.priority = 0;
+}
+
 ZunResult LoadCharacterFaceAnm(Character character, i32 fileA, i32 fileB, i32 fileC, i32 offsetA, i32 offsetB, i32 offsetC)
 {
     switch (character)
@@ -497,6 +507,7 @@ ZunResult Gui::ActualAddedCallback()
     this->flags.flag3 = 2;
     this->flags.flag4 = 2;
     this->flags.flag2 = 2;
+    THPrac::TH06::THPortableSetCurrentBossAssetProfile(0);
     return ZUN_SUCCESS;
 }
 
@@ -563,11 +574,13 @@ void GuiImpl::MsgRead(i32 msgIdx)
     if (g_GameManager.currentStage == 6 && (msgIdx == 0 || msgIdx == 10))
     {
         g_AnmManager->LoadAnm(ANM_FILE_EFFECTS, "data/eff06.anm", ANM_OFFSET_EFFECTS);
+        THPrac::TH06::THPortableSetCurrentBossAssetProfile(1);
     }
     else if (g_GameManager.currentStage == 7 && (msgIdx == 0 || msgIdx == 10))
     {
         g_AnmManager->LoadAnm(ANM_FILE_EFFECTS, "data/eff07.anm", ANM_OFFSET_EFFECTS);
         g_AnmManager->LoadAnm(ANM_FILE_FACE_STAGE_A, "data/face12c.anm", ANM_OFFSET_FACE_STAGE_A);
+        THPrac::TH06::THPortableSetCurrentBossAssetProfile(2);
     }
     return;
 }
@@ -686,6 +699,7 @@ ZunResult GuiImpl::RunMsg()
                                          COLOR_RGB(COLOR_BLACK), TH_SONG_NAME,
                                          g_Stage.stdData->songNames[musicIdx]);
             g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[musicIdx]);
+            THPrac::TH06::THPortableSetCurrentBgmTrackIndex(musicIdx);
             break;
         }
         case MSG_OPCODE_TEXTINTRO:
@@ -1539,6 +1553,8 @@ ZunResult Gui::DeletedCallback(Gui *gui)
 ZunResult Gui::RegisterChain()
 {
     Gui *gui = &g_Gui;
+    NormalizeStaticChainElem(g_GuiCalcChain);
+    NormalizeStaticChainElem(g_GuiDrawChain);
     if ((i32)(g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER_REINIT))
     {
         memset(gui, 0, sizeof(Gui));
@@ -1571,6 +1587,14 @@ void Gui::CutChain()
 {
     g_Chain.Cut(&g_GuiCalcChain);
     g_Chain.Cut(&g_GuiDrawChain);
+    g_GuiCalcChain.prev = NULL;
+    g_GuiCalcChain.next = NULL;
+    g_GuiCalcChain.unkPtr = &g_GuiCalcChain;
+    g_GuiCalcChain.priority = 0;
+    g_GuiDrawChain.prev = NULL;
+    g_GuiDrawChain.next = NULL;
+    g_GuiDrawChain.unkPtr = &g_GuiDrawChain;
+    g_GuiDrawChain.priority = 0;
     return;
 }
 #pragma optimize("", on)

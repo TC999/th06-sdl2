@@ -42,6 +42,15 @@ bool HasSecondPlayer()
 {
     return Session::IsDualPlayerSession();
 }
+
+void NormalizeStaticChainElem(ChainElem &elem)
+{
+    g_Chain.Cut(&elem);
+    elem.prev = NULL;
+    elem.next = NULL;
+    elem.unkPtr = &elem;
+    elem.priority = 0;
+}
 } // namespace
 
 struct BulletTypeInfo
@@ -637,6 +646,9 @@ Laser *BulletManager::SpawnLaserPattern(EnemyLaserShooter *bulletProps)
 ZunResult BulletManager::RegisterChain(char *bulletAnmPath)
 {
     BulletManager *mgr = &g_BulletManager;
+
+    NormalizeStaticChainElem(g_BulletManagerCalcChain);
+    NormalizeStaticChainElem(g_BulletManagerDrawChain);
 
     if (((g_Supervisor.cfg.opts >> GCOS_USE_D3D_HW_TEXTURE_BLENDING) & 1) == 0)
     {
@@ -1521,5 +1533,13 @@ void BulletManager::CutChain()
 {
     g_Chain.Cut(&g_BulletManagerCalcChain);
     g_Chain.Cut(&g_BulletManagerDrawChain);
+    g_BulletManagerCalcChain.prev = NULL;
+    g_BulletManagerCalcChain.next = NULL;
+    g_BulletManagerCalcChain.unkPtr = &g_BulletManagerCalcChain;
+    g_BulletManagerCalcChain.priority = 0;
+    g_BulletManagerDrawChain.prev = NULL;
+    g_BulletManagerDrawChain.next = NULL;
+    g_BulletManagerDrawChain.unkPtr = &g_BulletManagerDrawChain;
+    g_BulletManagerDrawChain.priority = 0;
 }
 }; // namespace th06

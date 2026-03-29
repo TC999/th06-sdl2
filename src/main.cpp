@@ -1,5 +1,6 @@
 #include "sdl2_compat.hpp"
 #include <SDL.h>
+#include <float.h>
 #include <stdio.h>
 
 #include "AnmManager.hpp"
@@ -17,16 +18,58 @@
 #include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "TextHelper.hpp"
+#include "WatchdogWin.hpp"
 #include "ZunResult.hpp"
 #include "i18n.hpp"
 #include "thprac_gui_integration.h"
+#include "thprac_th06.h"
 #include "utils.hpp"
 
 using namespace th06;
 
+namespace
+{
+#if defined(_MSC_VER) && defined(_M_IX86)
+void ConfigureReplayCompatibleFloatingPoint()
+{
+    unsigned int controlWord = 0;
+
+    // Stock Touhou 6 replays are sensitive to the legacy x87 environment.
+    // Modern MSVC/CRT startup can otherwise leave us with a different
+    // precision path than the original VC7 build.
+    _controlfp_s(&controlWord, _PC_24, _MCW_PC);
+    _controlfp_s(&controlWord, _RC_NEAR, _MCW_RC);
+    _clearfp();
+}
+#endif
+
+bool PollManualDumpHotkey()
+{
+    static bool previousPressed = false;
+
+    if (!THPrac::TH06::THPracIsManualDumpHotkeyEnabled())
+    {
+        previousPressed = false;
+        return false;
+    }
+
+    const Uint8 *keyboardState = SDL_GetKeyboardState(nullptr);
+    const bool ctrlPressed = keyboardState[SDL_SCANCODE_LCTRL] != 0 || keyboardState[SDL_SCANCODE_RCTRL] != 0;
+    const bool dPressed = keyboardState[SDL_SCANCODE_D] != 0;
+    const bool pressed = ctrlPressed && dPressed;
+    const bool triggered = pressed && !previousPressed;
+    previousPressed = pressed;
+    return triggered;
+}
+} // namespace
+
 int main(int argc, char *argv[])
 {
     i32 renderResult = 0;
+
+#if defined(_MSC_VER) && defined(_M_IX86)
+    ConfigureReplayCompatibleFloatingPoint();
+#endif
 
 #ifdef __ANDROID__
     // On Android, SDL must be initialized before GamePaths::Init()
@@ -85,10 +128,19 @@ restart:
     }
 
     g_GameWindow.curFrame = 0;
+    WatchdogWin::Init();
 
     while (!g_GameWindow.isAppClosing)
     {
+        WatchdogWin::TickHeartbeat();
         GameWindow_ProcessEvents();
+        if (PollManualDumpHotkey())
+        {
+            WatchdogWin::RequestManualDump();
+        }
+#if defined(_MSC_VER) && defined(_M_IX86)
+        ConfigureReplayCompatibleFloatingPoint();
+#endif
         renderResult = g_GameWindow.Render();
         if (renderResult != 0)
         {
@@ -97,6 +149,7 @@ restart:
     }
 
 stop:
+    WatchdogWin::Shutdown();
     g_Chain.Release();
     g_SoundPlayer.Release();
     Netplay::Shutdown();

@@ -20,6 +20,7 @@
 #include "GamePaths.hpp"
 #include "NetplaySession.hpp"
 #include "OnlineMenu.hpp"
+#include "PortableGameplayRestore.hpp"
 #include "ReplayData.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
@@ -344,6 +345,10 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             break;
         menu->idleFrames = 0;
     case STATE_MAIN_MENU:
+        if (PortableGameplayRestore::TryConsumePendingMainMenuBootstrap(menu))
+        {
+            return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+        }
         if (TryActivateEndingShortcut(menu))
         {
             return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
@@ -1943,18 +1948,15 @@ i32 MainMenu::ReplayHandling()
                 for (cur = 0; cur < 15; cur++)
                 {
                     sprintf(replayFilePath, "./replay/th6_%.2d.rpy", cur + 1);
-                    replayData = (ReplayData *)FileSystem::OpenPath(replayFilePath, 1);
+                    replayData = ReplayManager::LoadReplayData(replayFilePath, 1);
                     if (replayData == NULL)
                     {
                         continue;
                     }
-                    if (!ReplayManager::ValidateReplayData(replayData, g_LastFileSize))
-                    {
-                        this->replayFileData[replayFileIdx] = *replayData;
-                        strcpy(this->replayFilePaths[replayFileIdx], replayFilePath);
-                        sprintf(this->replayFileName[replayFileIdx], "No.%.2d", cur + 1);
-                        replayFileIdx++;
-                    }
+                    this->replayFileData[replayFileIdx] = *replayData;
+                    strcpy(this->replayFilePaths[replayFileIdx], replayFilePath);
+                    sprintf(this->replayFileName[replayFileIdx], "No.%.2d", cur + 1);
+                    replayFileIdx++;
                     free(replayData);
                 }
                 {
@@ -1997,18 +1999,15 @@ i32 MainMenu::ReplayHandling()
                                 strcmp(name + 10, ".rpy") == 0)
                             {
                                 sprintf(replayFilePath, "./replay/%s", name);
-                                replayData = (ReplayData *)FileSystem::OpenPath(replayFilePath, 1);
+                                replayData = ReplayManager::LoadReplayData(replayFilePath, 1);
                                 if (replayData == NULL)
                                 {
                                     continue;
                                 }
-                                if (!ReplayManager::ValidateReplayData(replayData, g_LastFileSize))
-                                {
-                                    this->replayFileData[replayFileIdx] = *replayData;
-                                    sprintf(this->replayFilePaths[replayFileIdx], "./replay/%s", name);
-                                    sprintf(this->replayFileName[replayFileIdx], "User ");
-                                    replayFileIdx++;
-                                }
+                                this->replayFileData[replayFileIdx] = *replayData;
+                                sprintf(this->replayFilePaths[replayFileIdx], "./replay/%s", name);
+                                sprintf(this->replayFileName[replayFileIdx], "User ");
+                                replayFileIdx++;
                                 free(replayData);
                                 cur++;
                             }
@@ -2065,8 +2064,14 @@ i32 MainMenu::ReplayHandling()
                 this->stateTimer = 0;
                 this->cursor = 0;
                 g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
-                this->currentReplay = (ReplayData *)FileSystem::OpenPath(this->replayFilePaths[this->chosenReplay], 1);
-                ReplayManager::ValidateReplayData(this->currentReplay, g_LastFileSize);
+                this->currentReplay = ReplayManager::LoadReplayData(this->replayFilePaths[this->chosenReplay], 1);
+                if (this->currentReplay == NULL)
+                {
+                    this->gameState = STATE_REPLAY_ANIM;
+                    this->stateTimer = 0;
+                    g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
+                    break;
+                }
                 for (cur = 0; cur < ARRAY_SIZE_SIGNED(this->currentReplay->stageReplayData); cur++)
                 {
                     if (this->currentReplay->stageReplayData[cur] != NULL)
@@ -2922,6 +2927,8 @@ ZunResult MainMenu::AddedCallback(MainMenu *m)
     {
         g_Supervisor.SetupMidiPlayback("bgm/th06_01.mid");
     }
+
+    PortableGameplayRestore::OnMainMenuEntered();
 
     anmmgr = g_AnmManager;
 

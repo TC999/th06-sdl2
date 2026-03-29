@@ -33,6 +33,7 @@
 #include "BulletManager.hpp"
 #include "Rng.hpp"
 #include "Stage.hpp"
+#include "SinglePlayerSnapshot.hpp"
 #include "sdl2_renderer.hpp"
 #include "IRenderer.hpp"
 #include "Supervisor.hpp"
@@ -286,6 +287,37 @@ namespace TH06 {
             "有効にすると、ウィンドウがフォーカスを失っても更新と描画を続行します。同一PCでのネット対戦テストでは有効化が必要です。");
     }
 
+    const char* ManualDumpHotkeyLabel()
+    {
+        return TrLocal("启用手动转储热键 (Ctrl+D)", "Enable Manual Dump Hotkey (Ctrl+D)",
+                       "手動ダンプホットキーを有効化 (Ctrl+D)");
+    }
+
+    const char* ManualDumpHotkeyDesc()
+    {
+        return TrLocal("开启后，开发者模式下按 Ctrl+D 会让 watchdog 辅助线程立即输出一个主线程现场转储到 Crash 目录，适合抓“画面卡住但还有心跳”的现场。",
+                       "When enabled, pressing Ctrl+D in developer mode asks the watchdog helper thread to immediately dump the current main-thread state into the Crash directory. Use this for hangs that still keep heartbeating.",
+                       "有効にすると、開発者モード中に Ctrl+D を押した時、watchdog 補助スレッドが Crash ディレクトリへ主スレッドの現況ダンプを即座に出力します。ハートビートは生きているのに止まって見える症状の採取に使います。");
+    }
+
+    const char* RecoveryAutoDumpLabel()
+    {
+        return TrLocal("恢复快照时自动转储", "Auto Dump During Snapshot Recovery",
+                       "スナップショット復旧時に自動ダンプ");
+    }
+
+    const char* RecoveryAutoDumpDesc()
+    {
+        return TrLocal("开启后，联机权威快照恢复时会自动请求 watchdog 辅助线程输出转储。主机在开始发送权威快照时转储一次，客机在开始应用收到的快照时转储一次。",
+                       "When enabled, authoritative netplay snapshot recovery automatically asks the watchdog helper thread to write a dump. The host dumps once when it starts sending the authoritative snapshot, and the guest dumps once when it starts applying the received snapshot.",
+                       "有効にすると、ネット対戦の権威スナップショット復旧中に watchdog 補助スレッドへ自動ダンプを要求します。ホストは権威スナップショット送信開始時に一度、ゲストは受信したスナップショットの適用開始時に一度ダンプします。");
+    }
+
+    const char* ManualDumpHotkeyUnavailableHint()
+    {
+        return TrLocal("（仅 Windows 可用）", "(Windows only)", "（Windows 専用）");
+    }
+
     const char* NoFreezeOnFocusLossLockedHint()
     {
         return TrLocal("（联机中锁定）", "(locked by netplay)", "（ネット対戦中は固定）");
@@ -308,9 +340,56 @@ namespace TH06 {
         return TrLocal("高级功能", "Advanced Features", "高度な機能");
     }
 
+    const char* DeveloperFeaturesTabLabel()
+    {
+        return TrLocal("开发者功能", "Developer Tools", "開発者機能");
+    }
+
     const char* NetworkDebuggerTabLabel()
     {
         return TrLocal("网络调试器", "Network Debugger", "ネットワークデバッガ");
+    }
+
+    const char* PortableRestoreTabLabel()
+    {
+        return TrLocal("定态恢复", "Portable Restore", "ポータブル復元");
+    }
+
+    const char* DebugLogOutputLabel()
+    {
+        return TrLocal("输出调试日志", "Emit Debug Logs", "デバッグログを出力する");
+    }
+
+    const char* DebugLogOutputDesc()
+    {
+        return TrLocal("开启后，replay / portable restore / watchdog 等开发诊断日志会额外写入日志文件。关闭时只保留游戏原本的日志，不再输出这些附加调试记录。",
+                       "When enabled, developer diagnostics such as replay / portable restore / watchdog tracing are written into the log files. When disabled, only the game's original log output remains and these extra debug records stay silent.",
+                       "有効にすると、replay / portable restore / watchdog などの開発診断ログを追加でログファイルへ出力します。無効時はゲーム本来のログだけを残し、追加のデバッグ記録は出力しません。");
+    }
+
+    const char* PausePresentationHoldLabel()
+    {
+        return TrLocal("暂停同步中...", "Pausing...", "一時停止を同期中...");
+    }
+
+    const char* PortableRestoreTrialLabel()
+    {
+        return TrLocal("单机 L 使用 portable 试运行", "Use portable trial for single-player L",
+                       "シングルLでポータブル試行を使う");
+    }
+
+    const char* PortableRestoreTrialDesc()
+    {
+        return TrLocal("启用后，单机 Load(L)/Ctrl+O 会走纯 portable 内存恢复，Ctrl+L 会从磁盘的 portable_state.bin 启动并恢复。关闭时普通 L 仍走原来的 DGS 路径。",
+                       "When enabled, single-player Load(L)/Ctrl+O use pure portable in-memory restore, and Ctrl+L boots/restores from portable_state.bin on disk. When disabled, normal L keeps using the original DGS path.",
+                       "有効にすると、シングルの Load(L)/Ctrl+O は純粋なポータブル復元を使い、Ctrl+L はディスク上の portable_state.bin から起動して復元します。無効時は通常の L が従来の DGS 経路のままです。");
+    }
+
+    const char* PortableRestoreRuntimeHint()
+    {
+        return TrLocal("当前仅在开发者模式下可用，目标是同版本、同资源内容下的纯 portable 单机恢复。暂不支持 Netplay / Replay / 2P portable restore。",
+                       "This is currently developer-mode only and targets pure portable single-player restore on the same build and resource set. Netplay / replay / 2P portable restore are still unsupported.",
+                       "現在は開発者モード専用で、同じビルドとリソース内容での純粋なポータブルシングル復元を対象としています。Netplay / Replay / 2P のポータブル復元は未対応です。");
     }
 
     const char* NetworkDebuggerUnavailableHint()
@@ -360,6 +439,11 @@ namespace TH06 {
         return TrLocal("当前联机状态", "Current Netplay State", "現在のネット対戦状態");
     }
 
+    const char* RecoveryChunksLabel()
+    {
+        return TrLocal("快照分片", "Snapshot Chunks", "スナップショット分割");
+    }
+
     bool IsNetplayDebuggerAvailable()
     {
         return th06::Session::IsRemoteNetplaySession() || th06::Netplay::IsSessionActive() ||
@@ -389,6 +473,8 @@ namespace TH06 {
     int g_lock_timer = 0;
     float g_speed_multiplier = 1.0f;  // CE-style speed: affects frame timing, not game logic
     bool g_developer_mode_enabled = false;
+    int g_portable_current_bgm_track_index = -1;
+    int g_portable_current_boss_asset_profile = 0;
     bool g_debug_ending_jump_active = false;
     int g_ending_shortcut_progress = 0;
     u32 g_ending_shortcut_last_tick = 0;
@@ -397,6 +483,9 @@ namespace TH06 {
     bool g_ending_shortcut_prev_d = false;
 
     constexpr u32 ENDING_SHORTCUT_TIMEOUT_MS = 1500;
+    constexpr int PORTABLE_BOSS_ASSET_PROFILE_NONE = 0;
+    constexpr int PORTABLE_BOSS_ASSET_PROFILE_STAGE6_BOSS_EFFECTS = 1;
+    constexpr int PORTABLE_BOSS_ASSET_PROFILE_STAGE7_END_EFFECTS = 2;
 
     bool THBGMTest();
     using std::pair;
@@ -1922,7 +2011,8 @@ namespace TH06 {
             }
 
             ImGui::Separator();
-            ImGui::Text("%s: %s", NetDebugSessionStateLabel(), snapshot.statusText.c_str());
+            const std::string localizedStatusText = th06::OnlineMenu::LocalizeNetplayStatusText(snapshot.statusText);
+            ImGui::Text("%s: %s", NetDebugSessionStateLabel(), localizedStatusText.c_str());
         }
 
         void RenderAdvancedFeaturesContent()
@@ -2052,6 +2142,50 @@ namespace TH06 {
             }
             InGameReactionTestOpt();
             AboutOpt();
+        }
+
+        void RenderDeveloperFeaturesContent()
+        {
+            ImGui::Checkbox(DebugLogOutputLabel(), &g_adv_igi_options.th06_enable_debug_logs);
+            ImGui::SameLine();
+            HelpMarker(DebugLogOutputDesc());
+
+#ifndef _WIN32
+            ImGui::BeginDisabled();
+#endif
+            ImGui::Checkbox(ManualDumpHotkeyLabel(), &g_adv_igi_options.th06_enable_manual_dump_hotkey);
+#ifndef _WIN32
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", ManualDumpHotkeyUnavailableHint());
+#endif
+            ImGui::SameLine();
+            HelpMarker(ManualDumpHotkeyDesc());
+
+#ifndef _WIN32
+            ImGui::BeginDisabled();
+#endif
+            ImGui::Checkbox(RecoveryAutoDumpLabel(), &g_adv_igi_options.th06_enable_recovery_auto_dump);
+#ifndef _WIN32
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", ManualDumpHotkeyUnavailableHint());
+#endif
+            ImGui::SameLine();
+            HelpMarker(RecoveryAutoDumpDesc());
+        }
+
+        void RenderPortableRestoreContent()
+        {
+            bool enabled = th06::SinglePlayerSnapshot::IsPortableRestoreTrialEnabled();
+            if (ImGui::Checkbox(PortableRestoreTrialLabel(), &enabled))
+            {
+                th06::SinglePlayerSnapshot::SetPortableRestoreTrialEnabled(enabled);
+            }
+            ImGui::SameLine();
+            HelpMarker(PortableRestoreTrialDesc());
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", PortableRestoreRuntimeHint());
         }
 
         void ShowDetail(bool* isOpen)
@@ -2190,9 +2324,19 @@ namespace TH06 {
                     RenderAdvancedFeaturesContent();
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem(DeveloperFeaturesTabLabel()))
+                {
+                    RenderDeveloperFeaturesContent();
+                    ImGui::EndTabItem();
+                }
                 if (ImGui::BeginTabItem(NetworkDebuggerTabLabel()))
                 {
                     RenderNetworkDebuggerContent();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem(PortableRestoreTabLabel()))
+                {
+                    RenderPortableRestoreContent();
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();
@@ -4148,7 +4292,17 @@ namespace TH06 {
                 p->AddText({ 120.0f, 0.0f }, 0xFFFF0000, S(TH_BOSS_FORCE_MOVE_DOWN));
             }
         }
-        
+        if (th06::Netplay::IsPausePresentationHoldActive()) {
+            const char* label = PausePresentationHoldLabel();
+            ImVec2 textSize = ImGui::CalcTextSize(label);
+            ImVec2 textPos((1280.0f - textSize.x) * 0.5f, 28.0f);
+            ImVec2 boxMin(textPos.x - 14.0f, textPos.y - 8.0f);
+            ImVec2 boxMax(textPos.x + textSize.x + 14.0f, textPos.y + textSize.y + 8.0f);
+            p->AddRectFilled(boxMin, boxMax, IM_COL32(0, 0, 0, 176), 6.0f);
+            p->AddRect(boxMin, boxMax, IM_COL32(255, 255, 255, 90), 6.0f);
+            p->AddText(textPos, IM_COL32(255, 235, 160, 255), label);
+        }
+
         th06::OnlineMenu::UpdateImGui();
         GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() ||
                    THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen() || th06::OnlineMenu::IsOpen());
@@ -4509,6 +4663,41 @@ namespace TH06 {
         }
 
         th06::OnlineMenu::UpdateImGui();
+        {
+            std::string recoveryLine1;
+            std::string recoveryLine2;
+            int receivedChunks = 0;
+            int totalChunks = 0;
+            if (th06::Netplay::GetAuthoritativeRecoveryOverlay(recoveryLine1, recoveryLine2, receivedChunks, totalChunks))
+            {
+                ImGuiViewport *viewport = ImGui::GetMainViewport();
+                ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                ImGui::SetNextWindowBgAlpha(1.0f);
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(96, 96, 96, 230));
+                ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(180, 180, 180, 255));
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(245, 245, 245, 255));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 14.0f));
+                const ImGuiWindowFlags recoveryWindowFlags =
+                    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove;
+                if (ImGui::Begin("##authoritative_recovery_overlay", nullptr, recoveryWindowFlags))
+                {
+                    ImGui::TextUnformatted(recoveryLine1.c_str());
+                    if (!recoveryLine2.empty())
+                    {
+                        ImGui::TextUnformatted(recoveryLine2.c_str());
+                    }
+                    if (totalChunks > 0)
+                    {
+                        ImGui::Text("%s: %d / %d", RecoveryChunksLabel(), receivedChunks, totalChunks);
+                    }
+                }
+                ImGui::End();
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(3);
+            }
+        }
         GameGuiEnd(THAdvOptWnd::StaticUpdate() || THConfigWnd::StaticUpdate() || THFirstRunWnd::StaticUpdate() ||
                    THGuiPrac::singleton().IsOpen() || THPauseMenu::singleton().IsOpen() || th06::OnlineMenu::IsOpen());
     }
@@ -4594,6 +4783,21 @@ namespace TH06 {
     bool THPracIsDeveloperModeEnabled()
     {
         return g_developer_mode_enabled;
+    }
+
+    bool THPracIsManualDumpHotkeyEnabled()
+    {
+        return g_developer_mode_enabled && g_adv_igi_options.th06_enable_manual_dump_hotkey;
+    }
+
+    bool THPracIsRecoveryAutoDumpEnabled()
+    {
+        return g_developer_mode_enabled && g_adv_igi_options.th06_enable_recovery_auto_dump;
+    }
+
+    bool THPracIsDebugLogEnabled()
+    {
+        return g_adv_igi_options.th06_enable_debug_logs;
     }
 
     bool THPracConsumeEndingShortcut()
@@ -4864,6 +5068,124 @@ namespace TH06 {
         th06::g_Renderer->SetFog(1, stg.skyFog.color, stg.skyFog.nearPlane, stg.skyFog.farPlane);
     }
 
+    void THPortableFastForwardStageShell(int targetFrame)
+    {
+        THPracFastForwardStage(targetFrame);
+    }
+
+    bool THPortableReloadBossSectionAssets(int profile)
+    {
+        switch (profile)
+        {
+        case PORTABLE_BOSS_ASSET_PROFILE_NONE:
+            g_portable_current_boss_asset_profile = PORTABLE_BOSS_ASSET_PROFILE_NONE;
+            return true;
+        case PORTABLE_BOSS_ASSET_PROFILE_STAGE6_BOSS_EFFECTS:
+            if (th06::g_AnmManager->LoadAnm(11, "data/eff06.anm", 691) != ZUN_SUCCESS)
+            {
+                return false;
+            }
+            g_portable_current_boss_asset_profile = PORTABLE_BOSS_ASSET_PROFILE_STAGE6_BOSS_EFFECTS;
+            return true;
+        case PORTABLE_BOSS_ASSET_PROFILE_STAGE7_END_EFFECTS:
+            if (th06::g_AnmManager->LoadAnm(11, "data/eff07.anm", 691) != ZUN_SUCCESS)
+            {
+                return false;
+            }
+            if (th06::g_AnmManager->LoadAnm(18, "data/face12c.anm", 1192) != ZUN_SUCCESS)
+            {
+                return false;
+            }
+            g_portable_current_boss_asset_profile = PORTABLE_BOSS_ASSET_PROFILE_STAGE7_END_EFFECTS;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool THPortableSyncStageIntroSprites(bool hideStageNameIntro, bool hideSongNameIntro)
+    {
+        if (th06::g_Gui.impl == nullptr || th06::g_Stage.stdData == nullptr)
+        {
+            return false;
+        }
+
+        if (hideStageNameIntro)
+        {
+            th06::g_Gui.impl->stageNameSprite.flags.isVisible = 0;
+            th06::g_Gui.impl->stageNameSprite.currentInstruction = NULL;
+        }
+        else
+        {
+            th06::g_AnmManager->SetAndExecuteScriptIdx(&th06::g_Gui.impl->stageNameSprite, ANM_SCRIPT_TEXT_STAGE_NAME);
+            th06::AnmManager::DrawStringFormat2(th06::g_AnmManager, &th06::g_Gui.impl->stageNameSprite,
+                                                COLOR_RGB(COLOR_LIGHTCYAN), COLOR_RGB(COLOR_BLACK),
+                                                th06::g_Stage.stdData->stageName);
+        }
+
+        if (hideSongNameIntro)
+        {
+            th06::g_Gui.impl->songNameSprite.flags.isVisible = 0;
+            th06::g_Gui.impl->songNameSprite.currentInstruction = NULL;
+        }
+        else
+        {
+            th06::g_AnmManager->SetAndExecuteScriptIdx(&th06::g_Gui.impl->songNameSprite, 0x701);
+            th06::g_Gui.impl->songNameSprite.fontWidth = 16;
+            th06::g_Gui.impl->songNameSprite.fontHeight = 16;
+            const int songIdx = (g_portable_current_bgm_track_index >= 0 && g_portable_current_bgm_track_index <= 1)
+                                    ? g_portable_current_bgm_track_index
+                                    : 0;
+            th06::AnmManager::DrawStringFormat(th06::g_AnmManager, &th06::g_Gui.impl->songNameSprite,
+                                               COLOR_RGB(COLOR_LIGHTCYAN), COLOR_RGB(COLOR_BLACK), "\x01%s",
+                                               th06::g_Stage.stdData->songNames[songIdx]);
+        }
+
+        return true;
+    }
+
+    bool THPortableSyncStageBgm(int trackIndex)
+    {
+        if (th06::g_Stage.stdData == nullptr || trackIndex < 0 || trackIndex > 1)
+        {
+            return false;
+        }
+
+        th06::g_Supervisor.ReadMidiFile(1, th06::g_Stage.stdData->songPaths[1]);
+        if (th06::g_Supervisor.PlayAudio(th06::g_Stage.stdData->songPaths[trackIndex]) != ZUN_SUCCESS)
+        {
+            return false;
+        }
+        g_portable_current_bgm_track_index = trackIndex;
+        return true;
+    }
+
+    void THPortableSetCurrentBgmTrackIndex(int trackIndex)
+    {
+        g_portable_current_bgm_track_index = trackIndex;
+    }
+
+    int THPortableGetCurrentBgmTrackIndex()
+    {
+        return g_portable_current_bgm_track_index;
+    }
+
+    void THPortableSetCurrentBossAssetProfile(int profile)
+    {
+        g_portable_current_boss_asset_profile = profile;
+    }
+
+    int THPortableGetCurrentBossAssetProfile()
+    {
+        return g_portable_current_boss_asset_profile;
+    }
+
+    void THPortableResetShellSyncTrackers()
+    {
+        g_portable_current_bgm_track_index = -1;
+        g_portable_current_boss_asset_profile = PORTABLE_BOSS_ASSET_PROFILE_NONE;
+    }
+
     // Called AFTER EnemyManager::RegisterChain + EclManager::Load.
     void THPracPostEclLoad()
     {
@@ -4884,7 +5206,7 @@ namespace TH06 {
 
         // Fast-forward stage background script to match the warp point
         if (actualFrame > 0) {
-            THPracFastForwardStage(actualFrame);
+            THPortableFastForwardStageShell(actualFrame);
             // Sync GameManager.counat (frame counter used for subrank timing)
             th06::g_GameManager.counat = actualFrame;
         }
@@ -4909,10 +5231,9 @@ namespace TH06 {
         // which run afterwards. Must reload here after all subsystems init.
         auto section = thPracParam.section;
         if (thPracParam.stage == 5 && section >= TH06_ST6_BOSS1 && section <= TH06_ST6_BOSS9) {
-            th06::g_AnmManager->LoadAnm(11, "data/eff06.anm", 691);
+            THPortableReloadBossSectionAssets(PORTABLE_BOSS_ASSET_PROFILE_STAGE6_BOSS_EFFECTS);
         } else if (thPracParam.stage == 6 && section >= TH06_ST7_END_NS1 && section <= TH06_ST7_END_S10) {
-            th06::g_AnmManager->LoadAnm(11, "data/eff07.anm", 691);
-            th06::g_AnmManager->LoadAnm(18, "data/face12c.anm", 1192);
+            THPortableReloadBossSectionAssets(PORTABLE_BOSS_ASSET_PROFILE_STAGE7_END_EFFECTS);
         }
 
         // Check the actual ECL timeline — for Boss/Spell warps, thPracParam.frame
@@ -4922,10 +5243,7 @@ namespace TH06 {
             return;
 
         // Hide "STAGE X" and song name intro animations
-        th06::g_Gui.impl->stageNameSprite.flags.isVisible = 0;
-        th06::g_Gui.impl->stageNameSprite.currentInstruction = NULL;
-        th06::g_Gui.impl->songNameSprite.flags.isVisible = 0;
-        th06::g_Gui.impl->songNameSprite.currentInstruction = NULL;
+        THPortableSyncStageIntroSprites(true, true);
     }
 
     void THPracSpellAttempt() {}
@@ -4946,6 +5264,7 @@ void TH06Init()
 void TH06Reset()
 {
     TH06::s_guiCreated = false;
+    TH06::THPortableResetShellSyncTrackers();
 }
 
 }

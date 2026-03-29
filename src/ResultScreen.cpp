@@ -879,16 +879,12 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
             for (idx = 0; idx < ARRAY_SIZE_SIGNED(this->replays); idx++)
             {
                 sprintf(replayToReadPath, "./replay/th6_%.2d.rpy", idx + 1);
-                replayLoaded = (ReplayData *)FileSystem::OpenPath(replayToReadPath, 1);
+                replayLoaded = ReplayManager::LoadReplayData(replayToReadPath, 1);
                 if (replayLoaded == NULL)
                 {
                     continue;
                 }
-
-                if (ReplayManager::ValidateReplayData(replayLoaded, g_LastFileSize) == ZUN_SUCCESS)
-                {
-                    this->replays[idx] = *replayLoaded;
-                }
+                this->replays[idx] = *replayLoaded;
                 free(replayLoaded);
             }
         }

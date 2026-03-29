@@ -1,6 +1,7 @@
 #include "Session.hpp"
 
 #include "Controller.hpp"
+#include "SinglePlayerSnapshot.hpp"
 #include "Supervisor.hpp"
 
 namespace th06
@@ -23,7 +24,7 @@ public:
 
     void AdvanceFrameInput() override
     {
-        Session::ApplyLegacyFrameInput(Controller::GetInput());
+        Session::ApplyLegacyFrameInput(SinglePlayerSnapshot::ProcessLocalGameplayInput(Controller::GetInput()));
     }
 };
 

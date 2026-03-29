@@ -32,6 +32,17 @@ bool HasSecondPlayer()
     return Session::IsDualPlayerSession();
 }
 
+float PlayerSpawnCenterX(const Player *player)
+{
+    const float centerX = g_GameManager.arcadeRegionSize.x / 2.0f;
+    if (!HasSecondPlayer())
+    {
+        return centerX;
+    }
+
+    return centerX + (player->playerType == 1 ? -32.0f : 32.0f);
+}
+
 int CharacterShotTypeForPlayer(const Player *player)
 {
     return player->playerType == 1 ? g_GameManager.CharacterShotType() : g_GameManager.CharacterShotType2();
@@ -235,7 +246,7 @@ ZunResult Player::AddedCallback(Player *p)
         g_AnmManager->SetAndExecuteScriptIdx(&p->playerSprite, PlayerIdleScript(p));
         break;
     }
-    p->positionCenter.x = g_GameManager.arcadeRegionSize.x / 2.0f + (p->playerType == 1 ? -32.0f : 32.0f);
+    p->positionCenter.x = PlayerSpawnCenterX(p);
     p->positionCenter.y = g_GameManager.arcadeRegionSize.y - 64.0f;
     p->positionCenter.z = 0.49;
     p->orbsPosition[0].z = 0.49;
@@ -406,7 +417,7 @@ ChainCallbackResult Player::OnUpdate(Player *p)
             if (p->invulnerabilityTimer.AsFrames() >= 30)
             {
                 p->playerState = PLAYER_STATE_SPAWNING;
-                p->positionCenter.x = g_GameManager.arcadeRegionSize.x / 2.0f + (p->playerType == 1 ? -32.0f : 32.0f);
+                p->positionCenter.x = PlayerSpawnCenterX(p);
                 p->positionCenter.y = g_GameManager.arcadeRegionSize.y - 64.0f;
                 p->positionCenter.z = 0.2;
                 p->invulnerabilityTimer.SetCurrent(0);
@@ -424,7 +435,14 @@ ChainCallbackResult Player::OnUpdate(Player *p)
                     }
                     else
                     {
-                        g_GameManager.isInRetryMenu = 1;
+                        if (Session::IsRemoteNetplaySession())
+                        {
+                            Netplay::RequestSharedShellEnter(Netplay::SharedShell_Retry);
+                        }
+                        else
+                        {
+                            g_GameManager.isInRetryMenu = 1;
+                        }
                     }
                 }
                 else

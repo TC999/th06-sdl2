@@ -68,6 +68,9 @@ struct AdvancedGameOptions {
     bool th06_pauseBGM = false;
     bool th06_disable_drop_rank = false;
     bool th06_run_in_background = false;
+    bool th06_enable_manual_dump_hotkey = false;
+    bool th06_enable_recovery_auto_dump = false;
+    bool th06_enable_debug_logs = false;
     bool th06_showRank = false;
     bool th06_show_hitbox = false;
     bool th06_showRepMarker = false;

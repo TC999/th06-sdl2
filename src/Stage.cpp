@@ -19,6 +19,18 @@ DIFFABLE_STATIC(ChainElem, g_StageCalcChain)
 DIFFABLE_STATIC(ChainElem, g_StageOnDrawHighPrioChain)
 DIFFABLE_STATIC(ChainElem, g_StageOnDrawLowPrioChain)
 
+namespace
+{
+void NormalizeStaticChainElem(ChainElem &elem)
+{
+    g_Chain.Cut(&elem);
+    elem.prev = NULL;
+    elem.next = NULL;
+    elem.unkPtr = &elem;
+    elem.priority = 0;
+}
+} // namespace
+
 DIFFABLE_STATIC_ARRAY_ASSIGN(StageFile, 8, g_StageFiles) = {
     {"dummy", "dummy"},
     {"data/stg1bg.anm", "data/stage1.std"},
@@ -337,6 +349,9 @@ ZunResult Stage::RegisterChain(u32 stage)
     timer->InitializeForPopup();
 
     stg->stage = stage;
+    NormalizeStaticChainElem(g_StageCalcChain);
+    NormalizeStaticChainElem(g_StageOnDrawHighPrioChain);
+    NormalizeStaticChainElem(g_StageOnDrawLowPrioChain);
     g_StageCalcChain.callback = (ChainCallback)Stage::OnUpdate;
     g_StageCalcChain.addedCallback = NULL;
     g_StageCalcChain.deletedCallback = NULL;
@@ -385,6 +400,15 @@ void Stage::CutChain()
     g_Chain.Cut(&g_StageCalcChain);
     g_Chain.Cut(&g_StageOnDrawHighPrioChain);
     g_Chain.Cut(&g_StageOnDrawLowPrioChain);
+    g_StageCalcChain.prev = NULL;
+    g_StageCalcChain.next = NULL;
+    g_StageCalcChain.unkPtr = &g_StageCalcChain;
+    g_StageOnDrawHighPrioChain.prev = NULL;
+    g_StageOnDrawHighPrioChain.next = NULL;
+    g_StageOnDrawHighPrioChain.unkPtr = &g_StageOnDrawHighPrioChain;
+    g_StageOnDrawLowPrioChain.prev = NULL;
+    g_StageOnDrawLowPrioChain.next = NULL;
+    g_StageOnDrawLowPrioChain.unkPtr = &g_StageOnDrawLowPrioChain;
 }
 
 #pragma var_order(vmIdx, idx, curObj, curQuad, sizeVmArr)

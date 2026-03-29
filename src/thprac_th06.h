@@ -118,6 +118,9 @@ namespace TH06 {
     int THPracMenuApply();
     // Returns true if thprac practice mode is active (mode != 0).
     bool THPracIsActive();
+    bool THPracIsManualDumpHotkeyEnabled();
+    bool THPracIsRecoveryAutoDumpEnabled();
+    bool THPracIsDebugLogEnabled();
     bool THPracIsDeveloperModeEnabled();
     bool THPracConsumeEndingShortcut();
     void THPracResetEndingShortcut();
@@ -135,6 +138,15 @@ namespace TH06 {
     void THPracPostGuiInit();
     // Returns true if practice warp targets a boss section (needs boss BGM).
     bool THPracShouldPlayBossBGM();
+    void THPortableFastForwardStageShell(int targetFrame);
+    bool THPortableReloadBossSectionAssets(int profile);
+    bool THPortableSyncStageIntroSprites(bool hideStageNameIntro, bool hideSongNameIntro);
+    bool THPortableSyncStageBgm(int trackIndex);
+    void THPortableSetCurrentBgmTrackIndex(int trackIndex);
+    int THPortableGetCurrentBgmTrackIndex();
+    void THPortableSetCurrentBossAssetProfile(int profile);
+    int THPortableGetCurrentBossAssetProfile();
+    void THPortableResetShellSyncTrackers();
 
     // Overlay cheat queries — return true when the toggle is active
     bool THPracIsMuteki();    // F1: Invincibility

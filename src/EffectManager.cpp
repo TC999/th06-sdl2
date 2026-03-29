@@ -6,6 +6,7 @@
 #include "GameManager.hpp"
 #include "Rng.hpp"
 #include "ZunResult.hpp"
+#include "thprac_th06.h"
 #include "utils.hpp"
 
 namespace th06
@@ -347,6 +348,7 @@ ZunResult EffectManager::AddedCallback(EffectManager *mgr)
         }
         break;
     }
+    THPrac::TH06::THPortableSetCurrentBossAssetProfile(0);
     return ZUN_SUCCESS;
 }
 

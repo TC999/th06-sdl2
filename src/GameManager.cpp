@@ -9,6 +9,7 @@
 #include "ItemManager.hpp"
 #include "NetplaySession.hpp"
 #include "Player.hpp"
+#include "PortableGameplayRestore.hpp"
 #include "ReplayManager.hpp"
 #include "ResultScreen.hpp"
 #include "Rng.hpp"
@@ -30,6 +31,15 @@ namespace
 bool HasSecondPlayer()
 {
     return Session::IsDualPlayerSession();
+}
+
+void NormalizeStaticChainElem(ChainElem &elem)
+{
+    g_Chain.Cut(&elem);
+    elem.prev = NULL;
+    elem.next = NULL;
+    elem.unkPtr = &elem;
+    elem.priority = 0;
 }
 } // namespace
 
@@ -149,12 +159,19 @@ ChainCallbackResult GameManager::OnUpdate(GameManager *gameManager)
     if (!gameManager->isInRetryMenu && !gameManager->isInGameMenu && !gameManager->demoMode &&
         WAS_PRESSED(TH_BUTTON_MENU))
     {
-        gameManager->isInGameMenu = 1;
-        g_GameManager.arcadeRegionTopLeftPos.x = GAME_REGION_LEFT;
-        g_GameManager.arcadeRegionTopLeftPos.y = GAME_REGION_TOP;
-        g_GameManager.arcadeRegionSize.x = GAME_REGION_WIDTH;
-        g_GameManager.arcadeRegionSize.y = GAME_REGION_HEIGHT;
-        g_Supervisor.unk198 = 3;
+        if (Session::IsRemoteNetplaySession())
+        {
+            Netplay::RequestSharedShellEnter(Netplay::SharedShell_Pause);
+        }
+        else
+        {
+            gameManager->isInGameMenu = 1;
+            g_GameManager.arcadeRegionTopLeftPos.x = GAME_REGION_LEFT;
+            g_GameManager.arcadeRegionTopLeftPos.y = GAME_REGION_TOP;
+            g_GameManager.arcadeRegionSize.x = GAME_REGION_WIDTH;
+            g_GameManager.arcadeRegionSize.y = GAME_REGION_HEIGHT;
+            g_Supervisor.unk198 = 3;
+        }
     }
 
     if (!gameManager->isInRetryMenu && !gameManager->isInGameMenu)
@@ -171,21 +188,7 @@ ChainCallbackResult GameManager::OnUpdate(GameManager *gameManager)
     if (Session::IsRemoteNetplaySession())
     {
         const Netplay::InGameCtrlType ctrl = Netplay::ConsumeInGameControl();
-        if (gameManager->isInGameMenu)
-        {
-            switch (ctrl)
-            {
-            case Netplay::Quick_Quit:
-                g_Supervisor.curState = SUPERVISOR_STATE_MAINMENU;
-                break;
-            case Netplay::Quick_Restart:
-                g_Supervisor.wantedState = SUPERVISOR_STATE_GAMEMANAGER_REINIT;
-                break;
-            default:
-                break;
-            }
-        }
-        else
+        if (!gameManager->isInGameMenu)
         {
             D3DXVECTOR3 spawnPos;
             spawnPos.x = (g_Rng.GetRandomF32ZeroToOne() - 0.5f) * 2.0f * 192.0f + 192.0f;
@@ -307,6 +310,9 @@ ZunResult GameManager::RegisterChain()
 {
     GameManager *mgr = &g_GameManager;
 
+    NormalizeStaticChainElem(g_GameManagerCalcChain);
+    NormalizeStaticChainElem(g_GameManagerDrawChain);
+
     g_GameManagerCalcChain.callback = (ChainCallback)GameManager::OnUpdate;
     g_GameManagerCalcChain.addedCallback = NULL;
     g_GameManagerCalcChain.deletedCallback = NULL;
@@ -337,6 +343,12 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
     i32 i;
     Catk *catk;
     ZunBool failedToLoadReplay;
+    const bool suppressPracticeWarpHooks = PortableGameplayRestore::IsBootstrapOrApplyActive();
+    // Replay/demo playback must boot through the clean stock stage-init path.
+    // Practice/portable helpers are allowed for local live play, but letting
+    // them run during replay startup can perturb the recorded seed/timeline/UI
+    // state before frame 0 and desync old `.rpy` files.
+    const bool allowPracticeWarpHooks = !suppressPracticeWarpHooks && g_GameManager.isInReplay == 0;
     i32 padding[3];
 
     failedToLoadReplay = false;
@@ -464,7 +476,10 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         }
     }
     // Apply thprac practice overrides (lives, bombs, power, rank, etc.)
-    THPrac::TH06::THPracApplyStageParams();
+    if (allowPracticeWarpHooks)
+    {
+        THPrac::TH06::THPracApplyStageParams();
+    }
     g_Supervisor.LoadPbg3(CM_PBG3_INDEX, TH_CM_DAT_FILE);
     g_Supervisor.LoadPbg3(ST_PBG3_INDEX, TH_ST_DAT_FILE);
     SDL_PumpEvents();
@@ -492,7 +507,10 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
     g_Rng.generationCount = 0;
     mgr->randomSeed = g_Rng.seed;
     // Fix RNG seed for deterministic play (must be after randomSeed capture)
-    THPrac::TH06::THPracFixSeed();
+    if (allowPracticeWarpHooks)
+    {
+        THPrac::TH06::THPracFixSeed();
+    }
     SDL_PumpEvents();
     if (Stage::RegisterChain(mgr->currentStage) != ZUN_SUCCESS)
     {
@@ -524,7 +542,10 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         return ZUN_ERROR;
     }
     // Apply ECL patches for practice mode warps (must be after ECL is loaded)
-    THPrac::TH06::THPracPostEclLoad();
+    if (allowPracticeWarpHooks)
+    {
+        THPrac::TH06::THPracPostEclLoad();
+    }
     if (EffectManager::RegisterChain() != ZUN_SUCCESS)
     {
         GameErrorContext::Log(&g_GameErrorContext, TH_ERR_GAMEMANAGER_FAILED_TO_INITIALIZE_EFFECTMANAGER);
@@ -536,7 +557,10 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         return ZUN_ERROR;
     }
     // Suppress stage title / song name during practice warp (must be after Gui init)
-    THPrac::TH06::THPracPostGuiInit();
+    if (allowPracticeWarpHooks)
+    {
+        THPrac::TH06::THPracPostGuiInit();
+    }
     if (g_GameManager.isInReplay == 0)
     {
         ReplayManager::RegisterChain(0, "replay/th6_00.rpy");
@@ -546,10 +570,16 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
         // Read boss battle, and store it for use when boss is started.
         g_Supervisor.ReadMidiFile(1, g_Stage.stdData->songPaths[1]);
         // Immediately start playing this level's theme.
-        if (THPrac::TH06::THPracShouldPlayBossBGM())
+        if (allowPracticeWarpHooks && THPrac::TH06::THPracShouldPlayBossBGM())
+        {
             g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[1]);
+            THPrac::TH06::THPortableSetCurrentBgmTrackIndex(1);
+        }
         else
+        {
             g_Supervisor.PlayAudio(g_Stage.stdData->songPaths[0]);
+            THPrac::TH06::THPortableSetCurrentBgmTrackIndex(0);
+        }
     }
     mgr->isInRetryMenu = 0;
     mgr->isInMenu = 1;
@@ -589,6 +619,7 @@ ZunResult GameManager::DeletedCallback(GameManager *mgr)
     ReplayManager::StopRecording();
     mgr->isInMenu = 0;
     g_AsciiManager.InitializeVms();
+    THPrac::TH06::THPortableResetShellSyncTrackers();
     return ZUN_SUCCESS;
 }
 
@@ -596,6 +627,12 @@ void GameManager::CutChain()
 {
     g_Chain.Cut(&g_GameManagerCalcChain);
     g_Chain.Cut(&g_GameManagerDrawChain);
+    g_GameManagerCalcChain.prev = NULL;
+    g_GameManagerCalcChain.next = NULL;
+    g_GameManagerCalcChain.unkPtr = &g_GameManagerCalcChain;
+    g_GameManagerDrawChain.prev = NULL;
+    g_GameManagerDrawChain.next = NULL;
+    g_GameManagerDrawChain.unkPtr = &g_GameManagerDrawChain;
 }
 
 #pragma var_order(cameraDistance, viewportMiddleHeight, viewportMiddleWidth, aspectRatio, fov, upVec, atVec, eyeVec)
