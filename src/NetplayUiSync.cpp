@@ -45,6 +45,7 @@ void ForceDeterministicNetplayStep()
 void ResetLauncherState()
 {
     TraceDiagnostic("reset-launcher-state", "-");
+    CancelPendingAsyncResolveJobs();
     RestoreNetplayMenuDefaults();
     g_State.host.Reset();
     g_State.guest.Reset();
@@ -75,6 +76,10 @@ void ResetLauncherState()
     g_State.lastRttMs = -1;
     g_State.nextSeq = 1;
     g_State.predictionRollbackEnabled = true;
+    g_State.authoritySharedSeed = 0;
+    g_State.authoritySharedSeedKnown = false;
+    g_State.authoritySharedSeedApplied = false;
+    g_State.startupActivationComplete = false;
     SetStatus("no connection");
     ClearRuntimeCaches();
 }
@@ -99,6 +104,16 @@ void BeginSessionStartupWait()
     g_State.sessionBaseCalcCount = 0;
     g_State.currentNetFrame = 0;
     ClearRuntimeCaches();
+    g_State.authoritySharedSeed = 0;
+    g_State.authoritySharedSeedKnown = false;
+    g_State.authoritySharedSeedApplied = false;
+    g_State.startupActivationComplete = false;
+    if (g_State.isHost)
+    {
+        g_State.authoritySharedSeed = g_Rng.seed != 0 ? g_Rng.seed : 1;
+        g_State.authoritySharedSeedKnown = true;
+        TraceDiagnostic("startup-seed-authority", "seed=%u source=host", g_State.authoritySharedSeed);
+    }
     Session::SetActiveSession(g_NetSession);
     TraceDiagnostic("begin-startup-wait", "-");
     SetStatus("waiting for peer startup...");

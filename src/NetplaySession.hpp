@@ -4,9 +4,21 @@
 
 #include <string>
 
+namespace th06
+{
+struct StageMenu;
+}
+
 namespace th06::Netplay
 {
-constexpr int kProtocolVersion = 3803;
+constexpr int kProtocolVersion = 3806;
+
+enum SharedShellKind
+{
+    SharedShell_None = 0,
+    SharedShell_Pause,
+    SharedShell_Retry
+};
 
 enum InGameCtrlType
 {
@@ -95,6 +107,13 @@ void PrepareGameplayStart();
 bool RequestDebugEndingJump();
 bool ConsumeRequestedDebugEndingJump();
 void ActivateUiSession();
+bool RequestSharedShellEnter(SharedShellKind kind);
+bool UpdateSharedShellMenu(StageMenu &menu, SharedShellKind kind);
+void QueueSharedShellOverlayText();
+bool IsSharedShellActive(SharedShellKind kind = SharedShell_None);
+bool IsPausePresentationHoldActive();
+bool IsAuthoritativeRecoveryActive();
+bool GetAuthoritativeRecoveryOverlay(std::string &line1, std::string &line2, int &receivedChunks, int &totalChunks);
 
 InGameCtrlType ConsumeInGameControl();
 void DrawOverlay();

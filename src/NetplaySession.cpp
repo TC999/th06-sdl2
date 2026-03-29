@@ -8,6 +8,378 @@ RelayState g_Relay;
 
 NetSession g_NetSession;
 
+namespace
+{
+struct AsyncResolveOutcome
+{
+    AsyncResolveKind kind = AsyncResolve_None;
+    uint32_t token = 0;
+    bool success = false;
+    std::string originalHost;
+    int port = 0;
+    int preferredFamily = AF_UNSPEC;
+    int localPort = 0;
+    bool relayIsHost = false;
+    std::string roomCode;
+    std::string errorText;
+    std::vector<AsyncResolveCandidate> candidates;
+};
+
+bool IsNumericHostLiteral(const std::string &host)
+{
+    if (host.empty())
+    {
+        return false;
+    }
+
+    in_addr addr4 {};
+    if (inet_pton(AF_INET, host.c_str(), &addr4) == 1)
+    {
+        return true;
+    }
+
+    in6_addr addr6 {};
+    return inet_pton(AF_INET6, host.c_str(), &addr6) == 1;
+}
+
+std::string BuildEndpointTextFromIp(const std::string &ip, int port)
+{
+    if (ip.find(':') != std::string::npos)
+    {
+        return "[" + ip + "]:" + std::to_string(port);
+    }
+    return ip + ":" + std::to_string(port);
+}
+
+void CancelAsyncResolveState(AsyncResolveState &state)
+{
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.token++;
+    state.active = false;
+    state.ready = false;
+    state.success = false;
+    state.startTick = 0;
+    state.kind = AsyncResolve_None;
+    state.originalHost.clear();
+    state.port = 0;
+    state.preferredFamily = AF_UNSPEC;
+    state.localPort = 0;
+    state.relayIsHost = false;
+    state.roomCode.clear();
+    state.errorText.clear();
+    state.candidates.clear();
+}
+
+void StartAsyncResolveState(AsyncResolveState &state, AsyncResolveKind kind, const std::string &host, int port,
+                            int preferredFamily, int localPort, bool relayIsHost, const std::string &roomCode)
+{
+    uint32_t token = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.token++;
+        token = state.token;
+        state.kind = kind;
+        state.active = true;
+        state.ready = false;
+        state.success = false;
+        state.startTick = SDL_GetTicks64();
+        state.originalHost = host;
+        state.port = port;
+        state.preferredFamily = preferredFamily;
+        state.localPort = localPort;
+        state.relayIsHost = relayIsHost;
+        state.roomCode = roomCode;
+        state.errorText.clear();
+        state.candidates.clear();
+    }
+
+    std::thread([statePtr = &state, token, host, port, preferredFamily]() {
+        std::vector<AsyncResolveCandidate> candidates;
+        std::string errorText;
+        bool socketReady = SocketSystem::Acquire();
+        if (!socketReady)
+        {
+            errorText = "socket init failed";
+        }
+
+        addrinfo hints {};
+        hints.ai_family = preferredFamily == AF_INET || preferredFamily == AF_INET6 ? preferredFamily : AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_protocol = IPPROTO_UDP;
+#ifdef AI_V4MAPPED
+        if (hints.ai_family == AF_INET6 || hints.ai_family == AF_UNSPEC)
+        {
+            hints.ai_flags |= AI_V4MAPPED;
+        }
+#endif
+        char portText[16] = {};
+        std::snprintf(portText, sizeof(portText), "%d", port);
+
+        addrinfo *result = nullptr;
+        int gaiStatus = 0;
+        if (socketReady)
+        {
+            gaiStatus = getaddrinfo(host.c_str(), portText, &hints, &result);
+        }
+        if (socketReady && (gaiStatus != 0 || result == nullptr))
+        {
+#ifdef _WIN32
+            errorText = gaiStatus != 0 ? ("resolve failed:" + std::to_string(gaiStatus)) : "resolve failed";
+#else
+            errorText = gaiStatus != 0 ? std::string("resolve failed:") + gai_strerror(gaiStatus) : "resolve failed";
+#endif
+        }
+        else
+        {
+            auto appendCandidate = [&](const addrinfo *entry) {
+                if (entry->ai_addr == nullptr || entry->ai_addrlen > sizeof(sockaddr_storage))
+                {
+                    return;
+                }
+                AsyncResolveCandidate candidate;
+                candidate.family = entry->ai_family;
+                std::memcpy(&candidate.addr, entry->ai_addr, entry->ai_addrlen);
+                candidate.addrLen = (socklen_t)entry->ai_addrlen;
+                int resolvedPort = 0;
+                if (!TrySockAddrToIpPort(entry->ai_addr, (socklen_t)entry->ai_addrlen, candidate.ip, resolvedPort))
+                {
+                    return;
+                }
+                for (const AsyncResolveCandidate &existing : candidates)
+                {
+                    if (existing.family == candidate.family && existing.ip == candidate.ip)
+                    {
+                        return;
+                    }
+                }
+                candidates.push_back(candidate);
+            };
+
+            for (const addrinfo *entry = result; entry != nullptr; entry = entry->ai_next)
+            {
+                if (entry->ai_family == AF_INET6)
+                {
+                    appendCandidate(entry);
+                }
+            }
+            for (const addrinfo *entry = result; entry != nullptr; entry = entry->ai_next)
+            {
+                if (entry->ai_family == AF_INET)
+                {
+                    appendCandidate(entry);
+                }
+            }
+            freeaddrinfo(result);
+            if (candidates.empty())
+            {
+                errorText = "resolve failed";
+            }
+        }
+
+        if (socketReady)
+        {
+            SocketSystem::Release();
+        }
+
+        std::lock_guard<std::mutex> lock(statePtr->mutex);
+        if (statePtr->token != token || !statePtr->active)
+        {
+            return;
+        }
+        statePtr->ready = true;
+        statePtr->success = !candidates.empty();
+        statePtr->errorText = !errorText.empty() ? errorText : "";
+        statePtr->candidates = std::move(candidates);
+    }).detach();
+}
+
+bool TryTakeAsyncResolveOutcome(AsyncResolveState &state, AsyncResolveOutcome &outcome)
+{
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.active || !state.ready)
+    {
+        return false;
+    }
+
+    outcome.kind = state.kind;
+    outcome.token = state.token;
+    outcome.success = state.success;
+    outcome.originalHost = state.originalHost;
+    outcome.port = state.port;
+    outcome.preferredFamily = state.preferredFamily;
+    outcome.localPort = state.localPort;
+    outcome.relayIsHost = state.relayIsHost;
+    outcome.roomCode = state.roomCode;
+    outcome.errorText = state.errorText;
+    outcome.candidates = state.candidates;
+
+    state.active = false;
+    state.ready = false;
+    state.success = false;
+    state.kind = AsyncResolve_None;
+    state.startTick = 0;
+    state.originalHost.clear();
+    state.port = 0;
+    state.preferredFamily = AF_UNSPEC;
+    state.localPort = 0;
+    state.relayIsHost = false;
+    state.roomCode.clear();
+    state.errorText.clear();
+    state.candidates.clear();
+    return true;
+}
+
+void TraceAsyncResolveOutcome(const char *event, const AsyncResolveOutcome &outcome)
+{
+    const char *kind = "unknown";
+    switch (outcome.kind)
+    {
+    case AsyncResolve_RelayProbe:
+        kind = "relay-probe";
+        break;
+    case AsyncResolve_RelayHost:
+        kind = "relay-host";
+        break;
+    case AsyncResolve_RelayGuest:
+        kind = "relay-guest";
+        break;
+    case AsyncResolve_DirectGuest:
+        kind = "direct-guest";
+        break;
+    default:
+        break;
+    }
+    TraceDiagnostic(event, "kind=%s host=%s port=%d success=%d candidates=%d error=%s", kind,
+                    outcome.originalHost.c_str(), outcome.port, outcome.success ? 1 : 0,
+                    (int)outcome.candidates.size(), outcome.errorText.empty() ? "-" : outcome.errorText.c_str());
+}
+
+void ApplyResolvedRelayLaunchState(bool isHostRole)
+{
+    g_State.host.Reset();
+    g_State.guest.Reset();
+    g_State.useRelayTransport = true;
+    g_State.isHost = isHostRole;
+    g_State.isGuest = !isHostRole;
+    g_State.isConnected = false;
+    g_State.guestWaitStartTick = isHostRole ? 0 : SDL_GetTicks64();
+    g_State.lastPeriodicPingTick = 0;
+}
+
+bool FinalizeResolvedLauncherRequest(const AsyncResolveOutcome &outcome)
+{
+    switch (outcome.kind)
+    {
+    case AsyncResolve_RelayHost:
+    case AsyncResolve_RelayGuest:
+    {
+        std::string error;
+        for (const AsyncResolveCandidate &candidate : outcome.candidates)
+        {
+            const std::string endpoint = BuildEndpointTextFromIp(candidate.ip, outcome.port);
+            if (g_State.relay.Start(endpoint, outcome.roomCode, outcome.relayIsHost, outcome.localPort, &error))
+            {
+                ApplyResolvedRelayLaunchState(outcome.relayIsHost);
+                return true;
+            }
+        }
+        SetStatus("relay register failed");
+        return false;
+    }
+    case AsyncResolve_DirectGuest:
+    {
+        bool loopbackPortConflict = false;
+        for (const AsyncResolveCandidate &candidate : outcome.candidates)
+        {
+            if ((candidate.ip == "127.0.0.1" || candidate.ip == "::1") && outcome.port == outcome.localPort)
+            {
+                loopbackPortConflict = true;
+                continue;
+            }
+            if (g_State.guest.Start(candidate.ip, outcome.port, outcome.localPort, candidate.family))
+            {
+                g_State.host.Reset();
+                g_State.relay.Reset();
+                g_State.useRelayTransport = false;
+                g_State.isHost = false;
+                g_State.isGuest = true;
+                g_State.isConnected = false;
+                g_State.guestWaitStartTick = SDL_GetTicks64();
+                g_State.lastPeriodicPingTick = 0;
+                SetStatus("trying connection...");
+                SendPacket(MakePing(Ctrl_Set_InitSetting));
+                return true;
+            }
+        }
+        if (loopbackPortConflict)
+        {
+            SetStatus("guest listen port conflicts with host");
+            return false;
+        }
+        SetStatus("fail to start as guest");
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+void DrivePendingLauncherResolve()
+{
+    AsyncResolveOutcome outcome;
+    if (!TryTakeAsyncResolveOutcome(g_State.launcherResolve, outcome))
+    {
+        return;
+    }
+
+    TraceAsyncResolveOutcome("async-resolve-complete", outcome);
+    if (!outcome.success)
+    {
+        if (outcome.kind == AsyncResolve_DirectGuest)
+        {
+            SetStatus("resolve host failed");
+        }
+        else
+        {
+            SetStatus("resolve relay failed");
+        }
+        return;
+    }
+
+    FinalizeResolvedLauncherRequest(outcome);
+}
+
+void DrivePendingRelayProbeResolve()
+{
+    AsyncResolveOutcome outcome;
+    if (!TryTakeAsyncResolveOutcome(g_Relay.probeResolve, outcome))
+    {
+        return;
+    }
+
+    TraceAsyncResolveOutcome("async-resolve-complete", outcome);
+    if (!outcome.success || outcome.candidates.empty())
+    {
+        g_Relay.isConfigured = false;
+        SetRelayStatus("resolve failed");
+        return;
+    }
+
+    const AsyncResolveCandidate &candidate = outcome.candidates.front();
+    g_Relay.host = candidate.ip;
+    g_Relay.port = outcome.port;
+    g_Relay.resolvedAddr = candidate.addr;
+    g_Relay.resolvedAddrLen = candidate.addrLen;
+    g_Relay.resolvedAddrValid = true;
+    if (!OpenRelayProbeSocket(candidate.family))
+    {
+        SetRelayStatus("relay socket init failed");
+        return;
+    }
+    SendRelayProbe();
+}
+} // namespace
+
 SessionKind NetSession::Kind() const
 {
     return SessionKind::Netplay;
@@ -30,20 +402,11 @@ void NetSession::AdvanceFrameInput()
     {
         TraceDiagnostic("advance-startup-wait", "-");
         SendStartupBootstrapPacket();
-        u16 peerSharedSeed = 0;
-        if (!TryActivateFromStartupPacket(&peerSharedSeed))
+        if (!TryActivateFromStartupPacket())
         {
             Session::ApplyLegacyFrameInput(0);
             TraceDiagnostic("advance-startup-wait-no-activate", "applied=0");
             return;
-        }
-        if (peerSharedSeed != 0 && !g_State.sharedRngSeedCaptured)
-        {
-            g_Rng.seed = peerSharedSeed;
-            g_Rng.generationCount = 0;
-            g_State.sessionRngSeed = peerSharedSeed;
-            g_State.sharedRngSeedCaptured = true;
-            TraceDiagnostic("advance-startup-seed-adopt", "peerSeed=%u", peerSharedSeed);
         }
     }
 
@@ -64,8 +427,13 @@ void NetSession::AdvanceFrameInput()
         return;
     }
 
-    const int frame = CurrentNetFrame();
+    int frame = CurrentNetFrame();
     TraceDiagnostic("advance-begin", "frame=%d", frame);
+    if (IsAuthoritativeRecoveryFreezeActive())
+    {
+        DriveAuthoritativeRecovery(frame);
+        return;
+    }
     if (g_State.lastFrame >= 0 && frame < g_State.lastFrame && !g_State.rollbackActive)
     {
         TraceDiagnostic("advance-frame-reset", "frame=%d lastFrame=%d", frame, g_State.lastFrame);
@@ -80,6 +448,8 @@ void NetSession::AdvanceFrameInput()
     }
 
     ForceDeterministicNetplayStep();
+    DriveSharedShellHandoff(frame);
+    frame = CurrentNetFrame();
 
     bool isInUi = IsCurrentUiFrame();
     const bool hadKnownUiState = g_State.hasKnownUiState;
@@ -107,22 +477,29 @@ void NetSession::AdvanceFrameInput()
                         (g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER && g_GameManager.isInRetryMenu) ? 1 : 0);
         g_State.hasKnownUiState = true;
         g_State.knownUiState = isInUi;
-        // Keep UI frames outside rollback, but let the first gameplay frame after ui-exit become
-        // rollbackable immediately. Otherwise a late authoritative remote frame on that boundary
-        // can poison the new gameplay timeline before any snapshot can correct it.
-        const int nextEpochStartFrame = isInUi ? frame + 1 : frame;
-        ResetRollbackEpoch(frame, isInUi ? "ui-enter" : "ui-exit", nextEpochStartFrame);
-        if (!hadKnownUiState)
+        if (hadKnownUiState && ConsumeSharedShellUiPhaseBarrierBypass(frame, isInUi))
         {
-            // The initial UI/gameplay state becomes known when the session first activates.
-            // Treating that as a cross-peer phase transition deadlocks startup because the
-            // peer has not yet had a chance to advertise its own baseline state.
-            TraceDiagnostic("ui-state-init", "ui=%d frame=%d", isInUi ? 1 : 0, frame);
+            TraceDiagnostic("ui-transition-shell-managed", "frame=%d isInUi=%d", frame, isInUi ? 1 : 0);
         }
         else
         {
-            g_State.localUiPhaseSerial++;
-            BeginUiPhaseBarrier(g_State.localUiPhaseSerial, isInUi);
+            // Keep UI frames outside rollback, but let the first gameplay frame after ui-exit become
+            // rollbackable immediately. Otherwise a late authoritative remote frame on that boundary
+            // can poison the new gameplay timeline before any snapshot can correct it.
+            const int nextEpochStartFrame = isInUi ? frame + 1 : frame;
+            ResetRollbackEpoch(frame, isInUi ? "ui-enter" : "ui-exit", nextEpochStartFrame);
+            if (!hadKnownUiState)
+            {
+                // The initial UI/gameplay state becomes known when the session first activates.
+                // Treating that as a cross-peer phase transition deadlocks startup because the
+                // peer has not yet had a chance to advertise its own baseline state.
+                TraceDiagnostic("ui-state-init", "ui=%d frame=%d", isInUi ? 1 : 0, frame);
+            }
+            else
+            {
+                g_State.localUiPhaseSerial++;
+                BeginUiPhaseBarrier(g_State.localUiPhaseSerial, isInUi);
+            }
         }
     }
 
@@ -132,6 +509,7 @@ void NetSession::AdvanceFrameInput()
     }
 
     DriveUiPhaseBroadcast(frame);
+    DriveSharedShellStateBroadcast();
 
     if (isInUi)
     {
@@ -188,6 +566,7 @@ void NetSession::AdvanceFrameInput()
         Session::ApplyLegacyFrameInput(finalInput);
         CommitProcessedFrameState(processedFrame);
         TraceFrameSubsystemHashes(processedFrame, "rollback-queued");
+        NoteRecoveryHeuristicCommittedFrame(processedFrame);
         g_State.lastFrame = processedFrame;
         g_State.currentNetFrame = processedFrame + 1;
         if (g_State.currentNetFrame >= g_State.rollbackTargetFrame)
@@ -227,6 +606,7 @@ void NetSession::AdvanceFrameInput()
         Session::ApplyLegacyFrameInput(finalInput);
         CommitProcessedFrameState(frame);
         TraceFrameSubsystemHashes(frame, "rollback-active");
+        NoteRecoveryHeuristicCommittedFrame(frame);
         g_State.lastFrame = frame;
         g_State.currentNetFrame = frame + 1;
         if (g_State.currentNetFrame >= g_State.rollbackTargetFrame)
@@ -242,12 +622,31 @@ void NetSession::AdvanceFrameInput()
 
     HandleDesync(frame);
 
-    const u16 localInput = Controller::GetInput();
+    u16 localInput = Controller::GetInput();
+    InGameCtrlType localCtrl = CaptureControlKeys();
+    if (IsPausePresentationHoldActive())
+    {
+        TraceDiagnostic("pause-hold-mask-input", "frame=%d input=%s ctrl=%s", frame, FormatInputBits(localInput).c_str(),
+                        InGameCtrlToString(localCtrl));
+        localInput = 0;
+        localCtrl = IGC_NONE;
+    }
+    if (ShouldFreezeSharedShellUiInput(frame))
+    {
+        if (localInput != 0 || localCtrl != IGC_NONE)
+        {
+            TraceDiagnostic("shell-ui-input-frozen", "frame=%d input=%s ctrl=%s serial=%u handoff=%u", frame,
+                            FormatInputBits(localInput).c_str(), InGameCtrlToString(localCtrl),
+                            g_State.shell.shellSerial, g_State.shell.authoritativeHandoffFrame);
+        }
+        localInput = 0;
+        localCtrl = IGC_NONE;
+    }
     Bits<16> localBits;
     ReadFromInt(localBits, localInput);
     g_State.localInputs[frame] = localBits;
     g_State.localSeeds[frame] = g_Rng.seed;
-    g_State.localCtrls[frame] = CaptureControlKeys();
+    g_State.localCtrls[frame] = localCtrl;
     TraceDiagnostic("capture-local-frame", "frame=%d input=%s seed=%u ctrl=%s", frame,
                     FormatInputBits(localInput).c_str(), g_Rng.seed, InGameCtrlToString(g_State.localCtrls[frame]));
     PruneOldFrameData(frame);
@@ -259,6 +658,11 @@ void NetSession::AdvanceFrameInput()
     bool rollbackStarted = false;
     bool stallForPeer = false;
     u16 finalInput = ResolveFrameInput(frame, isInUi, currentCtrl, rollbackStarted, stallForPeer);
+    if (IsAuthoritativeRecoveryFreezeActive())
+    {
+        DriveAuthoritativeRecovery(frame);
+        return;
+    }
     if (stallForPeer)
     {
         Session::ApplyLegacyFrameInput(g_CurFrameInput);
@@ -297,6 +701,7 @@ void NetSession::AdvanceFrameInput()
     Session::ApplyLegacyFrameInput(finalInput);
     CommitProcessedFrameState(processedFrame);
     TraceFrameSubsystemHashes(processedFrame, rollbackStarted ? "rollback-post-start" : "live");
+    NoteRecoveryHeuristicCommittedFrame(processedFrame);
     g_State.lastFrame = processedFrame;
     if (g_State.isConnected && !g_State.isTryingReconnect)
     {
@@ -329,15 +734,30 @@ void ActivateNetplaySession(u16 sharedRngSeed, bool useSharedSeed)
     g_State.currentNetFrame = 0;
     g_State.lastRuntimeReceiveTick = SDL_GetTicks64();
     g_State.pendingDebugEndingJump = false;
+    g_State.reconnectReason = AuthoritativeRecoveryReason_None;
     ClearRuntimeCaches();
     if (useSharedSeed)
     {
-        g_Rng.seed = sharedRngSeed;
+        const u16 appliedSeed = g_State.authoritySharedSeedKnown ? g_State.authoritySharedSeed
+                                                                 : (sharedRngSeed != 0 ? sharedRngSeed : 1);
+        if (!g_State.authoritySharedSeedKnown)
+        {
+            g_State.authoritySharedSeed = appliedSeed;
+            g_State.authoritySharedSeedKnown = true;
+        }
+        g_Rng.seed = appliedSeed;
         g_Rng.generationCount = 0;
-        g_State.sessionRngSeed = sharedRngSeed;
+        g_State.sessionRngSeed = appliedSeed;
         g_State.sharedRngSeedCaptured = true;
-        TraceDiagnostic("activate-session-shared-seed", "seed=%u", sharedRngSeed);
+        g_State.authoritySharedSeedApplied = true;
+        TraceDiagnostic("startup-seed-rebase", "seed=%u role=%s", appliedSeed, g_State.isHost ? "host" : "guest");
+        TraceDiagnostic("activate-session-shared-seed", "seed=%u", appliedSeed);
     }
+    else
+    {
+        g_State.authoritySharedSeedApplied = false;
+    }
+    g_State.startupActivationComplete = true;
     Session::SetActiveSession(g_NetSession);
     TraceDiagnostic("activate-session", "-");
     SetStatus("connected");
@@ -408,6 +828,26 @@ bool BeginHosting(int listenPort, const std::string &relayEndpoint, const std::s
             return false;
         }
 
+        std::string relayHost;
+        int relayPort = 0;
+        if (!ParseEndpointText(trimmedRelay, relayHost, relayPort))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "invalid relay endpoint";
+            }
+            SetStatus("invalid relay endpoint");
+            return false;
+        }
+        if (!IsNumericHostLiteral(relayHost))
+        {
+            StartAsyncResolveState(g_State.launcherResolve, AsyncResolve_RelayHost, relayHost, relayPort, AF_UNSPEC,
+                                   listenPort, true, trimmedRoom);
+            TraceDiagnostic("async-resolve-begin", "kind=relay-host host=%s port=%d", relayHost.c_str(), relayPort);
+            SetStatus("resolving relay...");
+            return true;
+        }
+
         if (!g_State.relay.Start(trimmedRelay, trimmedRoom, true, listenPort, errorMessage))
         {
             SetStatus("relay register failed");
@@ -469,6 +909,26 @@ bool BeginGuest(const std::string &hostIp, int hostPort, int listenPort, const s
             return false;
         }
 
+        std::string relayHost;
+        int relayPort = 0;
+        if (!ParseEndpointText(trimmedRelay, relayHost, relayPort))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "invalid relay endpoint";
+            }
+            SetStatus("invalid relay endpoint");
+            return false;
+        }
+        if (!IsNumericHostLiteral(relayHost))
+        {
+            StartAsyncResolveState(g_State.launcherResolve, AsyncResolve_RelayGuest, relayHost, relayPort, AF_UNSPEC,
+                                   listenPort, false, trimmedRoom);
+            TraceDiagnostic("async-resolve-begin", "kind=relay-guest host=%s port=%d", relayHost.c_str(), relayPort);
+            SetStatus("resolving relay...");
+            return true;
+        }
+
         if (!g_State.relay.Start(trimmedRelay, trimmedRoom, false, listenPort, errorMessage))
         {
             SetStatus("relay register failed");
@@ -494,6 +954,14 @@ bool BeginGuest(const std::string &hostIp, int hostPort, int listenPort, const s
         }
         SetStatus("guest listen port conflicts with host");
         return false;
+    }
+    if (!IsNumericHostLiteral(hostIp))
+    {
+        StartAsyncResolveState(g_State.launcherResolve, AsyncResolve_DirectGuest, hostIp, hostPort, AF_UNSPEC,
+                               listenPort, false, "");
+        TraceDiagnostic("async-resolve-begin", "kind=direct-guest host=%s port=%d", hostIp.c_str(), hostPort);
+        SetStatus("resolving host...");
+        return true;
     }
     const int family = hostIp.find(':') != std::string::npos ? AF_INET6 : AF_INET;
     if (!g_State.guest.Start(hostIp, hostPort, listenPort, family))
@@ -540,8 +1008,20 @@ bool BeginRelayProbe(const std::string &endpoint, std::string *errorMessage)
     g_Relay.port = port;
     g_Relay.isConfigured = true;
     g_Relay.nextNonce = 1;
+    g_Relay.resolvedAddr = {};
+    g_Relay.resolvedAddrLen = 0;
+    g_Relay.resolvedAddrValid = false;
 
-    if (!OpenRelayProbeSocket())
+    if (!IsNumericHostLiteral(host))
+    {
+        StartAsyncResolveState(g_Relay.probeResolve, AsyncResolve_RelayProbe, host, port, AF_UNSPEC, 0, false, "");
+        TraceDiagnostic("async-resolve-begin", "kind=relay-probe host=%s port=%d", host.c_str(), port);
+        SetRelayStatus("resolving relay...");
+        return true;
+    }
+
+    const int preferredFamily = host.find(':') != std::string::npos ? AF_INET6 : AF_INET;
+    if (!OpenRelayProbeSocket(preferredFamily))
     {
         if (errorMessage != nullptr)
         {
@@ -564,6 +1044,7 @@ bool BeginRelayProbe(const std::string &endpoint, std::string *errorMessage)
 
 void ClearRelayProbe()
 {
+    CancelAsyncResolveState(g_Relay.probeResolve);
     CloseRelayProbeSocket();
     g_Relay.endpointText.clear();
     g_Relay.host.clear();
@@ -573,6 +1054,12 @@ void ClearRelayProbe()
     SetRelayStatus("not configured");
 }
 
+void CancelPendingAsyncResolveJobs()
+{
+    CancelAsyncResolveState(g_State.launcherResolve);
+    CancelAsyncResolveState(g_Relay.probeResolve);
+}
+
 void CancelPendingConnection()
 {
     if (g_State.isSessionActive)
@@ -580,6 +1067,7 @@ void CancelPendingConnection()
         return;
     }
 
+    CancelAsyncResolveState(g_State.launcherResolve);
     ClearDebugNetworkQueues();
     g_State.host.Reset();
     g_State.guest.Reset();
@@ -595,6 +1083,10 @@ void CancelPendingConnection()
     g_State.guestWaitStartTick = 0;
     g_State.lastRttMs = -1;
     g_State.versionMatched = true;
+    g_State.authoritySharedSeed = 0;
+    g_State.authoritySharedSeedKnown = false;
+    g_State.authoritySharedSeedApplied = false;
+    g_State.startupActivationComplete = false;
     Session::UseLocalSession();
     SetStatus("no connection");
 }
@@ -677,6 +1169,8 @@ void TickLauncher()
         return;
     }
 
+    DrivePendingLauncherResolve();
+    DrivePendingRelayProbeResolve();
     TickRelayProbe();
 
     if (g_State.isHost)

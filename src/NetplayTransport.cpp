@@ -2,6 +2,109 @@
 
 namespace th06::Netplay
 {
+namespace
+{
+constexpr u8 kSnapshotDatagramMagic[4] = {'T', 'S', 'N', 'P'};
+constexpr u8 kSnapshotDatagramVersion = 1;
+constexpr u8 kConsistencyDatagramMagic[4] = {'T', 'D', 'H', 'G'};
+constexpr u8 kConsistencyDatagramVersion = 1;
+
+u16 NormalizeStartupSharedSeed(u16 seed)
+{
+    return seed != 0 ? seed : 1;
+}
+
+void AbortStartupSeedMismatch(u16 peerSharedSeed, const char *source)
+{
+    TraceDiagnostic("startup-seed-mismatch-abort", "source=%s peerSeed=%u authoritySeed=%u",
+                    source != nullptr ? source : "-", peerSharedSeed, g_State.authoritySharedSeed);
+    g_State.isSessionActive = false;
+    g_State.isWaitingForStartup = false;
+    g_State.titleColdStartRequested = false;
+    g_State.launcherCloseRequested = false;
+    g_State.currentCtrl = IGC_NONE;
+    g_State.lastFrame = -1;
+    g_State.currentNetFrame = 0;
+    g_State.authoritySharedSeed = 0;
+    g_State.authoritySharedSeedKnown = false;
+    g_State.authoritySharedSeedApplied = false;
+    g_State.startupActivationComplete = false;
+    ClearRuntimeCaches();
+    Session::UseLocalSession();
+    SetStatus("startup seed mismatch");
+}
+
+bool TryAdoptStartupAuthoritySeedFromPeer(u16 peerSharedSeed, const char *source)
+{
+    if (!g_State.isWaitingForStartup || g_State.isSessionActive)
+    {
+        return false;
+    }
+
+    if (g_State.isHost)
+    {
+        return g_State.authoritySharedSeedKnown;
+    }
+
+    if (peerSharedSeed == 0)
+    {
+        return false;
+    }
+
+    const u16 normalizedSeed = NormalizeStartupSharedSeed(peerSharedSeed);
+    if (!g_State.authoritySharedSeedKnown)
+    {
+        g_State.authoritySharedSeed = normalizedSeed;
+        g_State.authoritySharedSeedKnown = true;
+        TraceDiagnostic("startup-seed-adopt", "source=%s seed=%u", source != nullptr ? source : "-", normalizedSeed);
+        return true;
+    }
+
+    if (g_State.authoritySharedSeed != normalizedSeed)
+    {
+        AbortStartupSeedMismatch(normalizedSeed, source);
+        return false;
+    }
+
+    return true;
+}
+
+RawDatagramKind ClassifyRawDatagram(const u8 *bytes, int size)
+{
+    if (bytes == nullptr || size <= 0)
+    {
+        return RawDatagram_Unknown;
+    }
+    if (size >= 5 && std::memcmp(bytes, "THR1 ", 5) == 0)
+    {
+        return RawDatagram_RelayText;
+    }
+    if (size >= (int)sizeof(SnapshotDatagramHeader))
+    {
+        const SnapshotDatagramHeader *header = (const SnapshotDatagramHeader *)bytes;
+        if (std::memcmp(header->magic, kSnapshotDatagramMagic, sizeof(kSnapshotDatagramMagic)) == 0 &&
+            header->version == kSnapshotDatagramVersion)
+        {
+            return RawDatagram_SnapshotSideband;
+        }
+    }
+    if (size >= (int)sizeof(ConsistencyDatagramHeader))
+    {
+        const ConsistencyDatagramHeader *header = (const ConsistencyDatagramHeader *)bytes;
+        if (std::memcmp(header->magic, kConsistencyDatagramMagic, sizeof(kConsistencyDatagramMagic)) == 0 &&
+            header->version == kConsistencyDatagramVersion)
+        {
+            return RawDatagram_ConsistencySideband;
+        }
+    }
+    if (size == (int)sizeof(Pack))
+    {
+        return RawDatagram_Pack;
+    }
+    return RawDatagram_Unknown;
+}
+} // namespace
+
 std::string TrimString(std::string text)
 {
     const auto isSpace = [](unsigned char ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'; };
@@ -20,6 +123,10 @@ std::string TrimString(std::string text)
 bool ResolveIpPortToSockAddr(const std::string &ip, int port, int family, sockaddr_storage &outStorage, socklen_t &outLen)
 {
     std::memset(&outStorage, 0, sizeof(outStorage));
+    in_addr parsedIpv4 {};
+    in6_addr parsedIpv6 {};
+    const bool isNumericIpv4 = !ip.empty() && inet_pton(AF_INET, ip.c_str(), &parsedIpv4) == 1;
+    const bool isNumericIpv6 = !ip.empty() && inet_pton(AF_INET6, ip.c_str(), &parsedIpv6) == 1;
     if (family == AF_INET)
     {
         sockaddr_in *addr4 = (sockaddr_in *)&outStorage;
@@ -31,8 +138,9 @@ bool ResolveIpPortToSockAddr(const std::string &ip, int port, int family, sockad
             outLen = sizeof(sockaddr_in);
             return true;
         }
-        if (inet_pton(AF_INET, ip.c_str(), &addr4->sin_addr) == 1)
+        if (isNumericIpv4)
         {
+            addr4->sin_addr = parsedIpv4;
             outLen = sizeof(sockaddr_in);
             return true;
         }
@@ -48,13 +156,19 @@ bool ResolveIpPortToSockAddr(const std::string &ip, int port, int family, sockad
             outLen = sizeof(sockaddr_in6);
             return true;
         }
-        if (inet_pton(AF_INET6, ip.c_str(), &addr6->sin6_addr) == 1)
+        if (isNumericIpv6)
         {
+            addr6->sin6_addr = parsedIpv6;
             outLen = sizeof(sockaddr_in6);
             return true;
         }
     }
     else
+    {
+        return false;
+    }
+
+    if (isNumericIpv4 || isNumericIpv6)
     {
         return false;
     }
@@ -194,6 +308,16 @@ bool ConnectionBase::BindSocket(const std::string &bindIp, int port, int family)
 
 bool ConnectionBase::SendPackTo(const Pack &pack, const std::string &ip, int port)
 {
+    return SendBytesTo(&pack, sizeof(pack), ip, port);
+}
+
+bool ConnectionBase::SendBytesTo(const void *data, size_t size, const std::string &ip, int port)
+{
+    if (data == nullptr || size == 0 || size > (size_t)kRelayMaxDatagramBytes)
+    {
+        return false;
+    }
+
     const int families[2] = {m_family == AF_INET6 ? AF_INET6 : AF_INET, m_family == AF_INET6 ? AF_INET : AF_INET6};
     for (const int family : families)
     {
@@ -204,8 +328,8 @@ bool ConnectionBase::SendPackTo(const Pack &pack, const std::string &ip, int por
             continue;
         }
 
-        const int sent = (int)sendto(m_socket, (const char *)&pack, sizeof(pack), 0, (sockaddr *)&storage, storageLen);
-        if (sent == sizeof(pack))
+        const int sent = (int)sendto(m_socket, (const char *)data, (int)size, 0, (sockaddr *)&storage, storageLen);
+        if (sent == (int)size)
         {
             return true;
         }
@@ -215,9 +339,32 @@ bool ConnectionBase::SendPackTo(const Pack &pack, const std::string &ip, int por
 
 bool ConnectionBase::ReceiveOnePack(Pack &outPack, std::string &fromIp, int &fromPort, bool &hasData)
 {
+    DatagramBuffer datagram;
+    if (!ReceiveOneDatagram(datagram, hasData))
+    {
+        return false;
+    }
+    if (!hasData)
+    {
+        fromIp.clear();
+        fromPort = 0;
+        return true;
+    }
+    fromIp = datagram.fromIp;
+    fromPort = datagram.fromPort;
+    if (datagram.kind != RawDatagram_Pack || datagram.size != (int)sizeof(Pack))
+    {
+        hasData = false;
+        return true;
+    }
+    std::memcpy(&outPack, datagram.bytes, sizeof(Pack));
+    return true;
+}
+
+bool ConnectionBase::ReceiveOneDatagram(DatagramBuffer &outDatagram, bool &hasData)
+{
     hasData = false;
-    fromIp.clear();
-    fromPort = 0;
+    outDatagram = {};
     if (m_socket == kInvalidSocket)
     {
         return false;
@@ -225,8 +372,8 @@ bool ConnectionBase::ReceiveOnePack(Pack &outPack, std::string &fromIp, int &fro
 
     sockaddr_storage fromAddr {};
     socklen_t fromLen = sizeof(fromAddr);
-    std::memset(&outPack, 0, sizeof(outPack));
-    const int received = (int)recvfrom(m_socket, (char *)&outPack, sizeof(outPack), 0, (sockaddr *)&fromAddr, &fromLen);
+    const int received =
+        (int)recvfrom(m_socket, (char *)outDatagram.bytes, sizeof(outDatagram.bytes), 0, (sockaddr *)&fromAddr, &fromLen);
     if (received < 0)
     {
         const int errorCode = GetLastSocketError();
@@ -236,13 +383,19 @@ bool ConnectionBase::ReceiveOnePack(Pack &outPack, std::string &fromIp, int &fro
         }
         return false;
     }
+    if (received == 0)
+    {
+        return true;
+    }
 
-    g_State.lastPacketBytes = received;
-    hasData = SockAddrToIpPort((const sockaddr *)&fromAddr, fromLen, fromIp, fromPort);
+    outDatagram.size = received;
+    outDatagram.kind = ClassifyRawDatagram(outDatagram.bytes, outDatagram.size);
+    hasData = SockAddrToIpPort((const sockaddr *)&fromAddr, fromLen, outDatagram.fromIp, outDatagram.fromPort);
     if (hasData)
     {
-        g_State.lastPacketFromIp = fromIp;
-        g_State.lastPacketFromPort = fromPort;
+        g_State.lastPacketBytes = received;
+        g_State.lastPacketFromIp = outDatagram.fromIp;
+        g_State.lastPacketFromPort = outDatagram.fromPort;
     }
     return hasData;
 }
@@ -276,16 +429,61 @@ bool HostConnection::Start(const std::string &bindIp, int port, int family)
 
 bool HostConnection::PollReceive(Pack &outPack, bool &hasData)
 {
-    std::string fromIp;
-    int fromPort = 0;
-    if (!ReceiveOnePack(outPack, fromIp, fromPort, hasData))
+    DatagramBuffer datagram;
+    if (!PollDatagram(datagram, hasData))
     {
         return false;
     }
     if (hasData)
     {
-        m_guestIp = fromIp;
-        m_guestPort = fromPort;
+        if (datagram.kind == RawDatagram_Pack && datagram.size == (int)sizeof(Pack))
+        {
+            std::memcpy(&outPack, datagram.bytes, sizeof(Pack));
+        }
+        else
+        {
+            hasData = false;
+        }
+    }
+    return true;
+}
+
+bool HostConnection::PollDatagram(DatagramBuffer &outDatagram, bool &hasData)
+{
+    if (!ReceiveOneDatagram(outDatagram, hasData))
+    {
+        return false;
+    }
+    if (hasData)
+    {
+        m_guestIp = outDatagram.fromIp;
+        m_guestPort = outDatagram.fromPort;
+    }
+    return true;
+}
+
+bool HostConnection::SendDatagram(const void *data, size_t size)
+{
+    return !m_guestIp.empty() && m_guestPort > 0 && SendBytesTo(data, size, m_guestIp, m_guestPort);
+}
+
+bool GuestConnection::PollReceive(Pack &outPack, bool &hasData)
+{
+    DatagramBuffer datagram;
+    if (!PollDatagram(datagram, hasData))
+    {
+        return false;
+    }
+    if (hasData)
+    {
+        if (datagram.kind == RawDatagram_Pack && datagram.size == (int)sizeof(Pack))
+        {
+            std::memcpy(&outPack, datagram.bytes, sizeof(Pack));
+        }
+        else
+        {
+            hasData = false;
+        }
     }
     return true;
 }
@@ -333,11 +531,9 @@ bool GuestConnection::Start(const std::string &hostIp, int hostPort, int localPo
     return true;
 }
 
-bool GuestConnection::PollReceive(Pack &outPack, bool &hasData)
+bool GuestConnection::PollDatagram(DatagramBuffer &outDatagram, bool &hasData)
 {
-    std::string fromIp;
-    int fromPort = 0;
-    if (!ReceiveOnePack(outPack, fromIp, fromPort, hasData))
+    if (!ReceiveOneDatagram(outDatagram, hasData))
     {
         return false;
     }
@@ -347,6 +543,11 @@ bool GuestConnection::PollReceive(Pack &outPack, bool &hasData)
 bool GuestConnection::SendPack(const Pack &pack)
 {
     return !m_hostIp.empty() && m_hostPort > 0 && SendPackTo(pack, m_hostIp, m_hostPort);
+}
+
+bool GuestConnection::SendDatagram(const void *data, size_t size)
+{
+    return !m_hostIp.empty() && m_hostPort > 0 && SendBytesTo(data, size, m_hostIp, m_hostPort);
 }
 
 void GuestConnection::Reconnect()
@@ -584,6 +785,32 @@ void RelayConnection::Tick()
 
 bool RelayConnection::PollReceive(Pack &outPack, bool &hasData)
 {
+    DatagramBuffer datagram;
+    if (!PollDatagram(datagram, hasData))
+    {
+        return false;
+    }
+    if (hasData)
+    {
+        if (datagram.kind == RawDatagram_Pack && datagram.size == (int)sizeof(Pack))
+        {
+            std::memcpy(&outPack, datagram.bytes, sizeof(Pack));
+        }
+        else
+        {
+            hasData = false;
+        }
+    }
+    return true;
+}
+
+bool RelayConnection::SendPack(const Pack &pack)
+{
+    return SendDatagram(&pack, sizeof(pack));
+}
+
+bool RelayConnection::PollDatagram(DatagramBuffer &outDatagram, bool &hasData)
+{
     hasData = false;
     if (m_socket == kInvalidSocket)
     {
@@ -592,56 +819,33 @@ bool RelayConnection::PollReceive(Pack &outPack, bool &hasData)
 
     while (true)
     {
-        char buffer[1024] = {};
-        sockaddr_storage fromAddr {};
-        socklen_t fromLen = sizeof(fromAddr);
-        const int received = (int)recvfrom(m_socket, buffer, sizeof(buffer), 0, (sockaddr *)&fromAddr, &fromLen);
-        if (received < 0)
+        if (!ReceiveOneDatagram(outDatagram, hasData))
         {
-            const int errorCode = GetLastSocketError();
-            return IsWouldBlockError(errorCode);
+            return false;
         }
-        if (received == 0)
+        if (!hasData)
         {
+            return true;
+        }
+        if (outDatagram.kind == RawDatagram_RelayText)
+        {
+            HandleControl(std::string((const char *)outDatagram.bytes, (const char *)outDatagram.bytes + outDatagram.size));
             continue;
         }
-
-        std::string fromIp;
-        int fromPort = 0;
-        TrySockAddrToIpPort((const sockaddr *)&fromAddr, fromLen, fromIp, fromPort);
-
-        if (received >= 5 && std::memcmp(buffer, "THR1 ", 5) == 0)
-        {
-            HandleControl(std::string(buffer, buffer + received));
-            continue;
-        }
-
-        if (received != sizeof(Pack))
-        {
-            continue;
-        }
-
-        std::memcpy(&outPack, buffer, sizeof(Pack));
-        g_State.lastPacketBytes = received;
-        g_State.lastPacketFromIp = fromIp;
-        g_State.lastPacketFromPort = fromPort;
-        hasData = true;
         return true;
     }
-
-    return true;
 }
 
-bool RelayConnection::SendPack(const Pack &pack)
+bool RelayConnection::SendDatagram(const void *data, size_t size)
 {
-    if (m_socket == kInvalidSocket || !m_serverAddrValid)
+    if (m_socket == kInvalidSocket || !m_serverAddrValid || data == nullptr || size == 0 ||
+        size > (size_t)kRelayMaxDatagramBytes)
     {
         return false;
     }
 
-    const int sent =
-        (int)sendto(m_socket, (const char *)&pack, sizeof(pack), 0, (sockaddr *)&m_serverAddr, m_serverAddrLen);
-    return sent == sizeof(pack);
+    const int sent = (int)sendto(m_socket, (const char *)data, (int)size, 0, (sockaddr *)&m_serverAddr, m_serverAddrLen);
+    return sent == (int)size;
 }
 
 bool RelayConnection::IsReady() const
@@ -653,6 +857,8 @@ void ClearRuntimeCaches()
 {
     TraceDiagnostic("clear-runtime-caches", "-");
     ClearDebugNetworkQueues();
+    ResetConsistencyDebugState();
+    ResetRecoveryHeuristicState();
     g_State.localInputs.clear();
     g_State.remoteInputs.clear();
     g_State.predictedRemoteInputs.clear();
@@ -697,13 +903,20 @@ void ClearRuntimeCaches()
     g_State.broadcastUiPhaseIsInUi = false;
     g_State.broadcastUiPhaseUntilTick = 0;
     g_State.lastUiPhaseBroadcastTick = 0;
+    ResetSharedShellState();
+    ResetAuthoritativeRecoveryState();
     g_State.pendingDebugEndingJump = false;
+    g_State.reconnectStartTick = 0;
+    g_State.desyncStartTick = 0;
+    g_State.reconnectReason = AuthoritativeRecoveryReason_None;
 }
 
 void ClearRemoteRuntimeCaches()
 {
     TraceDiagnostic("clear-remote-runtime-caches", "-");
     ClearDebugNetworkQueues();
+    ResetConsistencyDebugState();
+    ResetRecoveryHeuristicState();
     g_State.remoteInputs.clear();
     g_State.predictedRemoteInputs.clear();
     g_State.remoteSeeds.clear();
@@ -739,7 +952,12 @@ void ClearRemoteRuntimeCaches()
     g_State.broadcastUiPhaseIsInUi = false;
     g_State.broadcastUiPhaseUntilTick = 0;
     g_State.lastUiPhaseBroadcastTick = 0;
+    ResetSharedShellState();
+    ResetAuthoritativeRecoveryState();
     g_State.pendingDebugEndingJump = false;
+    g_State.reconnectStartTick = 0;
+    g_State.desyncStartTick = 0;
+    g_State.reconnectReason = AuthoritativeRecoveryReason_None;
 }
 
 void ResetGameplayRuntimeStream()
@@ -750,10 +968,13 @@ void ResetGameplayRuntimeStream()
     // Reusing low serials (e.g. restarting from 1) can make delayed/stale ui-phase
     // packets from the previous stream look valid and falsely satisfy the barrier.
     const int nextUiSerialBase = std::max(g_State.localUiPhaseSerial, g_State.remoteUiPhaseSerial) + 1;
+    const u16 nextShellSerialBase = std::max<u16>(1, std::max(g_State.shell.nextShellSerial,
+                                                              (u16)(g_State.shell.shellSerial + 1)));
 
     ClearRuntimeCaches();
     g_State.localUiPhaseSerial = nextUiSerialBase;
     g_State.remoteUiPhaseSerial = nextUiSerialBase;
+    g_State.shell.nextShellSerial = nextShellSerialBase;
 
     g_State.lastFrame = -1;
     g_State.currentNetFrame = 0;
@@ -796,7 +1017,7 @@ unsigned long GetDiagnosticProcessId()
 #endif
 }
 
-bool OpenRelayProbeSocket()
+bool OpenRelayProbeSocket(int preferredFamily)
 {
     CloseRelayProbeSocket();
 
@@ -839,6 +1060,14 @@ bool OpenRelayProbeSocket()
         return true;
     };
 
+    if (preferredFamily == AF_INET6)
+    {
+        return tryOpen(AF_INET6) || tryOpen(AF_INET);
+    }
+    if (preferredFamily == AF_INET)
+    {
+        return tryOpen(AF_INET) || tryOpen(AF_INET6);
+    }
     return tryOpen(AF_INET6) || tryOpen(AF_INET);
 }
 
@@ -851,7 +1080,12 @@ bool SendRelayProbe()
 
     sockaddr_storage storage {};
     socklen_t storageLen = 0;
-    if (!ResolveIpPortToSockAddr(g_Relay.host, g_Relay.port, g_Relay.family, storage, storageLen))
+    if (g_Relay.resolvedAddrValid)
+    {
+        storage = g_Relay.resolvedAddr;
+        storageLen = g_Relay.resolvedAddrLen;
+    }
+    else if (!ResolveIpPortToSockAddr(g_Relay.host, g_Relay.port, g_Relay.family, storage, storageLen))
     {
         SetRelayStatus("resolve failed");
         g_Relay.isConnecting = false;
@@ -973,17 +1207,66 @@ bool SendPacketImmediate(const Pack &pack)
     return g_State.guest.SendPack(pack);
 }
 
-bool PollPacketImmediate(Pack &pack, bool &hasData)
+bool SendDatagramImmediate(const void *data, size_t size)
 {
     if (g_State.useRelayTransport)
     {
-        return g_State.relay.PollReceive(pack, hasData);
+        return g_State.relay.SendDatagram(data, size);
     }
     if (UsingHostConnection())
     {
-        return g_State.host.PollReceive(pack, hasData);
+        return g_State.host.SendDatagram(data, size);
     }
-    return g_State.guest.PollReceive(pack, hasData);
+    return g_State.guest.SendDatagram(data, size);
+}
+
+bool PollPacketImmediate(Pack &pack, bool &hasData)
+{
+    hasData = false;
+
+    while (true)
+    {
+        DatagramBuffer datagram;
+        bool datagramHasData = false;
+        const bool ok = g_State.useRelayTransport ? g_State.relay.PollDatagram(datagram, datagramHasData)
+                                                  : (UsingHostConnection() ? g_State.host.PollDatagram(datagram, datagramHasData)
+                                                                           : g_State.guest.PollDatagram(datagram, datagramHasData));
+        if (!ok || !datagramHasData)
+        {
+            return ok;
+        }
+
+        if (datagram.kind == RawDatagram_SnapshotSideband)
+        {
+            if (datagram.size < (int)sizeof(SnapshotDatagramHeader))
+            {
+                continue;
+            }
+            const SnapshotDatagramHeader *header = (const SnapshotDatagramHeader *)datagram.bytes;
+            const int payloadBytes = datagram.size - (int)sizeof(SnapshotDatagramHeader);
+            if (payloadBytes < 0 || payloadBytes != (int)header->payloadBytes)
+            {
+                continue;
+            }
+            HandleSnapshotSidebandDatagram(*header, datagram.bytes + sizeof(SnapshotDatagramHeader), payloadBytes);
+            continue;
+        }
+
+        if (datagram.kind == RawDatagram_ConsistencySideband)
+        {
+            HandleConsistencySidebandDatagram(datagram.bytes, datagram.size);
+            continue;
+        }
+
+        if (datagram.kind != RawDatagram_Pack || datagram.size != (int)sizeof(Pack))
+        {
+            continue;
+        }
+
+        std::memcpy(&pack, datagram.bytes, sizeof(Pack));
+        hasData = true;
+        return true;
+    }
 }
 
 void ClearDebugNetworkQueues()
@@ -1217,10 +1500,18 @@ bool TryActivateStartupFromRuntimePacket(const Pack &pack)
     }
 
     const u16 peerSharedSeed = pack.ctrl.rngSeed[0];
-    StoreRemoteKeyPacket(pack, peerSharedSeed, true);
-    TraceDiagnostic("startup-activate-from-runtime-packet", "frame=%d seq=%u peerSharedSeed=%u", pack.ctrl.frame, pack.seq,
-                    peerSharedSeed);
-    ActivateNetplaySession(peerSharedSeed, true);
+    if (!TryAdoptStartupAuthoritySeedFromPeer(peerSharedSeed, "runtime-packet"))
+    {
+        return false;
+    }
+    if (!g_State.authoritySharedSeedKnown)
+    {
+        return false;
+    }
+    TraceDiagnostic("startup-activate-from-runtime-packet",
+                    "frame=%d seq=%u peerSharedSeed=%u authoritySeed=%u", pack.ctrl.frame, pack.seq, peerSharedSeed,
+                    g_State.authoritySharedSeed);
+    ActivateNetplaySession(g_State.authoritySharedSeed, true);
     return true;
 }
 
@@ -1439,11 +1730,9 @@ void StoreRemoteKeyPacket(const Pack &pack, u16 sharedRngSeed, bool captureShare
 {
     TraceDiagnostic("recv-key-packet", "frame=%d seq=%u window=%s", pack.ctrl.frame, pack.seq,
                     BuildCtrlPacketWindowSummary(pack.ctrl, 4).c_str());
-    if (captureShared && sharedRngSeed != 0 && !g_State.sharedRngSeedCaptured)
+    if (captureShared && g_State.isWaitingForStartup && !g_State.isSessionActive)
     {
-        g_State.sessionRngSeed = sharedRngSeed;
-        g_State.sharedRngSeedCaptured = true;
-        TraceDiagnostic("recv-key-packet-shared-seed-capture", "peerSeed=%u", sharedRngSeed);
+        TryAdoptStartupAuthoritySeedFromPeer(sharedRngSeed, "store-remote-key");
     }
     if (g_State.isSessionActive && !g_State.isWaitingForStartup)
     {
@@ -1538,13 +1827,26 @@ void StoreRemoteKeyPacket(const Pack &pack, u16 sharedRngSeed, bool captureShare
             const bool lateAuthoritativeArrival =
                 existingInputIt == g_State.remoteInputs.end() || existingSeedIt == g_State.remoteSeeds.end() ||
                 existingCtrlIt == g_State.remoteCtrls.end();
+            const bool inSeedValidationGrace = frame <= g_State.seedValidationIgnoreUntilFrame;
             if (lateAuthoritativeArrival)
             {
-                queuedRollback = QueueRollbackFromFrame(frame, "recv-late-authoritative");
-                TraceDiagnostic("recv-key-frame-seed-mismatch",
-                                "frame=%d input=%s localSeed=%u remoteSeed=%u ctrl=%s queued=%d reason=late-authoritative",
-                                frame, FormatInputBits(WriteToInt(actualBits)).c_str(), localSeedIt->second, actualSeed,
-                                InGameCtrlToString(actualCtrl), queuedRollback ? 1 : 0);
+                if (inSeedValidationGrace)
+                {
+                    TraceDiagnostic("recv-key-frame-seed-mismatch",
+                                    "frame=%d input=%s localSeed=%u remoteSeed=%u ctrl=%s ignored=1 reason=rollback-grace "
+                                    "graceUntil=%d",
+                                    frame, FormatInputBits(WriteToInt(actualBits)).c_str(), localSeedIt->second,
+                                    actualSeed, InGameCtrlToString(actualCtrl), g_State.seedValidationIgnoreUntilFrame);
+                }
+                else
+                {
+                    queuedRollback = QueueRollbackFromFrame(frame, "recv-late-authoritative");
+                    TraceDiagnostic(
+                        "recv-key-frame-seed-mismatch",
+                        "frame=%d input=%s localSeed=%u remoteSeed=%u ctrl=%s queued=%d reason=late-authoritative",
+                        frame, FormatInputBits(WriteToInt(actualBits)).c_str(), localSeedIt->second, actualSeed,
+                        InGameCtrlToString(actualCtrl), queuedRollback ? 1 : 0);
+                }
             }
             else
             {
@@ -1593,12 +1895,21 @@ bool TryActivateFromStartupPacket(u16 *outPeerSharedSeed)
         }
 
         const u16 peerSharedSeed = pack.ctrl.rngSeed[0];
-        StoreRemoteKeyPacket(pack, peerSharedSeed, true);
+        if (!TryAdoptStartupAuthoritySeedFromPeer(peerSharedSeed, "startup-packet"))
+        {
+            return false;
+        }
+        if (!g_State.authoritySharedSeedKnown)
+        {
+            return false;
+        }
         if (outPeerSharedSeed)
         {
-            *outPeerSharedSeed = peerSharedSeed;
+            *outPeerSharedSeed = g_State.authoritySharedSeed;
         }
-        ActivateNetplaySession(peerSharedSeed, true);
+        TraceDiagnostic("startup-activate-from-packet", "seq=%u peerSharedSeed=%u authoritySeed=%u", pack.seq,
+                        peerSharedSeed, g_State.authoritySharedSeed);
+        ActivateNetplaySession(g_State.authoritySharedSeed, true);
         return true;
     }
 }
@@ -1666,6 +1977,14 @@ bool ReceiveRuntimePackets()
                             (pack.ctrl.uiPhase.flags & UiPhaseFlag_InUi) != 0 ? 1 : 0, pack.ctrl.uiPhase.boundaryFrame,
                             g_State.remoteUiPhaseSerial);
         }
+        else if (pack.ctrl.ctrlType == Ctrl_ShellIntent)
+        {
+            HandleSharedShellIntentPacket(pack.ctrl);
+        }
+        else if (pack.ctrl.ctrlType == Ctrl_ShellState)
+        {
+            HandleSharedShellStatePacket(pack.ctrl);
+        }
         else if (pack.ctrl.ctrlType == Ctrl_Debug_EndingJump)
         {
             g_State.lastRuntimeReceiveTick = SDL_GetTicks64();
@@ -1686,9 +2005,10 @@ void SendStartupBootstrapPacket()
     const int frame = 0;
     Bits<16> zeroBits;
     zeroBits.Clear();
+    const u16 startupSeed = g_State.authoritySharedSeedKnown ? g_State.authoritySharedSeed : g_Rng.seed;
 
     g_State.localInputs[frame] = zeroBits;
-    g_State.localSeeds[frame] = g_Rng.seed;
+    g_State.localSeeds[frame] = NormalizeStartupSharedSeed(startupSeed);
     g_State.localCtrls[frame] = IGC_NONE;
     PruneOldFrameData(frame);
     SendKeyPacket(frame);

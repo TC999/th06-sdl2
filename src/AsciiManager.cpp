@@ -15,6 +15,18 @@
 
 namespace th06
 {
+namespace
+{
+void NormalizeStaticChainElem(ChainElem &elem)
+{
+    g_Chain.Cut(&elem);
+    elem.prev = NULL;
+    elem.next = NULL;
+    elem.unkPtr = &elem;
+    elem.priority = 0;
+}
+} // namespace
+
 DIFFABLE_STATIC(AsciiManager, g_AsciiManager)
 DIFFABLE_STATIC(ChainElem, g_AsciiManagerCalcChain)
 DIFFABLE_STATIC(ChainElem, g_AsciiManagerOnDrawMenusChain)
@@ -51,11 +63,25 @@ ChainCallbackResult AsciiManager::OnUpdate(AsciiManager *mgr)
     }
     else if (g_GameManager.isInGameMenu)
     {
-        mgr->gameMenu.OnUpdateGameMenu();
+        if (Session::IsRemoteNetplaySession() && Netplay::IsSharedShellActive(Netplay::SharedShell_Pause))
+        {
+            Netplay::UpdateSharedShellMenu(mgr->gameMenu, Netplay::SharedShell_Pause);
+        }
+        else
+        {
+            mgr->gameMenu.OnUpdateGameMenu();
+        }
     }
     if (g_GameManager.isInRetryMenu)
     {
-        mgr->retryMenu.OnUpdateRetryMenu();
+        if (Session::IsRemoteNetplaySession() && Netplay::IsSharedShellActive(Netplay::SharedShell_Retry))
+        {
+            Netplay::UpdateSharedShellMenu(mgr->retryMenu, Netplay::SharedShell_Retry);
+        }
+        else
+        {
+            mgr->retryMenu.OnUpdateRetryMenu();
+        }
     }
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
@@ -63,6 +89,10 @@ ChainCallbackResult AsciiManager::OnUpdate(AsciiManager *mgr)
 
 ChainCallbackResult AsciiManager::OnDrawMenus(AsciiManager *mgr)
 {
+    if (Session::IsRemoteNetplaySession())
+    {
+        Netplay::QueueSharedShellOverlayText();
+    }
     mgr->DrawStrings();
     mgr->numStrings = 0;
     mgr->gameMenu.OnDrawGameMenu();
@@ -86,6 +116,10 @@ ChainCallbackResult AsciiManager::OnDrawPopups(AsciiManager *mgr)
 ZunResult AsciiManager::RegisterChain()
 {
     AsciiManager *mgr = &g_AsciiManager;
+
+    NormalizeStaticChainElem(g_AsciiManagerCalcChain);
+    NormalizeStaticChainElem(g_AsciiManagerOnDrawMenusChain);
+    NormalizeStaticChainElem(g_AsciiManagerOnDrawPopupsChain);
 
     g_AsciiManagerCalcChain.callback = (ChainCallback)AsciiManager::OnUpdate;
     g_AsciiManagerCalcChain.addedCallback = NULL;
@@ -168,8 +202,19 @@ void AsciiManager::CutChain()
 {
     g_Chain.Cut(&g_AsciiManagerCalcChain);
     g_Chain.Cut(&g_AsciiManagerOnDrawMenusChain);
-    // What about g_AsciiManagerOnDrawPopupsChain? It looks like zun forgot
-    // to free it!
+    g_Chain.Cut(&g_AsciiManagerOnDrawPopupsChain);
+    g_AsciiManagerCalcChain.prev = NULL;
+    g_AsciiManagerCalcChain.next = NULL;
+    g_AsciiManagerCalcChain.unkPtr = &g_AsciiManagerCalcChain;
+    g_AsciiManagerCalcChain.priority = 0;
+    g_AsciiManagerOnDrawMenusChain.prev = NULL;
+    g_AsciiManagerOnDrawMenusChain.next = NULL;
+    g_AsciiManagerOnDrawMenusChain.unkPtr = &g_AsciiManagerOnDrawMenusChain;
+    g_AsciiManagerOnDrawMenusChain.priority = 0;
+    g_AsciiManagerOnDrawPopupsChain.prev = NULL;
+    g_AsciiManagerOnDrawPopupsChain.next = NULL;
+    g_AsciiManagerOnDrawPopupsChain.unkPtr = &g_AsciiManagerOnDrawPopupsChain;
+    g_AsciiManagerOnDrawPopupsChain.priority = 0;
 }
 
 void AsciiManager::AddString(D3DXVECTOR3 *position, char *text)

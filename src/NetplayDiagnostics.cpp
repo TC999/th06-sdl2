@@ -1,4 +1,5 @@
 #include "NetplayInternal.hpp"
+#include "thprac_th06.h"
 
 namespace th06::Netplay
 {
@@ -20,6 +21,10 @@ const char *ControlToString(Control control)
         return "debug_ending_jump";
     case Ctrl_UiPhase:
         return "ui_phase";
+    case Ctrl_ShellIntent:
+        return "shell_intent";
+    case Ctrl_ShellState:
+        return "shell_state";
     default:
         return "unknown";
     }
@@ -137,11 +142,12 @@ std::string BuildRuntimeStateSummary()
     char summary[640] = {};
     std::snprintf(summary, sizeof(summary),
                   "role=%s sup=%d gf=%d ui=%d menu=%d retry=%d net=%d last=%d delay=%d sync=%d conn=%d reconn=%d "
-                  "rb=%d pend=%d tgt=%d send=%d stall=%d ctrl=%s lastIn=%s curIn=%s status=%s",
+                  "desyncTick=%llu rb=%d pend=%d tgt=%d send=%d stall=%d ctrl=%s lastIn=%s curIn=%s status=%s",
                   SessionRoleTag(), (int)g_Supervisor.curState, inGameManager ? g_GameManager.gameFrames : -1,
                   isInUi ? 1 : 0, isInGameMenu ? 1 : 0, isInRetryMenu ? 1 : 0, g_State.currentNetFrame,
                   g_State.lastFrame, g_State.delay, g_State.isSync ? 1 : 0, g_State.isConnected ? 1 : 0,
-                  g_State.isTryingReconnect ? 1 : 0, g_State.rollbackActive ? 1 : 0,
+                  g_State.isTryingReconnect ? 1 : 0, (unsigned long long)g_State.desyncStartTick,
+                  g_State.rollbackActive ? 1 : 0,
                   g_State.pendingRollbackFrame, g_State.rollbackTargetFrame, g_State.rollbackSendFrame,
                   g_State.stallFrameRequested ? 1 : 0, InGameCtrlToString(g_State.currentCtrl),
                   FormatInputBits(g_LastFrameInput).c_str(), FormatInputBits(g_CurFrameInput).c_str(),
@@ -780,7 +786,6 @@ uint64_t HashGameManagerState()
     hash.AddRaw(g_GameManager.difficulty);
     hash.AddRaw(g_GameManager.grazeInStage);
     hash.AddRaw(g_GameManager.grazeInTotal);
-    hash.AddRaw(g_GameManager.isInReplay);
     hash.AddRaw(g_GameManager.deaths);
     hash.AddRaw(g_GameManager.bombsUsed);
     hash.AddRaw(g_GameManager.spellcardsCaptured);
@@ -797,24 +802,11 @@ uint64_t HashGameManagerState()
     hash.AddRaw(g_GameManager.character2);
     hash.AddRaw(g_GameManager.shotType);
     hash.AddRaw(g_GameManager.shotType2);
-    hash.AddRaw(g_GameManager.isInGameMenu);
-    hash.AddRaw(g_GameManager.isInRetryMenu);
-    hash.AddRaw(g_GameManager.isInMenu);
     hash.AddRaw(g_GameManager.isGameCompleted);
     hash.AddRaw(g_GameManager.isInPracticeMode);
     hash.AddRaw(g_GameManager.demoMode);
-    hash.AddRaw(g_GameManager.demoFrames);
-    hash.AddRaw(g_GameManager.randomSeed);
     hash.AddRaw(g_GameManager.gameFrames);
     hash.AddRaw(g_GameManager.currentStage);
-    hash.AddRaw(g_GameManager.menuCursorBackup);
-    HashVec2(hash, g_GameManager.arcadeRegionTopLeftPos);
-    HashVec2(hash, g_GameManager.arcadeRegionSize);
-    HashVec2(hash, g_GameManager.playerMovementAreaTopLeftPos);
-    HashVec2(hash, g_GameManager.playerMovementAreaSize);
-    hash.AddFloat(g_GameManager.cameraDistance);
-    HashVec3(hash, g_GameManager.stageCameraFacingDir);
-    hash.AddRaw(g_GameManager.counat);
     hash.AddRaw(g_GameManager.rank);
     hash.AddRaw(g_GameManager.maxRank);
     hash.AddRaw(g_GameManager.minRank);
@@ -822,6 +814,36 @@ uint64_t HashGameManagerState()
     hash.AddRaw(g_GameManager.livesRemaining2);
     hash.AddRaw(g_GameManager.bombsRemaining2);
     hash.AddRaw(g_GameManager.currentPower2);
+    return hash.Finish();
+}
+
+uint64_t HashInputRuntimeState()
+{
+    const Controller::RuntimeState state = Controller::CaptureRuntimeState();
+    DiagnosticHashBuilder hash;
+    hash.AddRaw(g_State.currentNetFrame);
+    hash.AddRaw(g_State.delay);
+    hash.AddRaw(g_State.currentDelayCooldown);
+    hash.AddRaw(state.focusButtonConflictState);
+    hash.AddRaw(g_LastFrameInput);
+    hash.AddRaw(g_CurFrameInput);
+    hash.AddRaw(g_IsEigthFrameOfHeldInput);
+    hash.AddRaw(g_NumOfFramesInputsWereHeld);
+    return hash.Finish();
+}
+
+uint64_t HashCatkState()
+{
+    DiagnosticHashBuilder hash;
+    hash.AddBytes(g_GameManager.catk, sizeof(g_GameManager.catk));
+    return hash.Finish();
+}
+
+uint64_t HashRngState()
+{
+    DiagnosticHashBuilder hash;
+    hash.AddRaw(g_Rng.seed);
+    hash.AddRaw(g_Rng.generationCount);
     return hash.Finish();
 }
 
@@ -927,54 +949,76 @@ uint64_t HashSoundRuntimeState()
     return hash.Finish();
 }
 
-void TraceFrameSubsystemHashes(int frame, const char *phase)
+bool CaptureFrameSubsystemHashes(int frame, FrameSubsystemHashes &outHashes)
 {
     if (!g_State.isSessionActive || !g_State.isConnected || frame < 0)
+    {
+        return false;
+    }
+
+    outHashes = {};
+    outHashes.stage = g_GameManager.currentStage;
+    outHashes.frame = frame;
+    outHashes.rollbackEpochStartFrame = g_State.rollbackEpochStartFrame;
+    outHashes.gameHash = HashGameManagerState();
+    outHashes.player1Hash = HashPlayerState(g_Player);
+    outHashes.player2Hash = HashPlayerState(g_Player2);
+    outHashes.bulletHash = HashBulletManagerState();
+    outHashes.enemyHash = HashEnemyManagerState();
+    outHashes.itemHash = HashItemManagerState();
+    outHashes.effectHash = HashEffectManagerState();
+    outHashes.stageHash = HashStageState();
+    outHashes.eclHash = HashEclManagerState();
+    outHashes.enemyEclHash = HashEnemyEclRuntimeState();
+    outHashes.screenHash = HashScreenEffectRuntimeState();
+    outHashes.inputHash = HashInputRuntimeState();
+    outHashes.catkHash = HashCatkState();
+    outHashes.rngHash = HashRngState();
+
+    DiagnosticHashBuilder all;
+    all.AddRaw(outHashes.gameHash);
+    all.AddRaw(outHashes.player1Hash);
+    all.AddRaw(outHashes.player2Hash);
+    all.AddRaw(outHashes.bulletHash);
+    all.AddRaw(outHashes.enemyHash);
+    all.AddRaw(outHashes.itemHash);
+    all.AddRaw(outHashes.effectHash);
+    all.AddRaw(outHashes.stageHash);
+    all.AddRaw(outHashes.eclHash);
+    all.AddRaw(outHashes.enemyEclHash);
+    all.AddRaw(outHashes.screenHash);
+    all.AddRaw(outHashes.inputHash);
+    all.AddRaw(outHashes.catkHash);
+    all.AddRaw(outHashes.rngHash);
+    outHashes.allHash = all.Finish();
+    return true;
+}
+
+void TraceFrameSubsystemHashes(int frame, const char *phase)
+{
+    if (!THPrac::TH06::THPracIsDebugLogEnabled())
     {
         return;
     }
 
-    const uint64_t gameHash = HashGameManagerState();
-    const uint64_t player1Hash = HashPlayerState(g_Player);
-    const uint64_t player2Hash = HashPlayerState(g_Player2);
-    const uint64_t bulletHash = HashBulletManagerState();
-    const uint64_t enemyHash = HashEnemyManagerState();
-    const uint64_t itemHash = HashItemManagerState();
-    const uint64_t effectHash = HashEffectManagerState();
-    const uint64_t stageHash = HashStageState();
-    const uint64_t eclHash = HashEclManagerState();
-    const uint64_t enemyEclHash = HashEnemyEclRuntimeState();
-    const uint64_t screenHash = HashScreenEffectRuntimeState();
-    const uint64_t controllerHash = HashControllerRuntimeState();
-    const uint64_t supervisorHash = HashSupervisorRuntimeState();
-    const uint64_t soundHash = HashSoundRuntimeState();
-
-    DiagnosticHashBuilder all;
-    all.AddRaw(gameHash);
-    all.AddRaw(player1Hash);
-    all.AddRaw(player2Hash);
-    all.AddRaw(bulletHash);
-    all.AddRaw(enemyHash);
-    all.AddRaw(itemHash);
-    all.AddRaw(effectHash);
-    all.AddRaw(stageHash);
-    all.AddRaw(eclHash);
-    all.AddRaw(enemyEclHash);
-    all.AddRaw(screenHash);
-    all.AddRaw(controllerHash);
-    all.AddRaw(supervisorHash);
-    all.AddRaw(soundHash);
-    all.AddRaw(g_Rng.seed);
+    FrameSubsystemHashes hashes {};
+    if (!CaptureFrameSubsystemHashes(frame, hashes))
+    {
+        return;
+    }
 
     TraceDiagnostic(
         "frame-subsystem-hash",
-        "phase=%s frame=%d all=%016llx game=%016llx p1=%016llx p2=%016llx bullet=%016llx enemy=%016llx item=%016llx effect=%016llx stage=%016llx ecl=%016llx enemyEcl=%016llx screen=%016llx ctrl=%016llx supervisor=%016llx sound=%016llx rng=%04x",
-        phase != nullptr ? phase : "unknown", frame, (unsigned long long)all.Finish(), (unsigned long long)gameHash,
-        (unsigned long long)player1Hash, (unsigned long long)player2Hash, (unsigned long long)bulletHash,
-        (unsigned long long)enemyHash, (unsigned long long)itemHash, (unsigned long long)effectHash,
-        (unsigned long long)stageHash, (unsigned long long)eclHash, (unsigned long long)enemyEclHash,
-        (unsigned long long)screenHash, (unsigned long long)controllerHash, (unsigned long long)supervisorHash,
-        (unsigned long long)soundHash, g_Rng.seed);
+        "phase=%s frame=%d all=%016llx game=%016llx p1=%016llx p2=%016llx bullet=%016llx enemy=%016llx item=%016llx effect=%016llx stage=%016llx ecl=%016llx enemyEcl=%016llx screen=%016llx input=%016llx catk=%016llx rng=%016llx",
+        phase != nullptr ? phase : "unknown", frame, (unsigned long long)hashes.allHash,
+        (unsigned long long)hashes.gameHash, (unsigned long long)hashes.player1Hash,
+        (unsigned long long)hashes.player2Hash, (unsigned long long)hashes.bulletHash,
+        (unsigned long long)hashes.enemyHash, (unsigned long long)hashes.itemHash,
+        (unsigned long long)hashes.effectHash, (unsigned long long)hashes.stageHash,
+        (unsigned long long)hashes.eclHash, (unsigned long long)hashes.enemyEclHash,
+        (unsigned long long)hashes.screenHash, (unsigned long long)hashes.inputHash,
+        (unsigned long long)hashes.catkHash, (unsigned long long)hashes.rngHash);
+    RecordConsistencyHashSample(hashes);
 }
 
 FILE *OpenDiagnosticLogFile()
@@ -982,6 +1026,11 @@ FILE *OpenDiagnosticLogFile()
     static FILE *file = nullptr;
     static bool firstOpen = true;
     static char resolvedPath[512] = {};
+
+    if (!THPrac::TH06::THPracIsDebugLogEnabled())
+    {
+        return nullptr;
+    }
 
     if (file != nullptr)
     {
@@ -1062,6 +1111,11 @@ std::string BuildPacketSummary(const Pack &pack)
 
 void TraceLauncherPacket(const char *phase, const Pack &pack)
 {
+    if (!THPrac::TH06::THPracIsDebugLogEnabled())
+    {
+        return;
+    }
+
     FILE *file = std::fopen("netplay_trace.log", "a");
     if (file == nullptr)
     {
@@ -1094,6 +1148,9 @@ void CloseRelayProbeSocket()
     g_Relay.lastProbeTick = 0;
     g_Relay.lastProbeSendTick = 0;
     g_Relay.pendingNonce.clear();
+    g_Relay.resolvedAddr = {};
+    g_Relay.resolvedAddrLen = 0;
+    g_Relay.resolvedAddrValid = false;
 }
 
 

@@ -362,11 +362,11 @@ InGameCtrlType CaptureControlKeys()
     {
         return Inf_Power;
     }
-    if (keyboardState[SDL_SCANCODE_Q])
+    if (!Session::IsRemoteNetplaySession() && keyboardState[SDL_SCANCODE_Q])
     {
         return Quick_Quit;
     }
-    if (keyboardState[SDL_SCANCODE_R])
+    if (!Session::IsRemoteNetplaySession() && keyboardState[SDL_SCANCODE_R])
     {
         return Quick_Restart;
     }
@@ -458,49 +458,7 @@ void CaptureGameplaySnapshot(int frame)
         snapshot.guiImpl = *g_Gui.impl;
     }
     snapshot.asciiManager = g_AsciiManager;
-    snapshot.stageState = g_Stage;
-    snapshot.eclManager = g_EclManager;
-    snapshot.rng = g_Rng;
-    snapshot.enemyEclRuntimeState = EnemyEclInstr::CaptureRuntimeState();
-    snapshot.screenEffectRuntimeState = ScreenEffect::CaptureRuntimeState();
-    snapshot.controllerRuntimeState = Controller::CaptureRuntimeState();
-    snapshot.supervisorRuntimeState.calcCount = g_Supervisor.calcCount;
-    snapshot.supervisorRuntimeState.wantedState = g_Supervisor.wantedState;
-    snapshot.supervisorRuntimeState.curState = g_Supervisor.curState;
-    snapshot.supervisorRuntimeState.wantedState2 = g_Supervisor.wantedState2;
-    snapshot.supervisorRuntimeState.unk194 = g_Supervisor.unk194;
-    snapshot.supervisorRuntimeState.unk198 = g_Supervisor.unk198;
-    snapshot.supervisorRuntimeState.isInEnding = g_Supervisor.isInEnding;
-    snapshot.supervisorRuntimeState.vsyncEnabled = g_Supervisor.vsyncEnabled;
-    snapshot.supervisorRuntimeState.lastFrameTime = g_Supervisor.lastFrameTime;
-    snapshot.supervisorRuntimeState.effectiveFramerateMultiplier = g_Supervisor.effectiveFramerateMultiplier;
-    snapshot.supervisorRuntimeState.framerateMultiplier = g_Supervisor.framerateMultiplier;
-    snapshot.supervisorRuntimeState.unk1b4 = g_Supervisor.unk1b4;
-    snapshot.supervisorRuntimeState.unk1b8 = g_Supervisor.unk1b8;
-    snapshot.supervisorRuntimeState.startupTimeBeforeMenuMusic = g_Supervisor.startupTimeBeforeMenuMusic;
-    snapshot.gameWindowRuntimeState.tickCountToEffectiveFramerate = g_TickCountToEffectiveFramerate;
-    snapshot.gameWindowRuntimeState.lastFrameTime = g_LastFrameTime;
-    snapshot.gameWindowRuntimeState.curFrame = g_GameWindow.curFrame;
-    snapshot.stageRuntimeState.objectInstances.clear();
-    snapshot.stageRuntimeState.quadVms.clear();
-    if (g_Stage.objectInstances != nullptr && g_Stage.objectsCount > 0)
-    {
-        snapshot.stageRuntimeState.objectInstances.assign(g_Stage.objectInstances,
-                                                         g_Stage.objectInstances + g_Stage.objectsCount);
-    }
-    if (g_Stage.quadVms != nullptr && g_Stage.quadCount > 0)
-    {
-        snapshot.stageRuntimeState.quadVms.assign(g_Stage.quadVms, g_Stage.quadVms + g_Stage.quadCount);
-    }
-    std::memcpy(snapshot.soundRuntimeState.soundBuffersToPlay, g_SoundPlayer.soundBuffersToPlay,
-                sizeof(snapshot.soundRuntimeState.soundBuffersToPlay));
-    std::memcpy(snapshot.soundRuntimeState.queuedSfxState, g_SoundPlayer.unk408,
-                sizeof(snapshot.soundRuntimeState.queuedSfxState));
-    snapshot.soundRuntimeState.isLooping = g_SoundPlayer.isLooping;
-    snapshot.lastFrameInput = g_LastFrameInput;
-    snapshot.curFrameInput = g_CurFrameInput;
-    snapshot.eighthFrameHeldInput = g_IsEigthFrameOfHeldInput;
-    snapshot.heldInputFrames = g_NumOfFramesInputsWereHeld;
+    DGS::CaptureSharedGameplaySnapshotState(snapshot);
 
     while ((int)g_State.rollbackSnapshots.size() > kRollbackMaxSnapshots)
     {
@@ -528,55 +486,10 @@ bool RestoreGameplaySnapshot(const GameplaySnapshot &snapshot)
         *g_Gui.impl = snapshot.guiImpl;
     }
     g_AsciiManager = snapshot.asciiManager;
-    g_Stage = snapshot.stageState;
-    g_EclManager = snapshot.eclManager;
-    g_Rng = snapshot.rng;
-    if (!snapshot.stageRuntimeState.objectInstances.empty())
+    if (!DGS::RestoreSharedGameplaySnapshotState(snapshot))
     {
-        if (g_Stage.objectInstances == nullptr || (int)snapshot.stageRuntimeState.objectInstances.size() != g_Stage.objectsCount)
-        {
-            return false;
-        }
-        std::memcpy(g_Stage.objectInstances, snapshot.stageRuntimeState.objectInstances.data(),
-                    snapshot.stageRuntimeState.objectInstances.size() * sizeof(RawStageObjectInstance));
+        return false;
     }
-    if (!snapshot.stageRuntimeState.quadVms.empty())
-    {
-        if (g_Stage.quadVms == nullptr || (int)snapshot.stageRuntimeState.quadVms.size() != g_Stage.quadCount)
-        {
-            return false;
-        }
-        std::memcpy(g_Stage.quadVms, snapshot.stageRuntimeState.quadVms.data(),
-                    snapshot.stageRuntimeState.quadVms.size() * sizeof(AnmVm));
-    }
-    EnemyEclInstr::RestoreRuntimeState(snapshot.enemyEclRuntimeState);
-    ScreenEffect::RestoreRuntimeState(snapshot.screenEffectRuntimeState);
-    Controller::RestoreRuntimeState(snapshot.controllerRuntimeState);
-    g_Supervisor.calcCount = snapshot.supervisorRuntimeState.calcCount;
-    g_Supervisor.wantedState = snapshot.supervisorRuntimeState.wantedState;
-    g_Supervisor.curState = snapshot.supervisorRuntimeState.curState;
-    g_Supervisor.wantedState2 = snapshot.supervisorRuntimeState.wantedState2;
-    g_Supervisor.unk194 = snapshot.supervisorRuntimeState.unk194;
-    g_Supervisor.unk198 = snapshot.supervisorRuntimeState.unk198;
-    g_Supervisor.isInEnding = snapshot.supervisorRuntimeState.isInEnding;
-    g_Supervisor.vsyncEnabled = snapshot.supervisorRuntimeState.vsyncEnabled;
-    g_Supervisor.lastFrameTime = snapshot.supervisorRuntimeState.lastFrameTime;
-    g_Supervisor.effectiveFramerateMultiplier = snapshot.supervisorRuntimeState.effectiveFramerateMultiplier;
-    g_Supervisor.framerateMultiplier = snapshot.supervisorRuntimeState.framerateMultiplier;
-    g_Supervisor.unk1b4 = snapshot.supervisorRuntimeState.unk1b4;
-    g_Supervisor.unk1b8 = snapshot.supervisorRuntimeState.unk1b8;
-    g_Supervisor.startupTimeBeforeMenuMusic = snapshot.supervisorRuntimeState.startupTimeBeforeMenuMusic;
-    g_TickCountToEffectiveFramerate = snapshot.gameWindowRuntimeState.tickCountToEffectiveFramerate;
-    g_LastFrameTime = snapshot.gameWindowRuntimeState.lastFrameTime;
-    g_GameWindow.curFrame = snapshot.gameWindowRuntimeState.curFrame;
-    std::memcpy(g_SoundPlayer.soundBuffersToPlay, snapshot.soundRuntimeState.soundBuffersToPlay,
-                sizeof(g_SoundPlayer.soundBuffersToPlay));
-    std::memcpy(g_SoundPlayer.unk408, snapshot.soundRuntimeState.queuedSfxState, sizeof(g_SoundPlayer.unk408));
-    g_SoundPlayer.isLooping = snapshot.soundRuntimeState.isLooping;
-    g_LastFrameInput = snapshot.lastFrameInput;
-    g_CurFrameInput = snapshot.curFrameInput;
-    g_IsEigthFrameOfHeldInput = snapshot.eighthFrameHeldInput;
-    g_NumOfFramesInputsWereHeld = snapshot.heldInputFrames;
     g_State.delay = snapshot.delay;
     g_State.currentDelayCooldown = snapshot.currentDelayCooldown;
     g_State.currentCtrl = IGC_NONE;
@@ -622,6 +535,16 @@ bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlTy
     if (selfCtrlIt != g_State.localCtrls.end())
     {
         selfCtrl = selfCtrlIt->second;
+    }
+
+    if (isInUi && ShouldFreezeSharedShellUiInput(frame))
+    {
+        outCtrl = IGC_NONE;
+        TraceDiagnostic("resolve-frame-shared-shell-handoff",
+                        "frame=%d delayed=%d serial=%u phase=%u handoff=%u final=0", frame, delayedFrame,
+                        g_State.shell.shellSerial, (unsigned)g_State.shell.authoritativePhase,
+                        g_State.shell.authoritativeHandoffFrame);
+        return 0;
     }
 
     u16 remoteInput = 0;
@@ -671,6 +594,7 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
     {
         TraceDiagnostic("rollback-start-drop-epoch", "current=%d mismatch=%d epochStart=%d", currentFrame,
                         mismatchFrame, g_State.rollbackEpochStartFrame);
+        NoteRecoveryHeuristicRollbackFailure(currentFrame, mismatchFrame, -1, mismatchFrame, "epoch-boundary");
         if (g_State.pendingRollbackFrame == mismatchFrame)
         {
             g_State.pendingRollbackFrame = -1;
@@ -683,6 +607,7 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
     {
         TraceDiagnostic("rollback-start-drop-too-old", "current=%d mismatch=%d oldestSnapshot=%d", currentFrame,
                         mismatchFrame, oldestSnapshotFrame);
+        NoteRecoveryHeuristicRollbackFailure(currentFrame, mismatchFrame, oldestSnapshotFrame, mismatchFrame, "too-old");
         if (g_State.pendingRollbackFrame == mismatchFrame)
         {
             g_State.pendingRollbackFrame = -1;
@@ -699,6 +624,8 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
                         "current=%d mismatch=%d lastSnapshot=%d lastTarget=%d latestSnapshot=%d olderThan=%d",
                         currentFrame, mismatchFrame, g_State.lastRollbackSnapshotFrame, g_State.lastRollbackTargetFrame,
                         latestSnapshotFrame, olderThanSnapshotFrame);
+        NoteRecoveryHeuristicRollbackFailure(currentFrame, mismatchFrame, latestSnapshotFrame, mismatchFrame,
+                                             "stale-window");
         return false;
     }
 
@@ -735,6 +662,8 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
                         "current=%d mismatch=%d rollbackFrame=%d target=%d availableRemote=%d snapshot=%d olderThan=%d",
                         currentFrame, mismatchFrame, rollbackFrame, rollbackTargetFrame, availableRemoteFrame,
                         snapshot != nullptr ? snapshot->frame : -1, olderThanSnapshotFrame);
+        NoteRecoveryHeuristicRollbackFailure(currentFrame, mismatchFrame, snapshot != nullptr ? snapshot->frame : -1,
+                                             rollbackTargetFrame, "no-snapshot");
         return false;
     }
 
@@ -746,6 +675,8 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
             "current=%d mismatch=%d snapshot=%d target=%d requiredStart=%d missingLocal=%d missingRemote=%d",
             currentFrame, mismatchFrame, snapshot->frame, rollbackTargetFrame, requiredStartFrame, missingLocalFrame,
             missingRemoteFrame);
+        NoteRecoveryHeuristicRollbackFailure(currentFrame, mismatchFrame, snapshot->frame, rollbackTargetFrame,
+                                             "history");
         if (g_State.pendingRollbackFrame == mismatchFrame)
         {
             g_State.pendingRollbackFrame = -1;
@@ -759,6 +690,8 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
                         "current=%d mismatch=%d rollbackFrame=%d target=%d availableRemote=%d snapshot=%d",
                         currentFrame, mismatchFrame, rollbackFrame, rollbackTargetFrame, availableRemoteFrame,
                         snapshot->frame);
+        NoteRecoveryHeuristicRollbackFailure(currentFrame, mismatchFrame, snapshot->frame, rollbackTargetFrame,
+                                             "restore-fail");
         return false;
     }
 
@@ -787,6 +720,7 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
                     "current=%d mismatch=%d rollbackFrame=%d snapshot=%d target=%d available=%d olderThan=%d",
                     currentFrame, mismatchFrame, rollbackFrame, snapshot->frame, rollbackTargetFrame,
                     availableRemoteFrame, olderThanSnapshotFrame);
+    NoteRecoveryHeuristicRollbackSuccess(currentFrame, mismatchFrame, snapshot->frame, rollbackTargetFrame);
     SetStatus("rollback catchup...");
     return true;
 }
@@ -810,6 +744,8 @@ bool TryStartQueuedRollback(int currentFrame)
     {
         TraceDiagnostic("rollback-queued-clear-too-old", "current=%d pending=%d oldestSnapshot=%d", currentFrame,
                         g_State.pendingRollbackFrame, oldestSnapshotFrame);
+        NoteRecoveryHeuristicRollbackFailure(currentFrame, g_State.pendingRollbackFrame, oldestSnapshotFrame,
+                                             g_State.pendingRollbackFrame, "queued-too-old");
         g_State.pendingRollbackFrame = -1;
         if (!g_State.rollbackActive)
         {
@@ -858,13 +794,43 @@ bool IsMenuTransitionFrame(int frame)
 
 void HandleDesync(int frame)
 {
-    if (!g_State.isConnected || g_State.isSync)
+    if (!g_State.isConnected || g_State.isSync || g_State.isTryingReconnect || g_State.recovery.active)
     {
+        g_State.desyncStartTick = 0;
         return;
     }
 
     if (g_State.predictionRollbackEnabled)
     {
+        if (g_State.rollbackActive || g_State.pendingRollbackFrame >= 0)
+        {
+            return;
+        }
+
+        const Uint64 now = SDL_GetTicks64();
+        if (g_State.desyncStartTick == 0)
+        {
+            g_State.desyncStartTick = now;
+            TraceDiagnostic("desync-observed", "frame=%d pending=%d rollback=%d", frame, g_State.pendingRollbackFrame,
+                            g_State.rollbackActive ? 1 : 0);
+        }
+
+        bool recoveryStarted = false;
+        if (TryHeuristicRollbackOrRecovery(
+                frame,
+                g_State.recoveryHeuristic.clusterLastMismatchFrame >= 0 ? g_State.recoveryHeuristic.clusterLastMismatchFrame
+                                                                        : frame,
+                -1, AuthoritativeRecoveryReason_UnrollbackableDesync, "desync-observed", nullptr, &recoveryStarted))
+        {
+            return;
+        }
+
+        if (now - g_State.desyncStartTick >= kDesyncRecoveryTimeoutMs)
+        {
+            TraceDiagnostic("desync-escalate-recovery", "frame=%d elapsed=%llu", frame,
+                            (unsigned long long)(now - g_State.desyncStartTick));
+            TryStartAuthoritativeRecovery(frame, AuthoritativeRecoveryReason_UnrollbackableDesync);
+        }
         return;
     }
 
@@ -884,6 +850,7 @@ void HandleDesync(int frame)
         g_State.pendingRollbackFrame = -1;
         g_State.currentCtrl = IGC_NONE;
         g_State.isSync = true;
+        g_State.desyncStartTick = 0;
         return;
     }
 
@@ -996,6 +963,25 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                                 "reason=unrollbackable",
                                 syncFrame, remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
                                 canRollbackNow ? 1 : 0);
+                NoteRecoveryHeuristicMismatch(syncFrame, "unrollbackable-mismatch");
+                bool heuristicRollbackStarted = false;
+                bool heuristicRecoveryStarted = false;
+                if (TryHeuristicRollbackOrRecovery(frame, syncFrame, -1,
+                                                   AuthoritativeRecoveryReason_UnrollbackableDesync,
+                                                   "unrollbackable-mismatch", &heuristicRollbackStarted,
+                                                   &heuristicRecoveryStarted))
+                {
+                    if (heuristicRecoveryStarted)
+                    {
+                        outStallForPeer = true;
+                        return true;
+                    }
+                    if (heuristicRollbackStarted)
+                    {
+                        outRollbackStarted = true;
+                        return true;
+                    }
+                }
                 return false;
             }
 
@@ -1007,14 +993,32 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                                 syncFrame, remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
                                 canRollbackNow ? 1 : 0, g_State.seedValidationIgnoreUntilFrame);
                 g_State.isSync = true;
+                g_State.desyncStartTick = 0;
                 return false;
             }
 
             g_State.isSync = false;
+            NoteRecoveryHeuristicMismatch(syncFrame, "seed-mismatch");
             const auto trySeedMismatchRollbackRetry = [&](int olderThanSnapshotFrame, const char *reason) -> bool {
                 const int rollbackSourceFrame = g_State.lastRollbackSourceFrame;
                 const bool isPostRollbackLatentDrift =
                     reason != nullptr && std::strcmp(reason, "post-rollback-latent-drift") == 0;
+                const auto noteLatentDriftRollbackPairFailure = [&](const char *failureReason) {
+                    if (!isPostRollbackLatentDrift)
+                    {
+                        return;
+                    }
+
+                    const int failedSnapshotFrame = g_State.lastRollbackSnapshotFrame;
+                    const int failedTargetFrame = g_State.lastRollbackTargetFrame;
+                    if (failedSnapshotFrame < 0 || failedTargetFrame < 0)
+                    {
+                        return;
+                    }
+
+                    NoteRecoveryHeuristicRollbackFailure(frame, syncFrame, failedSnapshotFrame, failedTargetFrame,
+                                                         failureReason);
+                };
                 const bool repeatedRetry = g_State.lastSeedRetryMismatchFrame == syncFrame &&
                                            g_State.lastSeedRetryOlderThanSnapshotFrame == olderThanSnapshotFrame &&
                                            g_State.lastSeedRetryLocalSeed == localSeedIt->second &&
@@ -1025,6 +1029,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                                 reason != nullptr ? reason : "-", repeatedRetry ? 1 : 0);
                 if (repeatedRetry)
                 {
+                    noteLatentDriftRollbackPairFailure("latent-drift-repeat");
                     return false;
                 }
 
@@ -1035,6 +1040,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                                     "frame=%d remoteSeed=%u localSeed=%u olderThan=%d reason=%s source=%d skipped=1",
                                     syncFrame, remoteSeedIt->second, localSeedIt->second, olderThanSnapshotFrame,
                                     reason != nullptr ? reason : "-", rollbackSourceFrame);
+                    noteLatentDriftRollbackPairFailure("latent-drift-loop");
                     return false;
                 }
 
@@ -1086,6 +1092,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                                 g_State.lastRollbackMismatchFrame, g_State.lastRollbackSnapshotFrame,
                                 g_State.lastRollbackTargetFrame);
                 g_State.isSync = true;
+                g_State.desyncStartTick = 0;
                 return false;
             }
             if (canRetryPostRollbackDrift &&
@@ -1095,6 +1102,17 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
             }
                 const bool lateAuthoritativeFrame =
                     g_State.remoteFramesPendingRollbackCheck.find(syncFrame) != g_State.remoteFramesPendingRollbackCheck.end();
+                if (lateAuthoritativeFrame && syncFrame <= g_State.seedValidationIgnoreUntilFrame)
+                {
+                    TraceDiagnostic("resolve-frame-sync-seed-mismatch",
+                                    "frame=%d remoteSeed=%u localSeed=%u pending=%d canRollback=%d ignored=1 "
+                                    "reason=rollback-grace graceUntil=%d",
+                                    syncFrame, remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
+                                    canRollbackNow ? 1 : 0, g_State.seedValidationIgnoreUntilFrame);
+                    g_State.isSync = true;
+                    g_State.desyncStartTick = 0;
+                    return false;
+                }
                 if (lateAuthoritativeFrame && TryStartAutomaticRollback(frame, syncFrame))
                 {
                     TraceDiagnostic("resolve-frame-sync-seed-mismatch-retry",
@@ -1107,6 +1125,24 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                                 "frame=%d remoteSeed=%u localSeed=%u pending=%d canRollback=%d ignored=1",
                                 syncFrame, remoteSeedIt->second, localSeedIt->second, g_State.pendingRollbackFrame,
                                 canRollbackNow ? 1 : 0);
+                bool heuristicRollbackStarted = false;
+                bool heuristicRecoveryStarted = false;
+                if (TryHeuristicRollbackOrRecovery(frame, syncFrame, -1,
+                                                   AuthoritativeRecoveryReason_UnrollbackableDesync,
+                                                   "seed-mismatch-desynced", &heuristicRollbackStarted,
+                                                   &heuristicRecoveryStarted))
+                {
+                    if (heuristicRecoveryStarted)
+                    {
+                        outStallForPeer = true;
+                        return true;
+                    }
+                    if (heuristicRollbackStarted)
+                    {
+                        outRollbackStarted = true;
+                        return true;
+                    }
+                }
                 SetStatus(g_State.pendingRollbackFrame >= 0 ? "rollback pending..." : "desynced");
                 return false;
             }
@@ -1114,6 +1150,10 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
         if (!canRollbackNow)
         {
             g_State.isSync = isInUi;
+            if (g_State.isSync)
+            {
+                g_State.desyncStartTick = 0;
+            }
             return false;
         }
 
@@ -1121,6 +1161,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
         if (TryStartAutomaticRollback(frame, syncFrame))
         {
             outRollbackStarted = true;
+            g_State.desyncStartTick = 0;
             return true;
         }
         return false;
@@ -1175,6 +1216,8 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
             g_State.isConnected = false;
             g_State.isTryingReconnect = true;
             g_State.reconnectIssued = false;
+            g_State.reconnectStartTick = SDL_GetTicks64();
+            g_State.reconnectReason = AuthoritativeRecoveryReason_ReconnectTimeout;
             g_State.currentCtrl = IGC_NONE;
             SetStatus("disconnected");
             return 0;
@@ -1195,6 +1238,8 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
             g_State.isConnected = false;
             g_State.isTryingReconnect = true;
             g_State.reconnectIssued = false;
+            g_State.reconnectStartTick = SDL_GetTicks64();
+            g_State.reconnectReason = AuthoritativeRecoveryReason_ReconnectTimeout;
             g_State.currentCtrl = IGC_NONE;
             SetStatus("disconnected");
             return 0;
@@ -1214,6 +1259,8 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                     g_State.isConnected = false;
                     g_State.isTryingReconnect = true;
                     g_State.reconnectIssued = false;
+                    g_State.reconnectStartTick = SDL_GetTicks64();
+                    g_State.reconnectReason = AuthoritativeRecoveryReason_PredictionTimeout;
                     g_State.currentCtrl = IGC_NONE;
                     SetStatus("disconnected");
                     return 0;
@@ -1302,6 +1349,33 @@ void TryReconnect(int frame)
     g_State.currentCtrl = IGC_NONE;
     TraceDiagnostic("reconnect-tick", "frame=%d issued=%d", frame, g_State.reconnectIssued ? 1 : 0);
 
+    const Uint64 now = SDL_GetTicks64();
+    if (g_State.reconnectStartTick == 0)
+    {
+        g_State.reconnectStartTick = now;
+    }
+    if (now - g_State.reconnectStartTick >= kDisconnectTimeoutMs)
+    {
+        const AuthoritativeRecoveryReason reason = g_State.reconnectReason == AuthoritativeRecoveryReason_PredictionTimeout
+                                                       ? AuthoritativeRecoveryReason_PredictionTimeout
+                                                       : AuthoritativeRecoveryReason_ReconnectTimeout;
+        NoteRecoveryHeuristicMismatch(frame, reason == AuthoritativeRecoveryReason_PredictionTimeout
+                                                 ? "prediction-timeout"
+                                                 : "reconnect-timeout");
+        TraceDiagnostic("recovery-search-decision",
+                        "stage=%d frame=%d epoch=%d clusterFirst=%d clusterLast=%d candidateFrame=%d snapshotFrame=%d "
+                        "targetFrame=%d decision=recovery reason=%s",
+                        g_GameManager.currentStage, frame, g_State.rollbackEpochStartFrame,
+                        g_State.recoveryHeuristic.clusterFirstMismatchFrame,
+                        g_State.recoveryHeuristic.clusterLastMismatchFrame, -1, -1, -1,
+                        reason == AuthoritativeRecoveryReason_PredictionTimeout ? "prediction-timeout"
+                                                                                 : "reconnect-timeout");
+        TraceDiagnostic("reconnect-escalate-recovery", "frame=%d reason=%u elapsed=%llu", frame, reason,
+                        (unsigned long long)(now - g_State.reconnectStartTick));
+        TryStartAuthoritativeRecovery(frame, reason);
+        return;
+    }
+
     if (!g_State.reconnectIssued)
     {
         if (g_State.isHost)
@@ -1325,6 +1399,9 @@ void TryReconnect(int frame)
         g_State.isConnected = true;
         g_State.isTryingReconnect = false;
         g_State.reconnectIssued = false;
+        g_State.reconnectStartTick = 0;
+        g_State.desyncStartTick = 0;
+        g_State.reconnectReason = AuthoritativeRecoveryReason_None;
         g_State.remoteInputs.clear();
         g_State.predictedRemoteInputs.clear();
         g_State.remoteSeeds.clear();
@@ -1333,6 +1410,7 @@ void TryReconnect(int frame)
         g_State.pendingRollbackFrame = -1;
         g_State.currentCtrl = IGC_NONE;
         g_State.isSync = true;
+        ResetRecoveryHeuristicState();
         TraceDiagnostic("reconnect-success", "frame=%d", frame);
         SetStatus("connected");
     }

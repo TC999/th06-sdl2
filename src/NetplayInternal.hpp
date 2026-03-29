@@ -12,6 +12,7 @@
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "GamePaths.hpp"
+#include "GameplayState.hpp"
 #include "Gui.hpp"
 #include "ItemManager.hpp"
 #include "Player.hpp"
@@ -33,9 +34,11 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -66,9 +69,25 @@ constexpr Uint64 kReconnectPingMs = 100;
 constexpr Uint64 kUiPhaseBroadcastMs = 2000;
 constexpr Uint64 kDisconnectTimeoutMs = 5000;
 constexpr Uint64 kPeerFreezeDisconnectMs = 30000;
+constexpr Uint64 kDesyncRecoveryTimeoutMs = 1000;
 constexpr Uint64 kRelayProbeIntervalMs = 1000;
 constexpr Uint64 kRelayProbeTimeoutMs = 3000;
 constexpr int kRelayMaxDatagramBytes = 1024;
+constexpr int kAuthoritativeRecoveryChunkPayloadBytes = 900;
+constexpr int kAuthoritativeRecoveryMaxCompressedBytes = 230400;
+constexpr int kAuthoritativeRecoveryMaxChunks = 256;
+constexpr int kAuthoritativeRecoveryBitmapBytes = 32;
+constexpr Uint64 kAuthoritativeRecoveryResendMs = 100;
+constexpr Uint64 kAuthoritativeRecoveryTimeoutMs = 15000;
+
+enum RawDatagramKind
+{
+    RawDatagram_Unknown = 0,
+    RawDatagram_Pack,
+    RawDatagram_RelayText,
+    RawDatagram_SnapshotSideband,
+    RawDatagram_ConsistencySideband
+};
 
 enum Control
 {
@@ -78,7 +97,9 @@ enum Control
     Ctrl_Set_InitSetting,
     Ctrl_Try_Resync,
     Ctrl_Debug_EndingJump,
-    Ctrl_UiPhase
+    Ctrl_UiPhase,
+    Ctrl_ShellIntent,
+    Ctrl_ShellState
 };
 
 enum PackType
@@ -98,6 +119,114 @@ enum InitSettingFlags
 enum UiPhaseFlags
 {
     UiPhaseFlag_InUi = 1 << 0
+};
+
+enum SharedShellAction
+{
+    ShellAction_None = 0,
+    ShellAction_PauseRequest,
+    ShellAction_MoveUp,
+    ShellAction_MoveDown,
+    ShellAction_Confirm,
+    ShellAction_Cancel
+};
+
+enum SharedShellNode
+{
+    SharedShellNode_None = 0,
+    SharedShellNode_PauseOpen,
+    SharedShellNode_PauseFocusUnpause,
+    SharedShellNode_PauseFocusQuit,
+    SharedShellNode_PauseFocusQuitYes,
+    SharedShellNode_PauseFocusQuitNo,
+    SharedShellNode_PauseClosingResume,
+    SharedShellNode_PauseClosingQuit,
+    SharedShellNode_RetryOpen,
+    SharedShellNode_RetryFocusYes,
+    SharedShellNode_RetryFocusNo,
+    SharedShellNode_RetryClosingRetry,
+    SharedShellNode_RetryClosingContinue
+};
+
+enum SharedShellVote
+{
+    SharedShellVote_None = 0,
+    SharedShellVote_Quit = 1,
+    SharedShellVote_Retry = 2,
+    SharedShellVote_Continue = 3
+};
+
+enum SharedShellPhase
+{
+    SharedShellPhase_Inactive = 0,
+    SharedShellPhase_PendingEnter,
+    SharedShellPhase_Active,
+    SharedShellPhase_PendingLeave
+};
+
+enum SharedShellTransitionReason
+{
+    SharedShellTransitionReason_None = 0,
+    SharedShellTransitionReason_Resume,
+    SharedShellTransitionReason_Quit
+};
+
+enum SharedShellFlags
+{
+    SharedShellFlag_Active = 1 << 0,
+    SharedShellFlag_Exiting = 1 << 1,
+    SharedShellFlag_CommitReady = 1 << 2
+};
+
+enum AuthoritativeRecoveryReason
+{
+    AuthoritativeRecoveryReason_None = 0,
+    AuthoritativeRecoveryReason_UnrollbackableDesync,
+    AuthoritativeRecoveryReason_PredictionTimeout,
+    AuthoritativeRecoveryReason_ReconnectTimeout,
+    AuthoritativeRecoveryReason_RemoteRequest,
+    AuthoritativeRecoveryReason_SnapshotCorrupt,
+    AuthoritativeRecoveryReason_RestoreFailed
+};
+
+enum AuthoritativeRecoveryPhase
+{
+    AuthoritativeRecoveryPhase_Inactive = 0,
+    AuthoritativeRecoveryPhase_WaitingAuthority,
+    AuthoritativeRecoveryPhase_PendingFreeze,
+    AuthoritativeRecoveryPhase_SendingSnapshot,
+    AuthoritativeRecoveryPhase_ReceivingSnapshot,
+    AuthoritativeRecoveryPhase_ApplyingSnapshot,
+    AuthoritativeRecoveryPhase_PendingResume,
+    AuthoritativeRecoveryPhase_Failed
+};
+
+enum SnapshotDatagramKind
+{
+    SnapshotDatagram_None = 0,
+    SnapshotDatagram_RecoveryRequest,
+    SnapshotDatagram_RecoveryEnter,
+    SnapshotDatagram_SnapshotMeta,
+    SnapshotDatagram_SnapshotChunk,
+    SnapshotDatagram_SnapshotAck,
+    SnapshotDatagram_RecoveryResume,
+    SnapshotDatagram_RecoveryAbort
+};
+
+enum SnapshotAckFlags
+{
+    SnapshotAckFlag_MetaReceived = 1 << 0,
+    SnapshotAckFlag_AllChunksReceived = 1 << 1,
+    SnapshotAckFlag_RestoreApplied = 1 << 2,
+    SnapshotAckFlag_Failed = 1 << 3
+};
+
+enum ConsistencyDatagramKind
+{
+    ConsistencyDatagram_None = 0,
+    ConsistencyDatagram_LiteHash,
+    ConsistencyDatagram_DetailRequest,
+    ConsistencyDatagram_DetailHash
 };
 
 template <int NBits> struct Bits
@@ -122,6 +251,59 @@ inline u16 WriteToInt(const Bits<16> &bits)
 }
 
 #pragma pack(push, 1)
+struct SnapshotDatagramHeader
+{
+    u8 magic[4];
+    u8 version;
+    u8 kind;
+    u16 recoverySerial;
+    u16 chunkIndex;
+    u16 chunkCount;
+    u16 payloadBytes;
+    u16 flags;
+    u32 frameValue;
+    u32 rawBytes;
+    u32 compressedBytes;
+    u32 reason;
+    u32 digest32;
+};
+
+struct ConsistencyDatagramHeader
+{
+    u8 magic[4];
+    u8 version;
+    u8 kind;
+    u16 reserved;
+    int32_t stage;
+    int32_t frame;
+    int32_t rollbackEpochStartFrame;
+};
+
+struct ConsistencyLiteHashPayload
+{
+    uint64_t allHash;
+    uint64_t rngHash;
+};
+
+struct ConsistencyDetailHashPayload
+{
+    uint64_t allHash;
+    uint64_t gameHash;
+    uint64_t player1Hash;
+    uint64_t player2Hash;
+    uint64_t bulletHash;
+    uint64_t enemyHash;
+    uint64_t itemHash;
+    uint64_t effectHash;
+    uint64_t stageHash;
+    uint64_t eclHash;
+    uint64_t enemyEclHash;
+    uint64_t screenHash;
+    uint64_t inputHash;
+    uint64_t catkHash;
+    uint64_t rngHash;
+};
+
 struct CtrlPack
 {
     int frame = 0;
@@ -145,6 +327,30 @@ struct CtrlPack
             int flags;
             int boundaryFrame;
         } uiPhase;
+        struct
+        {
+            u16 shellSerial;
+            u16 intentSeq;
+            u8 playerSlot;
+            u8 shellKind;
+            u8 action;
+            u8 reserved;
+        } shellIntent;
+        struct
+        {
+            u16 shellSerial;
+            u16 stateRevision;
+            u8 shellKind;
+            u8 shellNode;
+            u8 shellPhase;
+            u8 transitionReason;
+            u16 phaseFrames;
+            u16 handoffFrame;
+            u8 selectionP1;
+            u8 selectionP2;
+            u8 voteMask;
+            u8 flags;
+        } shellState;
     };
     InGameCtrlType inGameCtrl[kKeyPackFrameCount] {};
     u16 rngSeed[kKeyPackFrameCount] {};
@@ -167,44 +373,6 @@ struct Pack
 
 struct GameplaySnapshot
 {
-    struct SupervisorRuntimeState
-    {
-        i32 calcCount = 0;
-        i32 wantedState = 0;
-        i32 curState = 0;
-        i32 wantedState2 = 0;
-        i32 unk194 = 0;
-        i32 unk198 = 0;
-        ZunBool isInEnding = false;
-        i32 vsyncEnabled = 0;
-        i32 lastFrameTime = 0;
-        f32 effectiveFramerateMultiplier = 1.0f;
-        f32 framerateMultiplier = 1.0f;
-        f32 unk1b4 = 0.0f;
-        f32 unk1b8 = 0.0f;
-        u32 startupTimeBeforeMenuMusic = 0;
-    };
-
-    struct GameWindowRuntimeState
-    {
-        i32 tickCountToEffectiveFramerate = 0;
-        double lastFrameTime = 0.0;
-        u8 curFrame = 0;
-    };
-
-    struct StageRuntimeState
-    {
-        std::vector<RawStageObjectInstance> objectInstances;
-        std::vector<AnmVm> quadVms;
-    };
-
-    struct SoundRuntimeState
-    {
-        i32 soundBuffersToPlay[3] {};
-        i32 queuedSfxState[128] {};
-        i32 isLooping = 0;
-    };
-
     int frame = 0;
     int stage = 0;
     int delay = 1;
@@ -227,15 +395,11 @@ struct GameplaySnapshot
     EnemyEclInstr::RuntimeState enemyEclRuntimeState;
     ScreenEffect::RuntimeState screenEffectRuntimeState;
     Controller::RuntimeState controllerRuntimeState;
-    SupervisorRuntimeState supervisorRuntimeState;
-    GameWindowRuntimeState gameWindowRuntimeState;
-    StageRuntimeState stageRuntimeState;
-    SoundRuntimeState soundRuntimeState;
-
-    u16 lastFrameInput = 0;
-    u16 curFrameInput = 0;
-    u16 eighthFrameHeldInput = 0;
-    u16 heldInputFrames = 0;
+    DGS::DgsSupervisorRuntimeState supervisorRuntimeState;
+    DGS::DgsGameWindowRuntimeState gameWindowRuntimeState;
+    DGS::DgsStageRuntimeState stageRuntimeState;
+    DGS::DgsSoundRuntimeState soundRuntimeState;
+    DGS::DgsInputRuntimeState inputRuntimeState;
 };
 
 struct DelayedPack
@@ -245,8 +409,128 @@ struct DelayedPack
 };
 
 static_assert(sizeof(Bits<16>) == 2, "Bits<16> layout mismatch");
+static_assert(sizeof(SnapshotDatagramHeader) == 36, "SnapshotDatagramHeader layout mismatch");
+static_assert(sizeof(ConsistencyDatagramHeader) == 20, "ConsistencyDatagramHeader layout mismatch");
+static_assert(sizeof(ConsistencyLiteHashPayload) == 16, "ConsistencyLiteHashPayload layout mismatch");
+static_assert(sizeof(ConsistencyDetailHashPayload) == 120, "ConsistencyDetailHashPayload layout mismatch");
 static_assert(sizeof(CtrlPack) == 128, "CtrlPack layout mismatch");
 static_assert(sizeof(Pack) == 152, "Pack layout mismatch");
+
+struct DatagramBuffer
+{
+    int size = 0;
+    RawDatagramKind kind = RawDatagram_Unknown;
+    u8 bytes[kRelayMaxDatagramBytes] {};
+    std::string fromIp;
+    int fromPort = 0;
+};
+
+struct ShellRuntimeState
+{
+    bool active = false;
+    bool pendingActivation = false;
+    bool localPausePresentationHold = false;
+    bool suppressUiPhaseBarrier = false;
+    bool suppressUiPhaseBarrierIsInUi = false;
+    int suppressUiPhaseBarrierFrame = -1;
+    u16 shellSerial = 0;
+    u16 nextShellSerial = 1;
+    u16 stateRevision = 0;
+    SharedShellKind shellKind = SharedShell_None;
+    SharedShellPhase authoritativePhase = SharedShellPhase_Inactive;
+    SharedShellPhase predictedPhase = SharedShellPhase_Inactive;
+    SharedShellNode authoritativeNode = SharedShellNode_None;
+    SharedShellNode predictedNode = SharedShellNode_None;
+    SharedShellTransitionReason authoritativeTransitionReason = SharedShellTransitionReason_None;
+    SharedShellTransitionReason predictedTransitionReason = SharedShellTransitionReason_None;
+    u16 authoritativePhaseFrames = 0;
+    u16 predictedPhaseFrames = 0;
+    u16 authoritativeHandoffFrame = 0;
+    u16 predictedHandoffFrame = 0;
+    u8 authoritativeSelection[2] {};
+    u8 authoritativeVotes[2] {};
+    u8 predictedSelection[2] {};
+    u8 predictedVotes[2] {};
+    u16 localIntentSeq = 0;
+    u16 lastProcessedIntentSeq[2] {};
+    Uint64 lastShellStateSendTick = 0;
+    Uint64 lastShellStateRecvTick = 0;
+};
+
+struct AuthoritativeRecoveryState
+{
+    bool active = false;
+    bool isHostAuthority = false;
+    bool restoreQueued = false;
+    bool restoreApplied = false;
+    bool restoreFailed = false;
+    bool metaReceived = false;
+    bool peerMetaAcked = false;
+    bool autoDumpRequested = false;
+    bool requestedByPeer = false;
+    u8 lastPortableRestorePhase = 0xff;
+    u16 recoverySerial = 0;
+    u16 nextRecoverySerial = 1;
+    int freezeFrame = -1;
+    int resumeFrame = -1;
+    AuthoritativeRecoveryReason reason = AuthoritativeRecoveryReason_None;
+    AuthoritativeRecoveryPhase phase = AuthoritativeRecoveryPhase_Inactive;
+    Uint64 startTick = 0;
+    Uint64 lastProgressTick = 0;
+    Uint64 lastSendTick = 0;
+    Uint64 lastRecvTick = 0;
+    std::vector<u8> rawSnapshotBytes;
+    std::vector<u8> compressedSnapshotBytes;
+    std::vector<u8> receivedCompressedBytes;
+    std::vector<u8> receivedRawBytes;
+    u32 rawBytes = 0;
+    u32 compressedBytes = 0;
+    u32 digest32 = 0;
+    u16 chunkCount = 0;
+    u8 receivedBitmap[kAuthoritativeRecoveryBitmapBytes] {};
+    u8 peerAckBitmap[kAuthoritativeRecoveryBitmapBytes] {};
+};
+
+struct FrameSubsystemHashes
+{
+    int stage = -1;
+    int frame = -1;
+    int rollbackEpochStartFrame = 0;
+    uint64_t allHash = 0;
+    uint64_t gameHash = 0;
+    uint64_t player1Hash = 0;
+    uint64_t player2Hash = 0;
+    uint64_t bulletHash = 0;
+    uint64_t enemyHash = 0;
+    uint64_t itemHash = 0;
+    uint64_t effectHash = 0;
+    uint64_t stageHash = 0;
+    uint64_t eclHash = 0;
+    uint64_t enemyEclHash = 0;
+    uint64_t screenHash = 0;
+    uint64_t inputHash = 0;
+    uint64_t catkHash = 0;
+    uint64_t rngHash = 0;
+};
+
+struct DesyncHeuristicFailedRollback
+{
+    int mismatchFrame = -1;
+    int snapshotFrame = -1;
+    int targetFrame = -1;
+};
+
+struct DesyncHeuristicState
+{
+    bool clusterActive = false;
+    int clusterFirstMismatchFrame = -1;
+    int clusterLastMismatchFrame = -1;
+    int consecutiveCleanCommittedFrames = 0;
+    int lastSuccessfulRollbackTargetFrame = -1;
+    int failureCountInCluster = 0;
+    std::deque<int> mismatchFrames;
+    std::deque<DesyncHeuristicFailedRollback> failedRollbacks;
+};
 
 #ifdef _WIN32
 using SocketHandle = SOCKET;
@@ -392,7 +676,9 @@ protected:
 
     bool BindSocket(const std::string &bindIp, int port, int family);
     bool SendPackTo(const Pack &pack, const std::string &ip, int port);
+    bool SendBytesTo(const void *data, size_t size, const std::string &ip, int port);
     bool ReceiveOnePack(Pack &outPack, std::string &fromIp, int &fromPort, bool &hasData);
+    bool ReceiveOneDatagram(DatagramBuffer &outDatagram, bool &hasData);
 
     void CloseSocket()
     {
@@ -419,7 +705,9 @@ class HostConnection final : public ConnectionBase
 public:
     bool Start(const std::string &bindIp, int port, int family = AF_INET6);
     bool PollReceive(Pack &outPack, bool &hasData);
+    bool PollDatagram(DatagramBuffer &outDatagram, bool &hasData);
     bool SendPack(const Pack &pack);
+    bool SendDatagram(const void *data, size_t size);
     void Reconnect();
     bool HasGuest() const;
     const std::string &GetGuestIp() const;
@@ -440,7 +728,9 @@ class GuestConnection final : public ConnectionBase
 public:
     bool Start(const std::string &hostIp, int hostPort, int localPort, int family);
     bool PollReceive(Pack &outPack, bool &hasData);
+    bool PollDatagram(DatagramBuffer &outDatagram, bool &hasData);
     bool SendPack(const Pack &pack);
+    bool SendDatagram(const void *data, size_t size);
     void Reconnect();
     const std::string &GetHostIp() const;
     int GetHostPort() const;
@@ -463,7 +753,9 @@ public:
     void Reset();
     void Tick();
     bool PollReceive(Pack &outPack, bool &hasData);
+    bool PollDatagram(DatagramBuffer &outDatagram, bool &hasData);
     bool SendPack(const Pack &pack);
+    bool SendDatagram(const void *data, size_t size);
     bool IsReady() const;
 
 private:
@@ -486,6 +778,42 @@ private:
     sockaddr_storage m_serverAddr {};
     socklen_t m_serverAddrLen = 0;
     bool m_serverAddrValid = false;
+};
+
+enum AsyncResolveKind
+{
+    AsyncResolve_None,
+    AsyncResolve_RelayProbe,
+    AsyncResolve_RelayHost,
+    AsyncResolve_RelayGuest,
+    AsyncResolve_DirectGuest,
+};
+
+struct AsyncResolveCandidate
+{
+    std::string ip;
+    int family = AF_UNSPEC;
+    sockaddr_storage addr {};
+    socklen_t addrLen = 0;
+};
+
+struct AsyncResolveState
+{
+    std::mutex mutex;
+    AsyncResolveKind kind = AsyncResolve_None;
+    uint32_t token = 0;
+    bool active = false;
+    bool ready = false;
+    bool success = false;
+    Uint64 startTick = 0;
+    std::string originalHost;
+    int port = 0;
+    int preferredFamily = AF_UNSPEC;
+    int localPort = 0;
+    bool relayIsHost = false;
+    std::string roomCode;
+    std::string errorText;
+    std::vector<AsyncResolveCandidate> candidates;
 };
 
 struct RuntimeState
@@ -533,7 +861,11 @@ struct RuntimeState
     u16 lastSeedRetryLocalSeed = 0;
     u16 lastSeedRetryRemoteSeed = 0;
     u16 sessionRngSeed = 0;
+    u16 authoritySharedSeed = 0;
     bool sharedRngSeedCaptured = false;
+    bool authoritySharedSeedKnown = false;
+    bool authoritySharedSeedApplied = false;
+    bool startupActivationComplete = false;
     int sessionBaseCalcCount = 0;
     int currentNetFrame = 0;
     Uint64 lastPeriodicPingTick = 0;
@@ -573,10 +905,19 @@ struct RuntimeState
     bool broadcastUiPhaseIsInUi = false;
     Uint64 broadcastUiPhaseUntilTick = 0;
     Uint64 lastUiPhaseBroadcastTick = 0;
+    ShellRuntimeState shell {};
+    AuthoritativeRecoveryState recovery {};
+    AuthoritativeRecoveryReason reconnectReason = AuthoritativeRecoveryReason_None;
     DebugNetworkConfig debugNetworkConfig {};
     Uint32 debugRandomState = 0x6A09E667u;
     std::vector<DelayedPack> delayedOutgoingPacks;
     std::vector<DelayedPack> delayedIncomingPacks;
+    std::deque<FrameSubsystemHashes> consistencySamples;
+    std::set<uint64_t> consistencyDetailRequestedKeys;
+    DesyncHeuristicState recoveryHeuristic {};
+    AsyncResolveState launcherResolve {};
+    Uint64 reconnectStartTick = 0;
+    Uint64 desyncStartTick = 0;
 };
 
 extern RuntimeState g_State;
@@ -597,6 +938,10 @@ struct RelayState
     std::string host;
     std::string pendingNonce;
     std::string statusText = "not configured";
+    sockaddr_storage resolvedAddr {};
+    socklen_t resolvedAddrLen = 0;
+    bool resolvedAddrValid = false;
+    AsyncResolveState probeResolve {};
 };
 
 extern RelayState g_Relay;
@@ -611,8 +956,9 @@ bool ResolveIpPortToSockAddr(const std::string &ip, int port, int family, sockad
                              socklen_t &outLen);
 bool TrySockAddrToIpPort(const sockaddr *addr, socklen_t addrLen, std::string &outIp, int &outPort);
 bool ParseEndpointText(const std::string &endpoint, std::string &outHost, int &outPort);
-bool OpenRelayProbeSocket();
+bool OpenRelayProbeSocket(int preferredFamily = AF_UNSPEC);
 void CloseRelayProbeSocket();
+void CancelPendingAsyncResolveJobs();
 void SetRelayStatus(const std::string &text);
 std::string GenerateRelaySessionId();
 unsigned long GetDiagnosticProcessId();
@@ -639,6 +985,14 @@ void QueueDebugIncomingPacket(const Pack &pack);
 void ApplyNetplayMenuDefaults();
 void RestoreNetplayMenuDefaults();
 bool UsingHostConnection();
+void ResetSharedShellState();
+void ApplyPendingSharedShellActivation();
+void DriveSharedShellHandoff(int frame);
+void DriveSharedShellStateBroadcast();
+void HandleSharedShellIntentPacket(const CtrlPack &ctrl);
+void HandleSharedShellStatePacket(const CtrlPack &ctrl);
+bool ConsumeSharedShellUiPhaseBarrierBypass(int frame, bool isInUi);
+bool ShouldFreezeSharedShellUiInput(int frame);
 bool SendPacket(const Pack &pack);
 bool PollPacket(Pack &pack, bool &hasData);
 bool IsCurrentUiFrame();
@@ -676,7 +1030,19 @@ void CaptureGameplaySnapshot(int frame);
 bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlType &outCtrl);
 bool RestoreGameplaySnapshot(const GameplaySnapshot &snapshot);
 bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderThanSnapshotFrame = -1);
+bool CaptureFrameSubsystemHashes(int frame, FrameSubsystemHashes &outHashes);
 void TraceFrameSubsystemHashes(int frame, const char *phase);
+void ResetConsistencyDebugState();
+void RecordConsistencyHashSample(const FrameSubsystemHashes &hashes);
+void ResetRecoveryHeuristicState();
+void NoteRecoveryHeuristicMismatch(int frame, const char *reason);
+void NoteRecoveryHeuristicRollbackFailure(int currentFrame, int mismatchFrame, int snapshotFrame, int targetFrame,
+                                          const char *reason);
+void NoteRecoveryHeuristicRollbackSuccess(int currentFrame, int mismatchFrame, int snapshotFrame, int targetFrame);
+void NoteRecoveryHeuristicCommittedFrame(int frame);
+bool TryHeuristicRollbackOrRecovery(int currentFrame, int preferredMismatchFrame, int olderThanSnapshotFrame,
+                                    AuthoritativeRecoveryReason recoveryReason, const char *reason,
+                                    bool *outRollbackStarted = nullptr, bool *outRecoveryStarted = nullptr);
 void SendPeriodicPing();
 void ActivateNetplaySession(u16 sharedRngSeed = 0, bool useSharedSeed = false);
 void BeginSessionStartupWait();
@@ -690,6 +1056,7 @@ bool TryActivateFromStartupPacket(u16 *outPeerSharedSeed = nullptr);
 bool ReceiveRuntimePackets();
 void SendStartupBootstrapPacket();
 void SendKeyPacket(int frame);
+bool SendDatagramImmediate(const void *data, size_t size);
 void SendUiPhasePacket(int serial, bool isInUi, int boundaryFrame);
 void SendResyncPacket();
 void HandleDesync(int frame);
@@ -699,6 +1066,14 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                       bool &outStallForPeer);
 void ApplyDelayControl();
 void TryReconnect(int frame);
+void ResetAuthoritativeRecoveryState();
+bool TryStartAuthoritativeRecovery(int frame, AuthoritativeRecoveryReason reason);
+void DriveAuthoritativeRecovery(int frame);
+bool HandleSnapshotSidebandDatagram(const SnapshotDatagramHeader &header, const u8 *payload, int payloadBytes);
+bool HandleConsistencySidebandDatagram(const u8 *bytes, int size);
+bool IsAuthoritativeRecoveryActive();
+bool IsAuthoritativeRecoveryFreezeActive();
+bool GetAuthoritativeRecoveryOverlay(std::string &line1, std::string &line2, int &receivedChunks, int &totalChunks);
 void BeginUiPhaseBarrier(int serial, bool isInUi);
 bool DriveUiPhaseBarrier(int frame);
 

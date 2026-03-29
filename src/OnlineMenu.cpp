@@ -127,6 +127,10 @@ std::string LocalizeStatusText(const std::string &raw)
     {
         return Tr("已断开", "disconnected", "切断");
     }
+    if (raw == "local game")
+    {
+        return Tr("本地游戏", "local game", "ローカルゲーム");
+    }
     if (raw == "try to reconnect...(sync)")
     {
         return Tr("正在重连...(同步)", "try to reconnect...(sync)", "再接続中...(同期)");
@@ -142,6 +146,10 @@ std::string LocalizeStatusText(const std::string &raw)
     if (raw == "waiting guest...")
     {
         return Tr("等待 guest...", "waiting guest...", "ゲスト待機中...");
+    }
+    if (raw == "rollback waiting...")
+    {
+        return Tr("等待回滚...", "rollback waiting...", "ロールバック待機中...");
     }
     if (raw == "guest listen port conflicts with host")
     {
@@ -184,6 +192,30 @@ std::string LocalizeStatusText(const std::string &raw)
         return Tr("中转地址和房间码必须同时填写", "relay endpoint and room code are both required",
                   "中継アドレスとルームコードは両方必要です");
     }
+    if (raw == "invalid relay endpoint")
+    {
+        return Tr("中转地址格式无效", "invalid relay endpoint", "中継アドレス形式が無効です");
+    }
+    if (raw == "startup seed mismatch")
+    {
+        return Tr("启动种子不一致", "startup seed mismatch", "起動シード不一致");
+    }
+    if (raw == "resolving relay...")
+    {
+        return Tr("正在解析中转地址...", "resolving relay...", "中継アドレスを解決中...");
+    }
+    if (raw == "resolving host...")
+    {
+        return Tr("正在解析主机地址...", "resolving host...", "ホストアドレスを解決中...");
+    }
+    if (raw == "resolve relay failed")
+    {
+        return Tr("中转地址解析失败", "resolve relay failed", "中継アドレスの名前解決失敗");
+    }
+    if (raw == "resolve host failed")
+    {
+        return Tr("主机地址解析失败", "resolve host failed", "ホストアドレスの名前解決失敗");
+    }
     return raw;
 }
 
@@ -201,9 +233,18 @@ std::string LocalizeRelayStatusText(const std::string &raw)
     {
         return Tr("中转探测 socket 初始化失败", "relay socket init failed", "中継ソケット初期化失敗");
     }
+    if (raw == "resolving relay...")
+    {
+        return Tr("正在解析中转地址...", "resolving relay...", "中継アドレスを解決中...");
+    }
     if (raw == "resolve failed")
     {
         return Tr("域名解析失败", "resolve failed", "名前解決失敗");
+    }
+    if (raw.rfind("resolve failed:", 0) == 0)
+    {
+        return std::string(Tr("域名解析失败:", "resolve failed:", "名前解決失敗:")) +
+               raw.substr(std::strlen("resolve failed:"));
     }
     if (raw == "probe send failed")
     {
@@ -425,6 +466,16 @@ const char *GetGuestButtonLabel(const Netplay::Snapshot &snapshot)
     return Tr("作为 guest", "as guest", "guest として");
 }
 } // namespace
+
+std::string LocalizeNetplayStatusText(const std::string &raw)
+{
+    return LocalizeStatusText(raw);
+}
+
+std::string LocalizeRelayProbeStatusText(const std::string &raw)
+{
+    return LocalizeRelayStatusText(raw);
+}
 
 void Open()
 {
