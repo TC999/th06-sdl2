@@ -1,7 +1,31 @@
 #include "NetplayInternal.hpp"
 
+#if defined(_MSC_VER)
+#include <float.h>
+#endif
+
 namespace th06::Netplay
 {
+namespace
+{
+void RebaseAuthoritativeGameplaySeedIfNeeded(const char *source)
+{
+    if (!g_State.authoritativeModeEnabled || !g_State.authoritySharedSeedKnown)
+    {
+        return;
+    }
+
+    const u16 appliedSeed = g_State.authoritySharedSeed != 0 ? g_State.authoritySharedSeed : 1;
+    g_Rng.seed = appliedSeed;
+    g_Rng.generationCount = 0;
+    g_State.sessionRngSeed = appliedSeed;
+    g_State.sharedRngSeedCaptured = true;
+    g_State.authoritySharedSeedApplied = true;
+    TraceDiagnostic("authoritative-gameplay-seed-rebase", "seed=%u source=%s", appliedSeed,
+                    source != nullptr ? source : "-");
+}
+} // namespace
+
 bool IsCurrentUiFrame()
 {
     return g_Supervisor.curState != SUPERVISOR_STATE_GAMEMANAGER || g_GameManager.isInGameMenu ||
@@ -25,14 +49,23 @@ int GetDisplayedRttMs()
 
 bool CanUseRollbackSnapshots()
 {
+#if TH06_ENABLE_PREDICTION_ROLLBACK
     return g_Supervisor.curState == SUPERVISOR_STATE_GAMEMANAGER && !g_GameManager.demoMode && !IsCurrentUiFrame();
+#else
+    return false;
+#endif
 }
 
 bool ShouldCompleteRuntimeSessionForEnding()
 {
-    return Session::GetKind() == SessionKind::Netplay &&
+    return Session::IsRemoteNetplaySession() &&
            !THPrac::TH06::THPracIsDebugEndingJumpActive() &&
            (g_Supervisor.curState == SUPERVISOR_STATE_ENDING || g_Supervisor.isInEnding);
+}
+
+bool IsAuthoritativeNetplayMode()
+{
+    return g_State.authoritativeModeEnabled;
 }
 
 void ForceDeterministicNetplayStep()
@@ -40,6 +73,26 @@ void ForceDeterministicNetplayStep()
     // Remote lockstep must not depend on per-process render pacing.
     g_Supervisor.framerateMultiplier = 1.0f;
     g_Supervisor.effectiveFramerateMultiplier = 1.0f;
+
+    // Force consistent x87 FPU state for cross-machine determinism.
+    // The 32-bit build uses /arch:IA32 (x87 codegen). Different machines may
+    // have different FPU precision/rounding settings due to GPU drivers, SDL2
+    // renderer init, or other DLLs modifying the FPU control word.
+    // Set to single precision (24-bit mantissa) matching original D3D8 behavior
+    // and round-to-nearest to ensure identical floating-point results.
+#if defined(_MSC_VER) && defined(_M_IX86)
+    unsigned int fpOldCW = 0;
+    _controlfp_s(&fpOldCW, _PC_24, _MCW_PC);
+    static bool fpuLogged = false;
+    if (!fpuLogged)
+    {
+        fpuLogged = true;
+        unsigned int fpAfterPC = 0;
+        _controlfp_s(&fpAfterPC, 0, 0); // query current state
+        TraceDiagnostic("fpu-control-word", "before_pc=0x%08x after=0x%08x", fpOldCW, fpAfterPC);
+    }
+    _controlfp_s(&fpOldCW, _RC_NEAR, _MCW_RC);
+#endif
 }
 
 void ResetLauncherState()
@@ -59,6 +112,7 @@ void ResetLauncherState()
     g_State.isTryingReconnect = false;
     g_State.reconnectIssued = false;
     g_State.launcherCloseRequested = false;
+    g_State.authoritativeModeEnabled = false;
     g_State.versionMatched = true;
     g_State.hostIsPlayer1 = true;
     g_State.useRelayTransport = false;
@@ -75,10 +129,14 @@ void ResetLauncherState()
     g_State.guestWaitStartTick = 0;
     g_State.lastRttMs = -1;
     g_State.nextSeq = 1;
-    g_State.predictionRollbackEnabled = true;
+    g_State.predictionRollbackEnabled = TH06_ENABLE_PREDICTION_ROLLBACK != 0;
     g_State.authoritySharedSeed = 0;
     g_State.authoritySharedSeedKnown = false;
+    g_State.startupPeerSeedConfirmed = false;
     g_State.authoritySharedSeedApplied = false;
+    g_State.authoritativeGameplayResetPending = false;
+    g_State.gameplayRuntimeStreamRebasedForStartup = false;
+    g_State.startupInitSettingReceived = false;
     g_State.startupActivationComplete = false;
     SetStatus("no connection");
     ClearRuntimeCaches();
@@ -95,6 +153,10 @@ void CompleteRuntimeSessionForEnding()
 
 void BeginSessionStartupWait()
 {
+    const u16 preservedAuthoritySeed = g_State.authoritySharedSeed;
+    const bool preservedAuthoritySeedKnown = g_State.authoritySharedSeedKnown;
+    const bool preservedStartupInitSettingReceived = g_State.startupInitSettingReceived;
+    const bool preservedHostIsPlayer1 = g_State.hostIsPlayer1;
     ApplyNetplayMenuDefaults();
     g_State.isWaitingForStartup = true;
     g_State.titleColdStartRequested = true;
@@ -104,17 +166,24 @@ void BeginSessionStartupWait()
     g_State.sessionBaseCalcCount = 0;
     g_State.currentNetFrame = 0;
     ClearRuntimeCaches();
-    g_State.authoritySharedSeed = 0;
-    g_State.authoritySharedSeedKnown = false;
+    // Disabled for now. Always stay on the stable rollback netplay path.
+    g_State.authoritativeModeEnabled = false;
+    g_State.authoritySharedSeed = preservedAuthoritySeed;
+    g_State.authoritySharedSeedKnown = preservedAuthoritySeedKnown;
+    g_State.startupPeerSeedConfirmed = false;
     g_State.authoritySharedSeedApplied = false;
+    g_State.authoritativeGameplayResetPending = false;
+    g_State.gameplayRuntimeStreamRebasedForStartup = false;
     g_State.startupActivationComplete = false;
+    g_State.startupInitSettingReceived = preservedStartupInitSettingReceived;
+    g_State.hostIsPlayer1 = preservedHostIsPlayer1;
     if (g_State.isHost)
     {
         g_State.authoritySharedSeed = g_Rng.seed != 0 ? g_Rng.seed : 1;
         g_State.authoritySharedSeedKnown = true;
         TraceDiagnostic("startup-seed-authority", "seed=%u source=host", g_State.authoritySharedSeed);
     }
-    Session::SetActiveSession(g_NetSession);
+    Session::SetActiveSession(static_cast<ISession &>(g_NetSession));
     TraceDiagnostic("begin-startup-wait", "-");
     SetStatus("waiting for peer startup...");
 }
@@ -248,12 +317,31 @@ bool DriveUiPhaseBarrier(int frame)
         g_State.pendingUiPhaseIsInUi = false;
         if (enteringGameplay)
         {
-            ResetGameplayRuntimeStream();
+            if (g_State.authoritativeModeEnabled)
+            {
+                g_State.authoritativeGameplayResetPending = true;
+                RebaseAuthoritativeGameplaySeedIfNeeded("ui-phase");
+            }
+            else
+            {
+                ResetGameplayRuntimeStream();
+                g_State.gameplayRuntimeStreamRebasedForStartup = true;
+            }
             g_State.hasKnownUiState = true;
             g_State.knownUiState = false;
             g_State.localUiPhaseSerial = ackSerial;
             g_State.remoteUiPhaseSerial = ackSerial;
             g_State.remoteUiPhaseIsInUi = false;
+            // Do not continue processing the pre-boundary frame after rebasing the
+            // runtime stream. Let the next frame start clean at frame 0; otherwise
+            // the just-reset stream can still capture/send a stale transition frame
+            // (for example the old frame 337), which arrives late and pollutes the
+            // new gameplay epoch.
+            StartUiPhaseBroadcast(ackSerial, ackIsInUi);
+            Session::ApplyLegacyFrameInput(g_CurFrameInput);
+            g_State.stallFrameRequested = true;
+            TraceDiagnostic("ui-phase-enter-gameplay-stall", "serial=%d frame=%d", ackSerial, frame);
+            return true;
         }
         StartUiPhaseBroadcast(ackSerial, ackIsInUi);
         return false;

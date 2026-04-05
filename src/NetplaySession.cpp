@@ -1,5 +1,7 @@
 #include "NetplayInternal.hpp"
 
+#include "AstroBot.hpp"
+
 namespace th06::Netplay
 {
 RuntimeState g_State;
@@ -412,7 +414,7 @@ void NetSession::AdvanceFrameInput()
 
     if (!g_State.isSessionActive)
     {
-        const u16 localInput = Controller::GetInput();
+        const u16 localInput = AstroBot::ProcessNetplayLocalInput(Controller::GetInput());
         TraceDiagnostic("advance-local-only", "input=%s", FormatInputBits(localInput).c_str());
         Session::ApplyLegacyFrameInput(localInput);
         return;
@@ -421,7 +423,7 @@ void NetSession::AdvanceFrameInput()
     if (ShouldCompleteRuntimeSessionForEnding())
     {
         CompleteRuntimeSessionForEnding();
-        const u16 localInput = Controller::GetInput();
+        const u16 localInput = AstroBot::ProcessNetplayLocalInput(Controller::GetInput());
         TraceDiagnostic("advance-ending-local-only", "input=%s", FormatInputBits(localInput).c_str());
         Session::ApplyLegacyFrameInput(localInput);
         return;
@@ -573,6 +575,7 @@ void NetSession::AdvanceFrameInput()
         {
             g_State.rollbackActive = false;
             g_State.rollbackSendFrame = -1;
+            g_State.rollbackSnapshotCaptureRequested = true;
             SetStatus("connected");
         }
         TraceDiagnostic("rollback-step-finished", "phase=queued processed=%d final=%s ctrl=%s", processedFrame,
@@ -613,6 +616,7 @@ void NetSession::AdvanceFrameInput()
         {
             g_State.rollbackActive = false;
             g_State.rollbackSendFrame = -1;
+            g_State.rollbackSnapshotCaptureRequested = true;
             SetStatus("connected");
         }
         TraceDiagnostic("rollback-step-finished", "phase=active frame=%d final=%s ctrl=%s", frame,
@@ -622,7 +626,7 @@ void NetSession::AdvanceFrameInput()
 
     HandleDesync(frame);
 
-    u16 localInput = Controller::GetInput();
+    u16 localInput = AstroBot::ProcessNetplayLocalInput(Controller::GetInput());
     InGameCtrlType localCtrl = CaptureControlKeys();
     if (IsPausePresentationHoldActive())
     {
@@ -710,6 +714,8 @@ void NetSession::AdvanceFrameInput()
         {
             g_State.rollbackActive = false;
             g_State.rollbackSendFrame = -1;
+            g_State.rollbackSnapshotCaptureRequested = true;
+            CaptureGameplaySnapshot(processedFrame);
             SetStatus("connected");
         }
     }
@@ -736,6 +742,11 @@ void ActivateNetplaySession(u16 sharedRngSeed, bool useSharedSeed)
     g_State.pendingDebugEndingJump = false;
     g_State.reconnectReason = AuthoritativeRecoveryReason_None;
     ClearRuntimeCaches();
+    // Entering a fresh remote gameplay stream must not inherit menu-held inputs or
+    // previous legacy edge state; otherwise frame 0 can already diverge in player
+    // state before RNG or gameplay managers differ.
+    Controller::ResetDeviceInputState();
+    Session::ResetLegacyInputState();
     if (useSharedSeed)
     {
         const u16 appliedSeed = g_State.authoritySharedSeedKnown ? g_State.authoritySharedSeed
@@ -749,6 +760,7 @@ void ActivateNetplaySession(u16 sharedRngSeed, bool useSharedSeed)
         g_Rng.generationCount = 0;
         g_State.sessionRngSeed = appliedSeed;
         g_State.sharedRngSeedCaptured = true;
+        g_State.startupPeerSeedConfirmed = true;
         g_State.authoritySharedSeedApplied = true;
         TraceDiagnostic("startup-seed-rebase", "seed=%u role=%s", appliedSeed, g_State.isHost ? "host" : "guest");
         TraceDiagnostic("activate-session-shared-seed", "seed=%u", appliedSeed);
@@ -757,8 +769,11 @@ void ActivateNetplaySession(u16 sharedRngSeed, bool useSharedSeed)
     {
         g_State.authoritySharedSeedApplied = false;
     }
+    g_State.startupInitSettingReceived = false;
     g_State.startupActivationComplete = true;
-    Session::SetActiveSession(g_NetSession);
+    // Temporarily force the stable rollback session. The experimental authoritative
+    // session remains in the tree for future work, but it is not safe to activate.
+    Session::SetActiveSession(static_cast<ISession &>(g_NetSession));
     TraceDiagnostic("activate-session", "-");
     SetStatus("connected");
 
@@ -766,7 +781,7 @@ void ActivateNetplaySession(u16 sharedRngSeed, bool useSharedSeed)
 
 ISession &GetSession()
 {
-    return g_NetSession;
+    return static_cast<ISession &>(g_NetSession);
 }
 
 void Shutdown()
@@ -787,6 +802,7 @@ Snapshot GetSnapshot()
     snapshot.isVersionMatched = g_State.versionMatched;
     snapshot.canStartGame = g_State.isConnected && (!g_State.useRelayTransport || g_State.relay.IsReady());
     snapshot.hostIsPlayer1 = g_State.hostIsPlayer1;
+    snapshot.authoritativeMode = false;
     snapshot.delayLocked = g_State.isGuest;
     snapshot.predictionRollbackEnabled = g_State.predictionRollbackEnabled;
     snapshot.targetDelay = g_State.delay;
@@ -1085,7 +1101,9 @@ void CancelPendingConnection()
     g_State.versionMatched = true;
     g_State.authoritySharedSeed = 0;
     g_State.authoritySharedSeedKnown = false;
+    g_State.startupPeerSeedConfirmed = false;
     g_State.authoritySharedSeedApplied = false;
+    g_State.gameplayRuntimeStreamRebasedForStartup = false;
     g_State.startupActivationComplete = false;
     Session::UseLocalSession();
     SetStatus("no connection");
@@ -1192,7 +1210,7 @@ bool ConsumeLauncherCloseRequested()
 
 bool AllowsReplay()
 {
-    return Session::GetKind() != SessionKind::Netplay;
+    return !Session::IsRemoteNetplaySession();
 }
 
 bool IsSessionActive()
@@ -1217,7 +1235,15 @@ bool IsHost()
 
 bool IsLocalPlayer1()
 {
-    return !g_State.isGuest;
+    if (g_State.isHost)
+    {
+        return g_State.hostIsPlayer1;
+    }
+    if (g_State.isGuest)
+    {
+        return !g_State.hostIsPlayer1;
+    }
+    return true;
 }
 
 bool IsSync()
@@ -1258,6 +1284,9 @@ void SetDelay(int delay)
 
 void SetPredictionRollbackEnabled(bool enabled)
 {
+#if !TH06_ENABLE_PREDICTION_ROLLBACK
+    enabled = false;
+#endif
     TraceDiagnostic("set-prediction-rollback", "enabled=%d old=%d", enabled ? 1 : 0,
                     g_State.predictionRollbackEnabled ? 1 : 0);
     g_State.predictionRollbackEnabled = enabled;
@@ -1267,6 +1296,17 @@ void SetPredictionRollbackEnabled(bool enabled)
         g_State.predictedRemoteCtrls.clear();
         g_State.pendingRollbackFrame = -1;
     }
+}
+
+void SetAuthoritativeModeEnabled(bool enabled)
+{
+    (void)enabled;
+    TraceDiagnostic("set-authoritative-mode-disabled", "requested=%d old=%d", enabled ? 1 : 0,
+                    g_State.authoritativeModeEnabled ? 1 : 0);
+    // Disabled for now. Force fallback to the stable rollback netplay path.
+    g_State.authoritativeModeEnabled = false;
+    g_State.authoritativeHashCheckEnabled = false;
+    g_State.authoritativeHashMismatchPending = false;
 }
 
 void SetDebugNetworkConfig(const DebugNetworkConfig &config)
@@ -1295,8 +1335,7 @@ void SetDebugNetworkConfig(const DebugNetworkConfig &config)
 
 void SetHostPlayer1(bool hostIsPlayer1)
 {
-    (void)hostIsPlayer1;
-    g_State.hostIsPlayer1 = true;
+    g_State.hostIsPlayer1 = hostIsPlayer1;
 }
 
 bool ConsumeTitleColdStartRequested()
@@ -1308,7 +1347,7 @@ bool ConsumeTitleColdStartRequested()
 
 void PrepareGameplayStart()
 {
-    if (Session::GetKind() != SessionKind::Netplay)
+    if (!Session::IsRemoteNetplaySession())
     {
         return;
     }
@@ -1316,7 +1355,31 @@ void PrepareGameplayStart()
     const bool hadKnownUiState = g_State.hasKnownUiState;
     const bool knownUiState = g_State.knownUiState;
 
-    ResetGameplayRuntimeStream();
+    if (!g_State.authoritativeModeEnabled)
+    {
+        if (!g_State.gameplayRuntimeStreamRebasedForStartup)
+        {
+            ResetGameplayRuntimeStream();
+        }
+    }
+    else if (g_State.authoritativeGameplayResetPending)
+    {
+        ResetGameplayRuntimeStream();
+    }
+
+    g_State.authoritativeGameplayResetPending = false;
+    g_State.gameplayRuntimeStreamRebasedForStartup = false;
+
+    if (g_State.authoritativeModeEnabled && g_State.authoritySharedSeedKnown)
+    {
+        const u16 appliedSeed = g_State.authoritySharedSeed != 0 ? g_State.authoritySharedSeed : 1;
+        g_Rng.seed = appliedSeed;
+        g_Rng.generationCount = 0;
+        g_State.sessionRngSeed = appliedSeed;
+        g_State.sharedRngSeedCaptured = true;
+        g_State.authoritySharedSeedApplied = true;
+        TraceDiagnostic("authoritative-gameplay-seed-rebase", "seed=%u source=prepare-gameplay", appliedSeed);
+    }
 
     if (hadKnownUiState)
     {
@@ -1334,7 +1397,7 @@ InGameCtrlType ConsumeInGameControl()
 
 void DrawOverlay()
 {
-    if (Session::GetKind() != SessionKind::Netplay)
+    if (!Session::IsRemoteNetplaySession())
     {
         return;
     }

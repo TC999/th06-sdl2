@@ -34,6 +34,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ============================================================================
 option(TH06_USE_SDL2 "使用 SDL2 作为平台后端" ON)
 option(TH06_BUILD_ORIGINAL "构建原始 D3D8/Win32 版本 (仅限 Windows)" OFF)
+option(TH06_ENABLE_PREDICTION_ROLLBACK "编译预测回滚联机代码" OFF)
 
 # ============================================================================
 # SDL2 查找
@@ -153,6 +154,8 @@ set(TH06_GAME_SOURCES
     src/main.cpp
     src/AnmManager.cpp
     src/AsciiManager.cpp
+    src/AstroBot.cpp
+    src/AstroBotEclForecast.cpp
     src/BombData.cpp
     src/BulletData.cpp
     src/BulletManager.cpp
@@ -182,6 +185,10 @@ set(TH06_GAME_SOURCES
     src/MidiOutput.cpp
     src/MusicRoom.cpp
     src/NetplaySession.cpp
+    src/NetplayAuthoritativeSession.cpp
+    src/NetplayAuthoritativeTransport.cpp
+    src/NetplayAuthoritativeReplicator.cpp
+    src/NetplayAuthoritativePresentation.cpp
     src/NetplayDiagnostics.cpp
     src/NetplayConsistency.cpp
     src/NetplayShell.cpp
@@ -189,7 +196,6 @@ set(TH06_GAME_SOURCES
     src/NetplayUiSync.cpp
     src/NetplayRollback.cpp
     src/NetplayRecovery.cpp
-    src/NetplayRecoveryHeuristics.cpp
     src/OnlineMenu.cpp
     src/Player.cpp
     src/PortableGameplayRestore.cpp
@@ -237,10 +243,22 @@ set(TH06_GAME_SOURCES
 list(APPEND TH06_GAME_SOURCES src/RendererGLES.cpp)
 list(APPEND TH06_GAME_SOURCES 3rdparty/imgui/imgui_impl_opengl3.cpp)
 
+if(TH06_ENABLE_PREDICTION_ROLLBACK)
+    list(APPEND TH06_GAME_SOURCES src/NetplayRecoveryHeuristics.cpp)
+else()
+    list(APPEND TH06_GAME_SOURCES src/NetplayRecoveryHeuristicsDisabled.cpp)
+endif()
+
 add_executable(th06 ${TH06_GAME_SOURCES})
 
 # Always define TH06_USE_GLES so both backends are available at runtime
 target_compile_definitions(th06 PRIVATE TH06_USE_GLES=1)
+
+if(TH06_ENABLE_PREDICTION_ROLLBACK)
+    target_compile_definitions(th06 PRIVATE TH06_ENABLE_PREDICTION_ROLLBACK=1)
+else()
+    target_compile_definitions(th06 PRIVATE TH06_ENABLE_PREDICTION_ROLLBACK=0)
+endif()
 
 # MSVC: Generate map file for debugging
 if(MSVC)

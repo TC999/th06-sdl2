@@ -2,6 +2,10 @@
 
 #include "Session.hpp"
 
+#ifndef TH06_ENABLE_PREDICTION_ROLLBACK
+#define TH06_ENABLE_PREDICTION_ROLLBACK 0
+#endif
+
 #include <string>
 
 namespace th06
@@ -43,8 +47,9 @@ struct Snapshot
     bool isVersionMatched = true;
     bool canStartGame = false;
     bool hostIsPlayer1 = true;
+    bool authoritativeMode = false;
     bool delayLocked = false;
-    bool predictionRollbackEnabled = true;
+    bool predictionRollbackEnabled = TH06_ENABLE_PREDICTION_ROLLBACK != 0;
     int targetDelay = 2;
     int lastRttMs = -1;
     std::string statusText = "no connection";
@@ -100,6 +105,7 @@ bool ConsumeFrameStallRequested();
 int GetDelay();
 void SetDelay(int delay);
 void SetPredictionRollbackEnabled(bool enabled);
+void SetAuthoritativeModeEnabled(bool enabled);
 void SetDebugNetworkConfig(const DebugNetworkConfig &config);
 void SetHostPlayer1(bool hostIsPlayer1);
 bool ConsumeTitleColdStartRequested();

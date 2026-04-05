@@ -122,6 +122,11 @@ namespace TH06 {
     bool THPracIsRecoveryAutoDumpEnabled();
     bool THPracIsDebugLogEnabled();
     bool THPracIsDeveloperModeEnabled();
+    bool THPracIsAstroBotEnabled();
+    int THPracGetAstroBotTarget();
+    bool THPracIsAstroBotAutoShootEnabled();
+    bool THPracIsAstroBotAutoBombEnabled();
+    bool THPracIsAstroBotBossOnlyEnabled();
     bool THPracConsumeEndingShortcut();
     void THPracResetEndingShortcut();
     void THPracPrepareDebugEndingJump();

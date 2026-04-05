@@ -27,9 +27,11 @@
 #include "Gui.hpp"
 #include "EclManager.hpp"
 #include "AnmManager.hpp"
+#include "AstroBot.hpp"
 #include "MainMenu.hpp"
 #include "NetplaySession.hpp"
 #include "OnlineMenu.hpp"
+#include "Session.hpp"
 #include "BulletManager.hpp"
 #include "Rng.hpp"
 #include "Stage.hpp"
@@ -365,6 +367,133 @@ namespace TH06 {
         return TrLocal("开启后，replay / portable restore / watchdog 等开发诊断日志会额外写入日志文件。关闭时只保留游戏原本的日志，不再输出这些附加调试记录。",
                        "When enabled, developer diagnostics such as replay / portable restore / watchdog tracing are written into the log files. When disabled, only the game's original log output remains and these extra debug records stay silent.",
                        "有効にすると、replay / portable restore / watchdog などの開発診断ログを追加でログファイルへ出力します。無効時はゲーム本来のログだけを残し、追加のデバッグ記録は出力しません。");
+    }
+
+    const char* AstroBotSectionLabel()
+    {
+        return TrLocal("AstroBot", "AstroBot", "AstroBot");
+    }
+
+    const char* AstroBotEnableLabel()
+    {
+        return TrLocal("启用 AstroBot", "Enable AstroBot", "AstroBot を有効化");
+    }
+
+    const char* AstroBotTargetLabel()
+    {
+        return TrLocal("控制对象", "AstroBot Target", "制御対象");
+    }
+
+    const char* AstroBotTargetHint()
+    {
+        if (th06::Session::IsRemoteNetplaySession())
+        {
+            return TrLocal("远程联机中仅允许 AstroBot 接管本机这一侧。", "In remote netplay AstroBot can only control the local side.",
+                           "リモート対戦中は AstroBot はローカル側のみ操作できます。");
+        }
+        return TrLocal("选择 AstroBot 接管的玩家侧。", "Choose which player AstroBot controls.",
+                       "AstroBot が操作するプレイヤー側を選択します。");
+    }
+
+    const char* AstroBotAutoShootLabel()
+    {
+        return TrLocal("自动射击", "Auto Shoot", "自動ショット");
+    }
+
+    const char* AstroBotAutoBombLabel()
+    {
+        return TrLocal("自动 Bomb", "Auto Bomb", "自動ボム");
+    }
+
+    const char* AstroBotBossOnlyLabel()
+    {
+        return TrLocal("仅 Boss 战追踪", "Boss Only", "ボス戦のみ追尾");
+    }
+
+    const char* AstroBotStatusLabel()
+    {
+        return TrLocal("AstroBot 状态", "AstroBot Status", "AstroBot 状態");
+    }
+
+    const char* AstroBotTargetName(int target)
+    {
+        if (th06::Session::IsRemoteNetplaySession())
+        {
+            return target == 0 ? TrLocal("关闭", "Off", "オフ") : TrLocal("本机侧", "LocalSide", "ローカル側");
+        }
+        switch (target)
+        {
+        case 1: return "P1";
+        case 2: return "P2";
+        default: return TrLocal("关闭", "Off", "オフ");
+        }
+    }
+
+    const char* AstroBotOwnershipName(const th06::AstroBot::StatusSnapshot& status)
+    {
+        if (!status.remoteSession)
+        {
+            return AstroBotTargetName(static_cast<int>(status.target));
+        }
+        switch (status.target)
+        {
+        case th06::AstroBot::Target::P1: return "local-p1";
+        case th06::AstroBot::Target::P2: return "local-p2";
+        case th06::AstroBot::Target::Off:
+        default: return TrLocal("本机侧", "local-side", "ローカル側");
+        }
+    }
+
+    const char* AstroBotActionName(th06::AstroBot::Action action)
+    {
+        using Action = th06::AstroBot::Action;
+        switch (action)
+        {
+        case Action::Up: return TrLocal("上", "Up", "上");
+        case Action::Down: return TrLocal("下", "Down", "下");
+        case Action::Left: return TrLocal("左", "Left", "左");
+        case Action::Right: return TrLocal("右", "Right", "右");
+        case Action::UpLeft: return TrLocal("左上", "Up-Left", "左上");
+        case Action::UpRight: return TrLocal("右上", "Up-Right", "右上");
+        case Action::DownLeft: return TrLocal("左下", "Down-Left", "左下");
+        case Action::DownRight: return TrLocal("右下", "Down-Right", "右下");
+        case Action::Idle:
+        default: return TrLocal("停", "Idle", "停止");
+        }
+    }
+
+    const char* AstroBotBypassReasonName(th06::AstroBot::BypassReason reason)
+    {
+        using BypassReason = th06::AstroBot::BypassReason;
+        switch (reason)
+        {
+        case BypassReason::Disabled: return TrLocal("未启用", "disabled", "無効");
+        case BypassReason::NoTarget: return TrLocal("未选择目标", "no target", "対象未選択");
+        case BypassReason::NotGameplay: return TrLocal("不在 gameplay", "not gameplay", "ゲームプレイ外");
+        case BypassReason::NetplayInactive: return TrLocal("联机会话未激活", "netplay inactive", "対戦セッション未開始");
+        case BypassReason::ReplayOrDemo: return TrLocal("Replay/Demo 禁用", "replay/demo", "リプレイ/デモ中");
+        case BypassReason::SharedShell: return TrLocal("菜单/续关中", "menu/retry shell", "メニュー/コンティニュー中");
+        case BypassReason::PortableRestoreBusy: return TrLocal("恢复流程忙", "portable restore busy", "復元処理中");
+        case BypassReason::NoPlayer: return TrLocal("玩家侧不存在", "missing player", "対象プレイヤーなし");
+        case BypassReason::PlayerInactive: return TrLocal("玩家不可操作", "player inactive", "操作不能");
+        case BypassReason::None:
+        default: return TrLocal("旁路", "bypassed", "無効");
+        }
+    }
+
+    const char* AstroBotModeName(th06::AstroBot::ModeHint mode)
+    {
+        using ModeHint = th06::AstroBot::ModeHint;
+        switch (mode)
+        {
+        case ModeHint::Force: return TrLocal("势场", "force", "勢場");
+        case ModeHint::Dest: return TrLocal("安全点", "dest", "安全点");
+        case ModeHint::Escape: return TrLocal("逃生", "escape", "離脱");
+        case ModeHint::Thread: return TrLocal("钻缝", "thread", "隙間");
+        case ModeHint::MoveCheck: return TrLocal("纠错", "movecheck", "補正");
+        case ModeHint::None:
+        default: return TrLocal("无", "none", "なし");
+        }
     }
 
     const char* PausePresentationHoldLabel()
@@ -2144,9 +2273,9 @@ namespace TH06 {
             AboutOpt();
         }
 
-        void RenderDeveloperFeaturesContent()
-        {
-            ImGui::Checkbox(DebugLogOutputLabel(), &g_adv_igi_options.th06_enable_debug_logs);
+    void RenderDeveloperFeaturesContent()
+    {
+        ImGui::Checkbox(DebugLogOutputLabel(), &g_adv_igi_options.th06_enable_debug_logs);
             ImGui::SameLine();
             HelpMarker(DebugLogOutputDesc());
 
@@ -2165,15 +2294,59 @@ namespace TH06 {
 #ifndef _WIN32
             ImGui::BeginDisabled();
 #endif
-            ImGui::Checkbox(RecoveryAutoDumpLabel(), &g_adv_igi_options.th06_enable_recovery_auto_dump);
+        ImGui::Checkbox(RecoveryAutoDumpLabel(), &g_adv_igi_options.th06_enable_recovery_auto_dump);
 #ifndef _WIN32
-            ImGui::EndDisabled();
+        ImGui::EndDisabled();
             ImGui::SameLine();
             ImGui::TextDisabled("%s", ManualDumpHotkeyUnavailableHint());
 #endif
-            ImGui::SameLine();
-            HelpMarker(RecoveryAutoDumpDesc());
+        ImGui::SameLine();
+        HelpMarker(RecoveryAutoDumpDesc());
+
+        ImGui::Separator();
+        ImGui::Text("%s", AstroBotSectionLabel());
+        const bool enabledChanged =
+            ImGui::Checkbox(AstroBotEnableLabel(), &g_adv_igi_options.th06_enable_astrobot);
+        if (enabledChanged && g_adv_igi_options.th06_enable_astrobot && g_adv_igi_options.th06_astrobot_target == 0)
+        {
+            g_adv_igi_options.th06_astrobot_target = 1;
         }
+        ImGui::Text("%s", AstroBotTargetLabel());
+        const bool isRemoteNetplay = th06::Session::IsRemoteNetplaySession();
+        int target = std::clamp<int>(g_adv_igi_options.th06_astrobot_target, 0, 2);
+        if (isRemoteNetplay && target != 0)
+        {
+            target = 1;
+        }
+        ImGui::RadioButton(AstroBotTargetName(0), &target, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton(AstroBotTargetName(1), &target, 1);
+        if (!isRemoteNetplay)
+        {
+            ImGui::SameLine();
+            ImGui::RadioButton(AstroBotTargetName(2), &target, 2);
+        }
+        g_adv_igi_options.th06_astrobot_target = static_cast<uint8_t>(target);
+        ImGui::SameLine();
+        HelpMarker(AstroBotTargetHint());
+        ImGui::Checkbox(AstroBotAutoShootLabel(), &g_adv_igi_options.th06_astrobot_auto_shoot);
+        ImGui::Checkbox(AstroBotAutoBombLabel(), &g_adv_igi_options.th06_astrobot_auto_bomb);
+        ImGui::Checkbox(AstroBotBossOnlyLabel(), &g_adv_igi_options.th06_astrobot_boss_only);
+
+        const th06::AstroBot::StatusSnapshot botStatus = th06::AstroBot::GetStatusSnapshot();
+        const char* stateText = botStatus.eligible
+                                    ? (botStatus.active ? TrLocal("运行中", "running", "稼働中")
+                                                        : TrLocal("待机", "idle", "待機"))
+                                    : AstroBotBypassReasonName(botStatus.bypassReason);
+        ImGui::Text("%s: %s | %s | ownership=%s | danger=%.1f | forecast=%d | mode=%s | focus=%s | bomb=%s | bombCD=%s",
+                    AstroBotStatusLabel(),
+                    stateText,
+                    AstroBotActionName(botStatus.action), AstroBotOwnershipName(botStatus), botStatus.danger, botStatus.forecastThreatCount,
+                    AstroBotModeName(botStatus.modeHint),
+                    botStatus.focus ? TrLocal("是", "yes", "はい") : TrLocal("否", "no", "いいえ"),
+                    botStatus.willBomb ? TrLocal("是", "yes", "はい") : TrLocal("否", "no", "いいえ"),
+                    botStatus.bombCoolingDown ? TrLocal("是", "yes", "はい") : TrLocal("否", "no", "いいえ"));
+    }
 
         void RenderPortableRestoreContent()
         {
@@ -4783,6 +4956,31 @@ namespace TH06 {
     bool THPracIsDeveloperModeEnabled()
     {
         return g_developer_mode_enabled;
+    }
+
+    bool THPracIsAstroBotEnabled()
+    {
+        return g_developer_mode_enabled && g_adv_igi_options.th06_enable_astrobot;
+    }
+
+    int THPracGetAstroBotTarget()
+    {
+        return static_cast<int>(g_adv_igi_options.th06_astrobot_target);
+    }
+
+    bool THPracIsAstroBotAutoShootEnabled()
+    {
+        return g_adv_igi_options.th06_astrobot_auto_shoot;
+    }
+
+    bool THPracIsAstroBotAutoBombEnabled()
+    {
+        return g_adv_igi_options.th06_astrobot_auto_bomb;
+    }
+
+    bool THPracIsAstroBotBossOnlyEnabled()
+    {
+        return g_adv_igi_options.th06_astrobot_boss_only;
     }
 
     bool THPracIsManualDumpHotkeyEnabled()

@@ -1,4 +1,5 @@
 #include "NetplayInternal.hpp"
+#include "NetplayAuthoritativeTransport.hpp"
 
 namespace th06::Netplay
 {
@@ -8,6 +9,8 @@ constexpr u8 kSnapshotDatagramMagic[4] = {'T', 'S', 'N', 'P'};
 constexpr u8 kSnapshotDatagramVersion = 1;
 constexpr u8 kConsistencyDatagramMagic[4] = {'T', 'D', 'H', 'G'};
 constexpr u8 kConsistencyDatagramVersion = 1;
+constexpr u8 kAuthoritativeStateDatagramMagic[4] = {'T', 'A', 'U', 'T'};
+constexpr u8 kAuthoritativeStateDatagramVersion = 1;
 
 u16 NormalizeStartupSharedSeed(u16 seed)
 {
@@ -27,7 +30,9 @@ void AbortStartupSeedMismatch(u16 peerSharedSeed, const char *source)
     g_State.currentNetFrame = 0;
     g_State.authoritySharedSeed = 0;
     g_State.authoritySharedSeedKnown = false;
+    g_State.startupPeerSeedConfirmed = false;
     g_State.authoritySharedSeedApplied = false;
+    g_State.gameplayRuntimeStreamRebasedForStartup = false;
     g_State.startupActivationComplete = false;
     ClearRuntimeCaches();
     Session::UseLocalSession();
@@ -43,7 +48,26 @@ bool TryAdoptStartupAuthoritySeedFromPeer(u16 peerSharedSeed, const char *source
 
     if (g_State.isHost)
     {
-        return g_State.authoritySharedSeedKnown;
+        if (!g_State.authoritySharedSeedKnown || peerSharedSeed == 0)
+        {
+            return false;
+        }
+
+        const u16 normalizedSeed = NormalizeStartupSharedSeed(peerSharedSeed);
+        if (normalizedSeed != g_State.authoritySharedSeed)
+        {
+            TraceDiagnostic("startup-seed-wait-peer-confirm", "source=%s peerSeed=%u authoritySeed=%u role=host",
+                            source != nullptr ? source : "-", normalizedSeed, g_State.authoritySharedSeed);
+            return false;
+        }
+
+        if (!g_State.startupPeerSeedConfirmed)
+        {
+            g_State.startupPeerSeedConfirmed = true;
+            TraceDiagnostic("startup-seed-peer-confirmed", "source=%s seed=%u role=host",
+                            source != nullptr ? source : "-", normalizedSeed);
+        }
+        return true;
     }
 
     if (peerSharedSeed == 0)
@@ -56,6 +80,7 @@ bool TryAdoptStartupAuthoritySeedFromPeer(u16 peerSharedSeed, const char *source
     {
         g_State.authoritySharedSeed = normalizedSeed;
         g_State.authoritySharedSeedKnown = true;
+        g_State.startupPeerSeedConfirmed = true;
         TraceDiagnostic("startup-seed-adopt", "source=%s seed=%u", source != nullptr ? source : "-", normalizedSeed);
         return true;
     }
@@ -66,7 +91,49 @@ bool TryAdoptStartupAuthoritySeedFromPeer(u16 peerSharedSeed, const char *source
         return false;
     }
 
+    if (!g_State.startupPeerSeedConfirmed)
+    {
+        g_State.startupPeerSeedConfirmed = true;
+        TraceDiagnostic("startup-seed-peer-confirmed", "source=%s seed=%u role=guest",
+                        source != nullptr ? source : "-", normalizedSeed);
+    }
     return true;
+}
+
+void ApplyStartupInitSettingsFromPeer(const CtrlPack &ctrl, const char *source)
+{
+    g_State.startupInitSettingReceived = true;
+
+    if (g_State.isGuest)
+    {
+        g_State.delay = std::clamp(ctrl.initSetting.delay, 0, kMaxDelay);
+        SetPredictionRollbackEnabled((ctrl.initSetting.flags & InitSettingFlag_PredictionRollback) != 0);
+        SetAuthoritativeModeEnabled((ctrl.initSetting.flags & InitSettingFlag_AuthoritativeMode) != 0);
+        g_State.hostIsPlayer1 = ctrl.initSetting.hostIsPlayer1 != 0;
+
+        const u16 sharedSeed = NormalizeStartupSharedSeed(ctrl.initSetting.sharedSeed);
+        if (sharedSeed != 0)
+        {
+            g_State.authoritySharedSeed = sharedSeed;
+            g_State.authoritySharedSeedKnown = true;
+        }
+
+        g_GameManager.difficulty = (Difficulty)std::clamp<int>(ctrl.initSetting.difficulty, EASY, EXTRA);
+        g_GameManager.character = ctrl.initSetting.character1;
+        g_GameManager.shotType = ctrl.initSetting.shotType1;
+        g_GameManager.character2 = ctrl.initSetting.character2;
+        g_GameManager.shotType2 = ctrl.initSetting.shotType2;
+        g_GameManager.isInPracticeMode = ctrl.initSetting.practiceMode != 0;
+    }
+
+    TraceDiagnostic("startup-init-setting-recv",
+                    "source=%s role=%s delay=%d prediction=%d authoritative=%d seed=%u hostP1=%d diff=%d "
+                    "c1=%d s1=%d c2=%d s2=%d practice=%d",
+                    source != nullptr ? source : "-", g_State.isHost ? "host" : (g_State.isGuest ? "guest" : "idle"),
+                    g_State.delay, g_State.predictionRollbackEnabled ? 1 : 0, g_State.authoritativeModeEnabled ? 1 : 0,
+                    ctrl.initSetting.sharedSeed, g_State.hostIsPlayer1 ? 1 : 0, (int)g_GameManager.difficulty,
+                    g_GameManager.character, g_GameManager.shotType, g_GameManager.character2, g_GameManager.shotType2,
+                    g_GameManager.isInPracticeMode ? 1 : 0);
 }
 
 RawDatagramKind ClassifyRawDatagram(const u8 *bytes, int size)
@@ -95,6 +162,15 @@ RawDatagramKind ClassifyRawDatagram(const u8 *bytes, int size)
             header->version == kConsistencyDatagramVersion)
         {
             return RawDatagram_ConsistencySideband;
+        }
+    }
+    if (size >= (int)sizeof(AuthoritativeDatagramPrefix))
+    {
+        const AuthoritativeDatagramPrefix *header = (const AuthoritativeDatagramPrefix *)bytes;
+        if (std::memcmp(header->magic, kAuthoritativeStateDatagramMagic, sizeof(kAuthoritativeStateDatagramMagic)) == 0 &&
+            header->version == kAuthoritativeStateDatagramVersion)
+        {
+            return RawDatagram_AuthoritativeState;
         }
     }
     if (size == (int)sizeof(Pack))
@@ -859,6 +935,7 @@ void ClearRuntimeCaches()
     ClearDebugNetworkQueues();
     ResetConsistencyDebugState();
     ResetRecoveryHeuristicState();
+    g_State.authoritativeFrameHashes.clear();
     g_State.localInputs.clear();
     g_State.remoteInputs.clear();
     g_State.predictedRemoteInputs.clear();
@@ -909,6 +986,10 @@ void ClearRuntimeCaches()
     g_State.reconnectStartTick = 0;
     g_State.desyncStartTick = 0;
     g_State.reconnectReason = AuthoritativeRecoveryReason_None;
+    g_State.latestAuthoritativeFrameState = {};
+    g_State.lastAuthoritativeHashComparedFrame = -1;
+    g_State.authoritativeHashMismatchPending = false;
+    g_State.authoritativeHashCheckEnabled = false;
 }
 
 void ClearRemoteRuntimeCaches()
@@ -917,6 +998,7 @@ void ClearRemoteRuntimeCaches()
     ClearDebugNetworkQueues();
     ResetConsistencyDebugState();
     ResetRecoveryHeuristicState();
+    g_State.authoritativeFrameHashes.clear();
     g_State.remoteInputs.clear();
     g_State.predictedRemoteInputs.clear();
     g_State.remoteSeeds.clear();
@@ -937,6 +1019,9 @@ void ClearRemoteRuntimeCaches()
     g_State.lastLatentRetrySourceFrame = -1;
     g_State.seedValidationIgnoreUntilFrame = -1;
     g_State.lastSeedRetryMismatchFrame = -1;
+    g_State.latestAuthoritativeFrameState = {};
+    g_State.lastAuthoritativeHashComparedFrame = -1;
+    g_State.authoritativeHashMismatchPending = false;
     g_State.lastSeedRetryOlderThanSnapshotFrame = -1;
     g_State.lastSeedRetryLocalSeed = 0;
     g_State.lastSeedRetryRemoteSeed = 0;
@@ -972,6 +1057,11 @@ void ResetGameplayRuntimeStream()
                                                               (u16)(g_State.shell.shellSerial + 1)));
 
     ClearRuntimeCaches();
+    // Frame-0 rollback divergence was starting from menu carry-over: legacy input
+    // edge state and held-device state were surviving the UI -> gameplay boundary,
+    // so the very first gameplay frame could already disagree in player/stage hashes.
+    Controller::ResetDeviceInputState();
+    Session::ResetLegacyInputState();
     g_State.localUiPhaseSerial = nextUiSerialBase;
     g_State.remoteUiPhaseSerial = nextUiSerialBase;
     g_State.shell.nextShellSerial = nextShellSerialBase;
@@ -1258,6 +1348,12 @@ bool PollPacketImmediate(Pack &pack, bool &hasData)
             continue;
         }
 
+        if (datagram.kind == RawDatagram_AuthoritativeState)
+        {
+            HandleAuthoritativeStateDatagramBytes(datagram.bytes, datagram.size);
+            continue;
+        }
+
         if (datagram.kind != RawDatagram_Pack || datagram.size != (int)sizeof(Pack))
         {
             continue;
@@ -1499,6 +1595,15 @@ bool TryActivateStartupFromRuntimePacket(const Pack &pack)
         return false;
     }
 
+    if (!g_State.startupInitSettingReceived)
+    {
+        TraceDiagnostic("startup-activate-wait-init-setting",
+                        "frame=%d seq=%u role=%s authoritativeLocal=%d waitingForNegotiation=1", pack.ctrl.frame,
+                        pack.seq, g_State.isHost ? "host" : (g_State.isGuest ? "guest" : "idle"),
+                        g_State.authoritativeModeEnabled ? 1 : 0);
+        return false;
+    }
+
     const u16 peerSharedSeed = pack.ctrl.rngSeed[0];
     if (!TryAdoptStartupAuthoritySeedFromPeer(peerSharedSeed, "runtime-packet"))
     {
@@ -1506,6 +1611,9 @@ bool TryActivateStartupFromRuntimePacket(const Pack &pack)
     }
     if (!g_State.authoritySharedSeedKnown)
     {
+        TraceDiagnostic("startup-activate-wait-seed-confirm",
+                        "frame=%d seq=%u peerSharedSeed=%u authorityKnown=%d", pack.ctrl.frame, pack.seq,
+                        peerSharedSeed, g_State.authoritySharedSeedKnown ? 1 : 0);
         return false;
     }
     TraceDiagnostic("startup-activate-from-runtime-packet",
@@ -1556,8 +1664,18 @@ void HandleLauncherPacket(const Pack &pack)
         {
             reply.ctrl.initSetting.delay = g_State.delay;
             reply.ctrl.initSetting.ver = kProtocolVersion;
-            reply.ctrl.initSetting.flags =
-                g_State.predictionRollbackEnabled ? InitSettingFlag_PredictionRollback : 0;
+            reply.ctrl.initSetting.flags = (g_State.predictionRollbackEnabled ? InitSettingFlag_PredictionRollback : 0) |
+                                           (g_State.authoritativeModeEnabled ? InitSettingFlag_AuthoritativeMode : 0);
+            reply.ctrl.initSetting.sharedSeed =
+                NormalizeStartupSharedSeed(g_State.authoritySharedSeedKnown ? g_State.authoritySharedSeed : g_Rng.seed);
+            reply.ctrl.initSetting.hostIsPlayer1 = g_State.hostIsPlayer1 ? 1 : 0;
+            reply.ctrl.initSetting.difficulty = (u8)g_GameManager.difficulty;
+            reply.ctrl.initSetting.character1 = g_GameManager.character;
+            reply.ctrl.initSetting.shotType1 = g_GameManager.shotType;
+            reply.ctrl.initSetting.character2 = g_GameManager.character2;
+            reply.ctrl.initSetting.shotType2 = g_GameManager.shotType2;
+            reply.ctrl.initSetting.practiceMode = g_GameManager.isInPracticeMode ? 1 : 0;
+            std::memset(reply.ctrl.initSetting.reserved, 0, sizeof(reply.ctrl.initSetting.reserved));
         }
         SendPacket(reply);
         TraceLauncherPacket("launcher-send-pong", reply);
@@ -1574,10 +1692,9 @@ void HandleLauncherPacket(const Pack &pack)
             g_State.pendingDebugEndingJump = true;
             TraceDiagnostic("recv-debug-ending-jump", "source=ping seq=%u", pack.seq);
         }
-        else if (g_State.isGuest && pack.ctrl.ctrlType == Ctrl_Set_InitSetting)
+        else if (pack.ctrl.ctrlType == Ctrl_Set_InitSetting)
         {
-            g_State.delay = std::clamp(pack.ctrl.initSetting.delay, 0, kMaxDelay);
-            SetPredictionRollbackEnabled((pack.ctrl.initSetting.flags & InitSettingFlag_PredictionRollback) != 0);
+            ApplyStartupInitSettingsFromPeer(pack.ctrl, "ping");
         }
         return;
     }
@@ -1598,10 +1715,9 @@ void HandleLauncherPacket(const Pack &pack)
             g_State.pendingDebugEndingJump = true;
             TraceDiagnostic("recv-debug-ending-jump", "source=pong seq=%u", pack.seq);
         }
-        else if (g_State.isGuest && pack.ctrl.ctrlType == Ctrl_Set_InitSetting)
+        else if (pack.ctrl.ctrlType == Ctrl_Set_InitSetting)
         {
-            g_State.delay = std::clamp(pack.ctrl.initSetting.delay, 0, kMaxDelay);
-            SetPredictionRollbackEnabled((pack.ctrl.initSetting.flags & InitSettingFlag_PredictionRollback) != 0);
+            ApplyStartupInitSettingsFromPeer(pack.ctrl, "pong");
         }
     }
 }
@@ -1752,6 +1868,26 @@ void StoreRemoteKeyPacket(const Pack &pack, u16 sharedRngSeed, bool captureShare
             return;
         }
     }
+
+    if (g_State.authoritativeModeEnabled)
+    {
+        for (int i = 0; i < kKeyPackFrameCount; ++i)
+        {
+            const int frame = pack.ctrl.frame - i;
+            const Bits<16> actualBits = pack.ctrl.keys[i];
+            const InGameCtrlType actualCtrl = pack.ctrl.inGameCtrl[i];
+            const u16 actualSeed = pack.ctrl.rngSeed[i];
+            g_State.remoteInputs[frame] = actualBits;
+            g_State.remoteSeeds[frame] = actualSeed;
+            g_State.remoteCtrls[frame] = actualCtrl;
+            TraceDiagnostic("recv-key-frame-commit-authoritative", "frame=%d input=%s seed=%u ctrl=%s", frame,
+                            FormatInputBits(WriteToInt(actualBits)).c_str(), actualSeed,
+                            InGameCtrlToString(actualCtrl));
+        }
+        AdvanceConfirmedSyncFrame();
+        return;
+    }
+
     for (int i = 0; i < kKeyPackFrameCount; ++i)
     {
         const int frame = pack.ctrl.frame - i;
@@ -1897,11 +2033,19 @@ bool TryActivateFromStartupPacket(u16 *outPeerSharedSeed)
         const u16 peerSharedSeed = pack.ctrl.rngSeed[0];
         if (!TryAdoptStartupAuthoritySeedFromPeer(peerSharedSeed, "startup-packet"))
         {
-            return false;
+            if (!g_State.isWaitingForStartup || g_State.isSessionActive)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (!g_State.startupInitSettingReceived)
+        {
+            continue;
         }
         if (!g_State.authoritySharedSeedKnown)
         {
-            return false;
+            continue;
         }
         if (outPeerSharedSeed)
         {
@@ -2005,12 +2149,24 @@ void SendStartupBootstrapPacket()
     const int frame = 0;
     Bits<16> zeroBits;
     zeroBits.Clear();
-    const u16 startupSeed = g_State.authoritySharedSeedKnown ? g_State.authoritySharedSeed : g_Rng.seed;
+    // During rollback startup wait, the host is the only authority allowed to advertise
+    // a real shared seed immediately. Guests must first learn the peer init-setting;
+    // otherwise the host can activate early while the guest is still missing startup
+    // configuration, leaving the two sides in different startup states.
+    const bool canAdvertiseAuthoritySeed =
+        g_State.isHost || (g_State.authoritySharedSeedKnown && g_State.startupInitSettingReceived);
+    const u16 startupSeed = canAdvertiseAuthoritySeed
+                                ? NormalizeStartupSharedSeed(g_State.authoritySharedSeedKnown
+                                                                 ? g_State.authoritySharedSeed
+                                                                 : g_Rng.seed)
+                                : 0;
 
     g_State.localInputs[frame] = zeroBits;
-    g_State.localSeeds[frame] = NormalizeStartupSharedSeed(startupSeed);
+    g_State.localSeeds[frame] = startupSeed;
     g_State.localCtrls[frame] = IGC_NONE;
     PruneOldFrameData(frame);
+    TraceDiagnostic("send-startup-bootstrap", "role=%s seed=%u authorityKnown=%d initSetting=%d", g_State.isHost ? "host" : "guest",
+                    startupSeed, g_State.authoritySharedSeedKnown ? 1 : 0, g_State.startupInitSettingReceived ? 1 : 0);
     SendKeyPacket(frame);
 }
 

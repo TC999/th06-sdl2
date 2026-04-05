@@ -71,6 +71,11 @@ struct AdvancedGameOptions {
     bool th06_enable_manual_dump_hotkey = false;
     bool th06_enable_recovery_auto_dump = false;
     bool th06_enable_debug_logs = false;
+    bool th06_enable_astrobot = false;
+    uint8_t th06_astrobot_target = 0;
+    bool th06_astrobot_auto_shoot = true;
+    bool th06_astrobot_auto_bomb = false;
+    bool th06_astrobot_boss_only = true;
     bool th06_showRank = false;
     bool th06_show_hitbox = false;
     bool th06_showRepMarker = false;

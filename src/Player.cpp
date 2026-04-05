@@ -12,6 +12,7 @@
 #include "GameManager.hpp"
 #include "Gui.hpp"
 #include "ItemManager.hpp"
+#include "NetplayAuthoritativePresentation.hpp"
 #include "NetplaySession.hpp"
 #include "Rng.hpp"
 #include "Session.hpp"
@@ -316,6 +317,18 @@ ChainCallbackResult Player::OnUpdate(Player *p)
     {
         return CHAIN_CALLBACK_RESULT_CONTINUE;
     }
+
+    // In netplay, isolate g_Rng consumption from player processing.
+    // Player death spawns power items via SpawnItem(state=2) which calls
+    // g_Rng, and BombData also calls g_Rng during bombs — both can differ
+    // between peers because each player dies/bombs independently.
+    const bool isolateRng = Netplay::IsSessionActive();
+    Rng savedRng;
+    if (isolateRng)
+    {
+        savedRng = g_Rng;
+    }
+
     if (hasSecondPlayer)
     {
         playersDistance = sqrtf(g_Player.RangeToPlayer(&g_Player2.positionCenter));
@@ -570,36 +583,6 @@ ChainCallbackResult Player::OnUpdate(Player *p)
             }
         }
 
-        if (Session::IsRemoteNetplaySession())
-        {
-            Player *remotePlayer = Netplay::IsLocalPlayer1() ? (&g_Player2) : (&g_Player);
-            if (p == remotePlayer)
-            {
-                f32 alphaDistance = playersDistance;
-                if (alphaDistance < 50.0f)
-                {
-                    alphaDistance = 50.0f;
-                }
-                if (alphaDistance < 100.0f)
-                {
-                    int alpha = (int)(((alphaDistance - 50.0f) / 50.0f) * 200.0f + 55.0f);
-                    if (alpha > 255)
-                    {
-                        alpha = 255;
-                    }
-                    if (alpha < 0)
-                    {
-                        alpha = 0;
-                    }
-                    p->playerSprite.color = COLOR_SET_ALPHA(p->playerSprite.color, alpha);
-                }
-                else
-                {
-                    p->playerSprite.color = COLOR_SET_ALPHA(p->playerSprite.color, 255);
-                }
-            }
-        }
-
         p->hitboxTime = p->isFocus ? p->hitboxTime + 1 : 0;
     }
     else
@@ -607,6 +590,12 @@ ChainCallbackResult Player::OnUpdate(Player *p)
         p->lifegiveTime = 0;
         p->hitboxTime = 0;
     }
+
+    if (isolateRng)
+    {
+        g_Rng = savedRng;
+    }
+
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -861,17 +850,48 @@ void Player::UpdatePlayerBullets(Player *player)
 
 ChainCallbackResult Player::OnDrawHighPrio(Player *p)
 {
+    D3DXVECTOR3 drawPosition = p->positionCenter;
+    D3DXVECTOR3 drawOrbs[2] = {p->orbsPosition[0], p->orbsPosition[1]};
+    Netplay::AuthoritativePresentation::TryGetRenderOverride(p, drawPosition, drawOrbs);
+
     Player::DrawBullets(p);
     if (p->bombInfo.isInUse != 0 && p->bombInfo.draw != NULL)
     {
         p->bombInfo.draw(p);
     }
-    p->playerSprite.pos.x = g_GameManager.arcadeRegionTopLeftPos.x + p->positionCenter.x;
-    p->playerSprite.pos.y = g_GameManager.arcadeRegionTopLeftPos.y + p->positionCenter.y;
+    p->playerSprite.pos.x = g_GameManager.arcadeRegionTopLeftPos.x + drawPosition.x;
+    p->playerSprite.pos.y = g_GameManager.arcadeRegionTopLeftPos.y + drawPosition.y;
     p->playerSprite.pos.z = 0.49;
     if (!g_GameManager.isInRetryMenu)
     {
+        u32 savedColor = p->playerSprite.color;
+        if (HasSecondPlayer() && Session::IsRemoteNetplaySession())
+        {
+            Player *remotePlayer = Netplay::IsLocalPlayer1() ? (&g_Player2) : (&g_Player);
+            if (p == remotePlayer)
+            {
+                f32 alphaDistance = sqrtf(g_Player.RangeToPlayer(&g_Player2.positionCenter));
+                if (alphaDistance < 50.0f)
+                {
+                    alphaDistance = 50.0f;
+                }
+                if (alphaDistance < 100.0f)
+                {
+                    int alpha = (int)(((alphaDistance - 50.0f) / 50.0f) * 200.0f + 55.0f);
+                    if (alpha > 255)
+                    {
+                        alpha = 255;
+                    }
+                    if (alpha < 0)
+                    {
+                        alpha = 0;
+                    }
+                    p->playerSprite.color = COLOR_SET_ALPHA(p->playerSprite.color, alpha);
+                }
+            }
+        }
         g_AnmManager->DrawNoRotation(&p->playerSprite);
+        p->playerSprite.color = savedColor;
         if (HasSecondPlayer() && p->hitboxTime != 0)
         {
             float hitboxScale1 = MInterpolation(p->hitboxTime / 18.0f, 1.5f, 1.0f);
@@ -895,8 +915,8 @@ ChainCallbackResult Player::OnDrawHighPrio(Player *p)
                 hitboxAngle2 = 3.14159f - p->hitboxTime * 0.05235988f;
             }
 
-            p->hitboxSprite.pos.x = g_GameManager.arcadeRegionTopLeftPos.x + p->positionCenter.x;
-            p->hitboxSprite.pos.y = g_GameManager.arcadeRegionTopLeftPos.y + p->positionCenter.y;
+            p->hitboxSprite.pos.x = g_GameManager.arcadeRegionTopLeftPos.x + drawPosition.x;
+            p->hitboxSprite.pos.y = g_GameManager.arcadeRegionTopLeftPos.y + drawPosition.y;
             p->hitboxSprite.pos.z = 0.49f;
             p->hitboxSprite.color = COLOR_SET_ALPHA(p->hitboxSprite.color, hitboxAlpha);
 
@@ -924,7 +944,7 @@ ChainCallbackResult Player::OnDrawHighPrio(Player *p)
                         }
                         if (alpha < (int)(p->hitboxSprite.color >> 24))
                         {
-                            p->playerSprite.color = COLOR_SET_ALPHA(p->hitboxSprite.color, alpha);
+                            p->hitboxSprite.color = COLOR_SET_ALPHA(p->hitboxSprite.color, alpha);
                         }
                     }
                 }
@@ -942,8 +962,8 @@ ChainCallbackResult Player::OnDrawHighPrio(Player *p)
         if (p->orbState != ORB_HIDDEN &&
             (p->playerState == PLAYER_STATE_ALIVE || p->playerState == PLAYER_STATE_INVULNERABLE))
         {
-            p->orbsSprite[0].pos = p->orbsPosition[0];
-            p->orbsSprite[1].pos = p->orbsPosition[1];
+            p->orbsSprite[0].pos = drawOrbs[0];
+            p->orbsSprite[1].pos = drawOrbs[1];
             p->orbsSprite[0].pos[0] += g_GameManager.arcadeRegionTopLeftPos.x;
             p->orbsSprite[0].pos[1] += g_GameManager.arcadeRegionTopLeftPos.y;
             p->orbsSprite[1].pos[0] += g_GameManager.arcadeRegionTopLeftPos.x;
@@ -1657,6 +1677,40 @@ i32 Player::CalcKillBoxCollision(D3DXVECTOR3 *bulletCenter, D3DXVECTOR3 *bulletS
     }
 }
 
+i32 Player::ProbeKillBoxCollision(const D3DXVECTOR3 *bulletCenter, const D3DXVECTOR3 *bulletSize) const
+{
+    const f32 bulletLeft = bulletCenter->x - bulletSize->x / 2.0f;
+    const f32 bulletTop = bulletCenter->y - bulletSize->y / 2.0f;
+    const f32 bulletRight = bulletCenter->x + bulletSize->x / 2.0f;
+    const f32 bulletBottom = bulletCenter->y + bulletSize->y / 2.0f;
+
+    for (int curBombIdx = 0; curBombIdx < ARRAY_SIZE_SIGNED(this->bombProjectiles); ++curBombIdx)
+    {
+        const PlayerRect &projectile = this->bombProjectiles[curBombIdx];
+        if (projectile.sizeX == 0.0f)
+        {
+            continue;
+        }
+        const f32 bombProjectileLeft = projectile.posX - projectile.sizeX / 2.0f;
+        const f32 bombProjectileTop = projectile.posY - projectile.sizeY / 2.0f;
+        const f32 bombProjectileRight = projectile.posX + projectile.sizeX / 2.0f;
+        const f32 bombProjectileBottom = projectile.posY + projectile.sizeY / 2.0f;
+        if (!(bombProjectileLeft > bulletRight || bombProjectileRight < bulletLeft ||
+              bombProjectileTop > bulletBottom || bombProjectileBottom < bulletTop))
+        {
+            return PROBE_COLLISION_GRAZE_OR_BOMB;
+        }
+    }
+
+    if (this->hitboxTopLeft.x > bulletRight || this->hitboxTopLeft.y > bulletBottom ||
+        this->hitboxBottomRight.x < bulletLeft || this->hitboxBottomRight.y < bulletTop)
+    {
+        return PROBE_COLLISION_NONE;
+    }
+
+    return PROBE_COLLISION_HIT;
+}
+
 #pragma var_order(playerRelativeTopLeft, laserBottomRight, laserTopLeft, playerRelativeBottomRight)
 i32 Player::CalcLaserHitbox(D3DXVECTOR3 *laserCenter, D3DXVECTOR3 *laserSize, D3DXVECTOR3 *rotation, f32 angle,
                             i32 canGraze)
@@ -1712,6 +1766,52 @@ LASER_COLLISION:
 
     this->Die();
     return 1;
+}
+
+i32 Player::ProbeLaserHitbox(const D3DXVECTOR3 *laserCenter, const D3DXVECTOR3 *laserSize, const D3DXVECTOR3 *rotation,
+                             f32 angle, i32 canGraze) const
+{
+    D3DXVECTOR3 laserTopLeft;
+    D3DXVECTOR3 laserBottomRight;
+    D3DXVECTOR3 playerRelativeTopLeft;
+    D3DXVECTOR3 playerRelativeBottomRight;
+
+    laserTopLeft = this->positionCenter - *rotation;
+    utils::Rotate(&laserBottomRight, &laserTopLeft, angle);
+    laserBottomRight.z = 0;
+    laserTopLeft = laserBottomRight + *rotation;
+    playerRelativeTopLeft = laserTopLeft - this->hitboxSize;
+    playerRelativeBottomRight = laserTopLeft + this->hitboxSize;
+
+    laserTopLeft = *laserCenter - *laserSize / 2.0f;
+    laserBottomRight = *laserCenter + *laserSize / 2.0f;
+
+    if (!(playerRelativeTopLeft.x > laserBottomRight.x || playerRelativeBottomRight.x < laserTopLeft.x ||
+          playerRelativeTopLeft.y > laserBottomRight.y || playerRelativeBottomRight.y < laserTopLeft.y))
+    {
+        return PROBE_COLLISION_HIT;
+    }
+    if (canGraze == 0)
+    {
+        return PROBE_COLLISION_NONE;
+    }
+
+    laserTopLeft.x -= 48.0f;
+    laserTopLeft.y -= 48.0f;
+    laserBottomRight.x += 48.0f;
+    laserBottomRight.y += 48.0f;
+
+    if (playerRelativeTopLeft.x > laserBottomRight.x || playerRelativeBottomRight.x < laserTopLeft.x ||
+        playerRelativeTopLeft.y > laserBottomRight.y || playerRelativeBottomRight.y < laserTopLeft.y)
+    {
+        return PROBE_COLLISION_NONE;
+    }
+    if (this->playerState == PLAYER_STATE_DEAD || this->playerState == PLAYER_STATE_SPAWNING)
+    {
+        return PROBE_COLLISION_NONE;
+    }
+
+    return PROBE_COLLISION_GRAZE_OR_BOMB;
 }
 
 #pragma var_order(itemBottomRight, itemTopLeft)

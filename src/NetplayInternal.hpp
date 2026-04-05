@@ -57,6 +57,11 @@
 
 namespace th06::Netplay
 {
+namespace AuthoritativeReplicator
+{
+struct ReplicatedWorldState;
+}
+
 constexpr int kDefaultDelay = 2;
 constexpr int kMaxDelay = 10;
 constexpr int kKeyPackFrameCount = 15;
@@ -79,6 +84,15 @@ constexpr int kAuthoritativeRecoveryMaxChunks = 256;
 constexpr int kAuthoritativeRecoveryBitmapBytes = 32;
 constexpr Uint64 kAuthoritativeRecoveryResendMs = 100;
 constexpr Uint64 kAuthoritativeRecoveryTimeoutMs = 15000;
+constexpr int kAuthoritativeInputBufferFrames = 2;
+constexpr int kAuthoritativeMaxReplicatedBullets = 256;
+constexpr int kAuthoritativeMaxReplicatedLasers = 32;
+constexpr int kAuthoritativeMaxReplicatedEnemies = 64;
+constexpr int kAuthoritativeMaxReplicatedItems = 64;
+constexpr int kAuthoritativeBulletChunkCapacity = 24;
+constexpr int kAuthoritativeLaserChunkCapacity = 8;
+constexpr int kAuthoritativeEnemyChunkCapacity = 12;
+constexpr int kAuthoritativeItemChunkCapacity = 16;
 
 enum RawDatagramKind
 {
@@ -86,7 +100,8 @@ enum RawDatagramKind
     RawDatagram_Pack,
     RawDatagram_RelayText,
     RawDatagram_SnapshotSideband,
-    RawDatagram_ConsistencySideband
+    RawDatagram_ConsistencySideband,
+    RawDatagram_AuthoritativeState
 };
 
 enum Control
@@ -113,7 +128,8 @@ enum PackType
 
 enum InitSettingFlags
 {
-    InitSettingFlag_PredictionRollback = 1 << 0
+    InitSettingFlag_PredictionRollback = 1 << 0,
+    InitSettingFlag_AuthoritativeMode = 1 << 1
 };
 
 enum UiPhaseFlags
@@ -213,6 +229,25 @@ enum SnapshotDatagramKind
     SnapshotDatagram_RecoveryAbort
 };
 
+enum AuthoritativeStateDatagramKind : u8
+{
+    AuthoritativeStateDatagram_Frame = 1,
+    AuthoritativeStateDatagram_BulletChunk = 2,
+    AuthoritativeStateDatagram_LaserChunk = 3,
+    AuthoritativeStateDatagram_EnemyChunk = 4,
+    AuthoritativeStateDatagram_ItemChunk = 5
+};
+
+enum AuthoritativeFrameFlags : u32
+{
+    AuthoritativeFrameFlag_InGameMenu = 1 << 0,
+    AuthoritativeFrameFlag_InRetryMenu = 1 << 1,
+    AuthoritativeFrameFlag_GameCompleted = 1 << 2,
+    AuthoritativeFrameFlag_BossPresent = 1 << 3,
+    AuthoritativeFrameFlag_InPractice = 1 << 4,
+    AuthoritativeFrameFlag_DualSession = 1 << 5
+};
+
 enum SnapshotAckFlags
 {
     SnapshotAckFlag_MetaReceived = 1 << 0,
@@ -304,6 +339,184 @@ struct ConsistencyDetailHashPayload
     uint64_t rngHash;
 };
 
+struct ReplicatedPlayerState
+{
+    D3DXVECTOR3 positionCenter {};
+    D3DXVECTOR3 orbsPosition[2] {};
+    i32 respawnTimer = 0;
+    i16 playerState = PLAYER_STATE_ALIVE;
+    i16 orbState = ORB_HIDDEN;
+    u8 isFocus = 0;
+    u8 isShooting = 0;
+    u8 bombActive = 0;
+    u8 reserved = 0;
+};
+
+struct ReplicatedHudState
+{
+    u32 guiScore = 0;
+    u32 score = 0;
+    u32 highScore = 0;
+    i32 currentStage = 0;
+    i32 grazeInStage = 0;
+    u16 pointItemsCollectedInStage = 0;
+    u16 currentPower = 0;
+    u16 currentPower2 = 0;
+    i8 livesRemaining = 0;
+    i8 bombsRemaining = 0;
+    i8 livesRemaining2 = 0;
+    i8 bombsRemaining2 = 0;
+    u32 bossUIOpacity = 0;
+    i32 spellcardSecondsRemaining = 0;
+    i32 lastSpellcardSecondsRemaining = 0;
+    f32 bossHealthBar1 = 0.0f;
+    f32 bossHealthBar2 = 0.0f;
+};
+
+struct ReplicatedUiState
+{
+    i32 supervisorCurState = SUPERVISOR_STATE_MAINMENU;
+    i32 supervisorWantedState = SUPERVISOR_STATE_MAINMENU;
+    i32 mainMenuGameState = 0;
+    i32 mainMenuCursor = 0;
+    i32 mainMenuStateTimer = 0;
+    i32 gameDifficulty = NORMAL;
+    u8 gameCharacter = 0;
+    u8 gameCharacter2 = 0;
+    u8 gameShotType = 0;
+    u8 gameShotType2 = 0;
+    u8 isInPracticeMode = 0;
+    u8 reserved[3] {};
+    u32 menuCursorBackup = 0;
+};
+
+struct ReplicatedBulletState
+{
+    u16 index = 0;
+    i16 spriteOffset = 0;
+    D3DXVECTOR3 pos {};
+    D3DXVECTOR3 velocity {};
+    f32 angle = 0.0f;
+    f32 radius = 0.0f;
+    u16 state = 0;
+    u8 isGrazed = 0;
+    u8 provokedPlayer = 0;
+};
+
+struct ReplicatedLaserState
+{
+    u16 index = 0;
+    i16 color = 0;
+    D3DXVECTOR3 pos {};
+    f32 angle = 0.0f;
+    f32 startOffset = 0.0f;
+    f32 endOffset = 0.0f;
+    f32 startLength = 0.0f;
+    f32 width = 0.0f;
+    f32 speed = 0.0f;
+    i32 startTime = 0;
+    i32 hitboxStartTime = 0;
+    i32 duration = 0;
+    i32 despawnDuration = 0;
+    i32 hitboxEndDelay = 0;
+    i32 inUse = 0;
+    u16 flags = 0;
+    u8 state = 0;
+    u8 provokedPlayer = 0;
+};
+
+struct ReplicatedEnemyState
+{
+    u16 index = 0;
+    u8 active = 0;
+    u8 isBoss = 0;
+    i8 itemDrop = 0;
+    u8 bossId = 0;
+    D3DXVECTOR3 position {};
+    D3DXVECTOR3 hitboxDimensions {};
+    f32 angle = 0.0f;
+    i32 life = 0;
+    i32 maxLife = 0;
+    i32 score = 0;
+    i16 currentSubId = 0;
+    u16 flags = 0;
+};
+
+struct ReplicatedItemState
+{
+    u16 index = 0;
+    i16 itemType = 0;
+    D3DXVECTOR3 currentPosition {};
+    D3DXVECTOR3 targetPosition {};
+    i8 state = 0;
+    u8 isInUse = 0;
+    u16 reserved = 0;
+};
+
+struct AuthoritativeDatagramPrefix
+{
+    u8 magic[4];
+    u8 version;
+    u8 kind;
+    u16 reserved;
+};
+
+struct AuthoritativeStateDatagramHeader
+{
+    AuthoritativeDatagramPrefix prefix;
+    int32_t serverFrame;
+    int32_t ackedInputFrameP1;
+    int32_t ackedInputFrameP2;
+    uint64_t worldHash;
+    uint32_t flags;
+    uint32_t bgmCue;
+    ReplicatedPlayerState player1;
+    ReplicatedPlayerState player2;
+    ReplicatedHudState hud;
+    ReplicatedUiState ui;
+    u16 bulletCount;
+    u16 laserCount;
+    u16 enemyCount;
+    u16 itemCount;
+    char bgmPath[260];
+    char posPath[260];
+    i32 bgmIsLooping;
+};
+
+struct AuthoritativeActorChunkHeader
+{
+    AuthoritativeDatagramPrefix prefix;
+    int32_t serverFrame;
+    u16 chunkIndex;
+    u16 chunkCount;
+    u16 entryCount;
+    u16 reserved2;
+};
+
+struct AuthoritativeBulletChunkDatagram
+{
+    AuthoritativeActorChunkHeader header;
+    ReplicatedBulletState entries[kAuthoritativeBulletChunkCapacity];
+};
+
+struct AuthoritativeLaserChunkDatagram
+{
+    AuthoritativeActorChunkHeader header;
+    ReplicatedLaserState entries[kAuthoritativeLaserChunkCapacity];
+};
+
+struct AuthoritativeEnemyChunkDatagram
+{
+    AuthoritativeActorChunkHeader header;
+    ReplicatedEnemyState entries[kAuthoritativeEnemyChunkCapacity];
+};
+
+struct AuthoritativeItemChunkDatagram
+{
+    AuthoritativeActorChunkHeader header;
+    ReplicatedItemState entries[kAuthoritativeItemChunkCapacity];
+};
+
 struct CtrlPack
 {
     int frame = 0;
@@ -316,6 +529,15 @@ struct CtrlPack
             int delay;
             int ver;
             int flags;
+            u16 sharedSeed;
+            u8 hostIsPlayer1;
+            u8 difficulty;
+            u8 character1;
+            u8 shotType1;
+            u8 character2;
+            u8 shotType2;
+            u8 practiceMode;
+            u8 reserved[3];
         } initSetting;
         struct
         {
@@ -413,6 +635,16 @@ static_assert(sizeof(SnapshotDatagramHeader) == 36, "SnapshotDatagramHeader layo
 static_assert(sizeof(ConsistencyDatagramHeader) == 20, "ConsistencyDatagramHeader layout mismatch");
 static_assert(sizeof(ConsistencyLiteHashPayload) == 16, "ConsistencyLiteHashPayload layout mismatch");
 static_assert(sizeof(ConsistencyDetailHashPayload) == 120, "ConsistencyDetailHashPayload layout mismatch");
+static_assert(sizeof(AuthoritativeStateDatagramHeader) <= kRelayMaxDatagramBytes,
+              "AuthoritativeStateDatagramHeader layout mismatch");
+static_assert(sizeof(AuthoritativeBulletChunkDatagram) <= kRelayMaxDatagramBytes,
+              "AuthoritativeBulletChunkDatagram layout mismatch");
+static_assert(sizeof(AuthoritativeLaserChunkDatagram) <= kRelayMaxDatagramBytes,
+              "AuthoritativeLaserChunkDatagram layout mismatch");
+static_assert(sizeof(AuthoritativeEnemyChunkDatagram) <= kRelayMaxDatagramBytes,
+              "AuthoritativeEnemyChunkDatagram layout mismatch");
+static_assert(sizeof(AuthoritativeItemChunkDatagram) <= kRelayMaxDatagramBytes,
+              "AuthoritativeItemChunkDatagram layout mismatch");
 static_assert(sizeof(CtrlPack) == 128, "CtrlPack layout mismatch");
 static_assert(sizeof(Pack) == 152, "Pack layout mismatch");
 
@@ -530,6 +762,35 @@ struct DesyncHeuristicState
     int failureCountInCluster = 0;
     std::deque<int> mismatchFrames;
     std::deque<DesyncHeuristicFailedRollback> failedRollbacks;
+};
+
+struct AuthoritativeFrameState
+{
+    bool valid = false;
+    int serverFrame = -1;
+    int ackedInputFrameP1 = -1;
+    int ackedInputFrameP2 = -1;
+    uint64_t worldHash = 0;
+    uint32_t flags = 0;
+    uint32_t bgmCue = 0;
+    ReplicatedPlayerState player1 {};
+    ReplicatedPlayerState player2 {};
+    ReplicatedHudState hud {};
+    ReplicatedUiState ui {};
+    char bgmPath[260] {};
+    char posPath[260] {};
+    i32 bgmIsLooping = 0;
+    u16 bulletCount = 0;
+    u16 laserCount = 0;
+    u16 enemyCount = 0;
+    u16 itemCount = 0;
+    u8 receivedActorMask = 0;
+    u8 expectedActorMask = 0x0F;
+    u16 reserved = 0;
+    ReplicatedBulletState bullets[kAuthoritativeMaxReplicatedBullets] {};
+    ReplicatedLaserState lasers[kAuthoritativeMaxReplicatedLasers] {};
+    ReplicatedEnemyState enemies[kAuthoritativeMaxReplicatedEnemies] {};
+    ReplicatedItemState items[kAuthoritativeMaxReplicatedItems] {};
 };
 
 #ifdef _WIN32
@@ -838,6 +1099,7 @@ struct RuntimeState
     bool savedDefaultDifficultyValid = false;
     u8 savedDefaultDifficulty = NORMAL;
     bool pendingDebugEndingJump = false;
+    bool authoritativeModeEnabled = false;
 
     int delay = kDefaultDelay;
     int currentDelayCooldown = 0;
@@ -864,8 +1126,12 @@ struct RuntimeState
     u16 authoritySharedSeed = 0;
     bool sharedRngSeedCaptured = false;
     bool authoritySharedSeedKnown = false;
+    bool startupPeerSeedConfirmed = false;
     bool authoritySharedSeedApplied = false;
+    bool startupInitSettingReceived = false;
     bool startupActivationComplete = false;
+    bool authoritativeGameplayResetPending = false;
+    bool gameplayRuntimeStreamRebasedForStartup = false;
     int sessionBaseCalcCount = 0;
     int currentNetFrame = 0;
     Uint64 lastPeriodicPingTick = 0;
@@ -889,8 +1155,9 @@ struct RuntimeState
     std::map<int, InGameCtrlType> predictedRemoteCtrls;
     std::set<int> remoteFramesPendingRollbackCheck;
     std::deque<GameplaySnapshot> rollbackSnapshots;
-    bool predictionRollbackEnabled = true;
+    bool predictionRollbackEnabled = TH06_ENABLE_PREDICTION_ROLLBACK != 0;
     bool rollbackActive = false;
+    bool rollbackSnapshotCaptureRequested = false;
     bool stallFrameRequested = false;
     bool hasKnownUiState = false;
     bool knownUiState = false;
@@ -914,10 +1181,15 @@ struct RuntimeState
     std::vector<DelayedPack> delayedIncomingPacks;
     std::deque<FrameSubsystemHashes> consistencySamples;
     std::set<uint64_t> consistencyDetailRequestedKeys;
+    std::map<int, uint64_t> authoritativeFrameHashes;
     DesyncHeuristicState recoveryHeuristic {};
     AsyncResolveState launcherResolve {};
     Uint64 reconnectStartTick = 0;
     Uint64 desyncStartTick = 0;
+    AuthoritativeFrameState latestAuthoritativeFrameState {};
+    int lastAuthoritativeHashComparedFrame = -1;
+    bool authoritativeHashMismatchPending = false;
+    bool authoritativeHashCheckEnabled = false;
 };
 
 extern RuntimeState g_State;
@@ -968,6 +1240,7 @@ void ClearRemoteRuntimeCaches();
 void ResetGameplayRuntimeStream();
 int GetDisplayedRttMs();
 void ForceDeterministicNetplayStep();
+bool IsAuthoritativeNetplayMode();
 const char *ControlToString(Control control);
 const char *InGameCtrlToString(InGameCtrlType ctrl);
 std::string FormatInputBits(u16 input);
@@ -1057,6 +1330,8 @@ bool ReceiveRuntimePackets();
 void SendStartupBootstrapPacket();
 void SendKeyPacket(int frame);
 bool SendDatagramImmediate(const void *data, size_t size);
+bool SendAuthoritativeFrameStateDatagram(const AuthoritativeReplicator::ReplicatedWorldState &state);
+bool HandleAuthoritativeStateDatagram(const AuthoritativeStateDatagramHeader &header);
 void SendUiPhasePacket(int serial, bool isInUi, int boundaryFrame);
 void SendResyncPacket();
 void HandleDesync(int frame);
@@ -1086,5 +1361,15 @@ public:
 };
 
 extern NetSession g_NetSession;
+
+class AuthoritativeNetSession final : public ISession
+{
+public:
+    SessionKind Kind() const override;
+    void ResetInputState() override;
+    void AdvanceFrameInput() override;
+};
+
+extern AuthoritativeNetSession g_AuthoritativeNetSession;
 
 } // namespace th06::Netplay

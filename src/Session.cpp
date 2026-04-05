@@ -1,5 +1,6 @@
 #include "Session.hpp"
 
+#include "AstroBot.hpp"
 #include "Controller.hpp"
 #include "SinglePlayerSnapshot.hpp"
 #include "Supervisor.hpp"
@@ -24,7 +25,9 @@ public:
 
     void AdvanceFrameInput() override
     {
-        Session::ApplyLegacyFrameInput(SinglePlayerSnapshot::ProcessLocalGameplayInput(Controller::GetInput()));
+        const u16 rawInput = Controller::GetInput();
+        const u16 filteredInput = SinglePlayerSnapshot::ProcessLocalGameplayInput(rawInput);
+        Session::ApplyLegacyFrameInput(AstroBot::ProcessLocalGameplayInput(filteredInput));
     }
 };
 
@@ -44,7 +47,7 @@ public:
 
     void AdvanceFrameInput() override
     {
-        Session::ApplyLegacyFrameInput(Controller::GetInput());
+        Session::ApplyLegacyFrameInput(AstroBot::ProcessLocalGameplayInput(Controller::GetInput()));
     }
 };
 
@@ -81,12 +84,14 @@ SessionKind Session::GetKind()
 bool Session::IsDualPlayerSession()
 {
     const SessionKind kind = GetKind();
-    return kind == SessionKind::LocalNetplay || kind == SessionKind::Netplay;
+    return kind == SessionKind::LocalNetplay || kind == SessionKind::Netplay ||
+           kind == SessionKind::NetplayAuthoritative;
 }
 
 bool Session::IsRemoteNetplaySession()
 {
-    return GetKind() == SessionKind::Netplay;
+    const SessionKind kind = GetKind();
+    return kind == SessionKind::Netplay || kind == SessionKind::NetplayAuthoritative;
 }
 
 void Session::ResetInputState()

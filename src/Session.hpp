@@ -10,6 +10,7 @@ enum class SessionKind
     Replay,
     LocalNetplay,
     Netplay,
+    NetplayAuthoritative,
 };
 
 class ISession

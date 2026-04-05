@@ -72,6 +72,13 @@ enum BulletState
     BULLET_STATE_FIRED,
     BULLET_STATE_COLLIDED,
 };
+
+enum ProbeCollisionResult
+{
+    PROBE_COLLISION_NONE = 0,
+    PROBE_COLLISION_HIT = 1,
+    PROBE_COLLISION_GRAZE_OR_BOMB = 2,
+};
 struct PlayerRect
 {
     f32 posX;
@@ -201,6 +208,9 @@ struct Player
     i32 CalcKillBoxCollision(D3DXVECTOR3 *bulletCenter, D3DXVECTOR3 *bulletSize);
     i32 CalcLaserHitbox(D3DXVECTOR3 *laserCenter, D3DXVECTOR3 *laserSize, D3DXVECTOR3 *rotation, f32 angle,
                         i32 canGraze);
+    i32 ProbeKillBoxCollision(const D3DXVECTOR3 *bulletCenter, const D3DXVECTOR3 *bulletSize) const;
+    i32 ProbeLaserHitbox(const D3DXVECTOR3 *laserCenter, const D3DXVECTOR3 *laserSize, const D3DXVECTOR3 *rotation,
+                         f32 angle, i32 canGraze) const;
     i32 CalcDamageToEnemy(D3DXVECTOR3 *enemyPos, D3DXVECTOR3 *enemySize, i32 *unk);
     i32 CalcItemBoxCollision(D3DXVECTOR3 *center, D3DXVECTOR3 *size);
     void ScoreGraze(D3DXVECTOR3 *center);

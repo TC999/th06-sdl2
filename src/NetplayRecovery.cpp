@@ -587,7 +587,7 @@ void ResetAuthoritativeRecoveryState()
 
 bool TryStartAuthoritativeRecovery(int frame, AuthoritativeRecoveryReason reason)
 {
-    if (Session::GetKind() != SessionKind::Netplay || !g_State.isSessionActive || IsCurrentUiFrame())
+    if (!Session::IsRemoteNetplaySession() || !g_State.isSessionActive || IsCurrentUiFrame())
     {
         return false;
     }
@@ -608,7 +608,7 @@ bool TryStartAuthoritativeRecovery(int frame, AuthoritativeRecoveryReason reason
 
 bool HandleSnapshotSidebandDatagram(const SnapshotDatagramHeader &header, const u8 *payload, int payloadBytes)
 {
-    if (Session::GetKind() != SessionKind::Netplay || !g_State.isSessionActive)
+    if (!Session::IsRemoteNetplaySession() || !g_State.isSessionActive)
     {
         return false;
     }

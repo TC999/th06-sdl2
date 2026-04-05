@@ -33,7 +33,7 @@ struct State
     int hostPort = kDefaultPort;
     int listenPort = kDefaultPort;
     int targetDelay = kDefaultDelay;
-    bool predictionRollbackEnabled = true;
+    bool authoritativeModeEnabled = false;
     char hostIp[128] = "::1";
     char relayServer[256] = "";
     char relayRoom[64] = "";
@@ -84,19 +84,22 @@ const char *GetRelayTooltip()
 }
 const char *GetCurStateLabel() { return Tr("当前状态:", "cur state:", "現在の状態:"); }
 const char *GetTargetDelayLabel() { return Tr("目标延迟:", "target delay:", "目標遅延:"); }
-const char *GetPredictionRollbackLabel() { return Tr("预测回滚:", "prediction rollback:", "予測ロールバック:"); }
+const char *GetAuthoritativeModeLabel()
+{
+    return Tr("Host 权威实验模式:", "Host authoritative (experimental):", "Host 権威実験モード:");
+}
+const char *GetAuthoritativeModeTooltip()
+{
+    return Tr("实验性模式。远程联机切到固定 2 帧输入缓冲、无 rollback 的权威链路，保留现有单机与 rollback 联机实现。",
+              "Experimental. Switch remote netplay to a fixed 2-frame authoritative path without rollback while keeping single-player and the current rollback mode intact.",
+              "実験的モードです。リモート対戦を固定 2 フレーム入力バッファの host 権威パスに切り替え、単機と既存のロールバック対戦は維持します。");
+}
 const char *GetAutoDelayLabel() { return Tr("自动", "Auto", "自動"); }
 const char *GetAutoDelayTooltip()
 {
     return Tr("根据当前 RTT 自动估算一次目标延迟。算法使用“半 RTT + 1 帧安全裕量”，只会填入一次，不会持续改动。",
               "Estimate target delay once from the current RTT. Uses \"half RTT + one frame of safety\" and only fills the field once.",
               "現在の RTT から目標遅延を一度だけ自動推定します。\"RTT の半分 + 1 フレームの余裕\" を使い、継続的には変更しません。");
-}
-const char *GetPredictionRollbackTooltip()
-{
-    return Tr("由 host 控制。开启后，如果远端该帧输入还没到达，就默认沿用远端上一帧输入；真实输入到达且不一致时，会回滚到最近一致处重新计算。",
-              "Host-controlled. When enabled, missing remote input is predicted from the previous remote frame; if the real input arrives and differs, gameplay rolls back to the latest confirmed frame and re-simulates.",
-              "host 側で制御します。有効時は未着の相手入力を前フレームと同じだと予測し、実入力が異なれば直近の一致フレームまで巻き戻して再計算します。");
 }
 const char *GetRttLabel() { return "RTT"; }
 const char *GetStartGameLabel() { return Tr("开始游戏", "Start Game", "ゲーム開始"); }
@@ -346,7 +349,8 @@ void LoadConfig()
     {
         ClampState();
         Netplay::SetDelay(g_State.targetDelay);
-        Netplay::SetPredictionRollbackEnabled(g_State.predictionRollbackEnabled);
+        Netplay::SetPredictionRollbackEnabled(false);
+        Netplay::SetAuthoritativeModeEnabled(g_State.authoritativeModeEnabled);
         return;
     }
 
@@ -396,9 +400,11 @@ void LoadConfig()
         {
             g_State.targetDelay = std::atoi(value.c_str());
         }
-        else if (key == "prediction_rollback")
+        else if (key == "authoritative_mode")
         {
-            g_State.predictionRollbackEnabled = std::atoi(value.c_str()) != 0;
+            // Disabled for now. Keep parsing compatibility with older config files,
+            // but force fallback to the rollback netplay path.
+            g_State.authoritativeModeEnabled = false;
         }
         else if (key == "relay_server")
         {
@@ -412,7 +418,9 @@ void LoadConfig()
 
     ClampState();
     Netplay::SetDelay(g_State.targetDelay);
-    Netplay::SetPredictionRollbackEnabled(g_State.predictionRollbackEnabled);
+    Netplay::SetPredictionRollbackEnabled(false);
+    g_State.authoritativeModeEnabled = false;
+    Netplay::SetAuthoritativeModeEnabled(false);
 }
 
 void SaveConfig()
@@ -435,7 +443,8 @@ void SaveConfig()
     file << "port_host=" << g_State.hostPort << '\n';
     file << "port_listen=" << g_State.listenPort << '\n';
     file << "target_delay=" << g_State.targetDelay << '\n';
-    file << "prediction_rollback=" << (g_State.predictionRollbackEnabled ? 1 : 0) << '\n';
+    // Disabled for now. Persist 0 so older experimental installs fall back to rollback netplay.
+    file << "authoritative_mode=0\n";
     file << "relay_server=" << g_State.relayServer << '\n';
     file << "relay_room=" << g_State.relayRoom << '\n';
 }
@@ -510,7 +519,8 @@ bool ShouldForceRunInBackground()
 {
     const SessionKind kind = Session::GetKind();
     return g_State.isOpen || Netplay::IsWaitingForStartup() || Netplay::IsSessionActive() ||
-           kind == SessionKind::LocalNetplay || kind == SessionKind::Netplay;
+           kind == SessionKind::LocalNetplay || kind == SessionKind::Netplay ||
+           kind == SessionKind::NetplayAuthoritative;
 }
 
 bool ConsumeCloseRequested()
@@ -552,7 +562,7 @@ void UpdateImGui()
     const Netplay::Snapshot snapshot = Netplay::GetSnapshot();
     const Netplay::RelaySnapshot relaySnapshot = Netplay::GetRelaySnapshot();
     g_State.targetDelay = snapshot.targetDelay;
-    g_State.predictionRollbackEnabled = snapshot.predictionRollbackEnabled;
+    g_State.authoritativeModeEnabled = false;
     const std::string launcherTitle = GetLauncherTitle();
     const std::string localizedStatusText = LocalizeStatusText(snapshot.statusText);
     const std::string localizedRelayStatusText = LocalizeRelayStatusText(relaySnapshot.statusText);
@@ -715,27 +725,31 @@ void UpdateImGui()
         ImGui::Text("%s: --", GetRttLabel());
     }
 
-    ImGui::TextUnformatted(GetPredictionRollbackLabel());
+#if 0
+    // Temporarily disabled: the experimental authoritative path is not safe to expose
+    // until host/guest frame ownership and UI startup synchronization are rebuilt.
+    ImGui::TextUnformatted(GetAuthoritativeModeLabel());
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
     {
-        ShowWrappedTooltip(GetPredictionRollbackTooltip());
+        ShowWrappedTooltip(GetAuthoritativeModeTooltip());
     }
     ImGui::SameLine(110.0f);
     if (snapshot.delayLocked)
     {
         ImGui::BeginDisabled();
     }
-    if (ImGui::Checkbox("##online_prediction_rollback", &g_State.predictionRollbackEnabled))
+    if (ImGui::Checkbox("##online_authoritative_mode", &g_State.authoritativeModeEnabled))
     {
-        Netplay::SetPredictionRollbackEnabled(g_State.predictionRollbackEnabled);
+        Netplay::SetAuthoritativeModeEnabled(g_State.authoritativeModeEnabled);
         g_State.dirty = true;
     }
     if (snapshot.delayLocked)
     {
         ImGui::EndDisabled();
     }
+#endif
 
     if (!snapshot.canStartGame)
     {

@@ -2,6 +2,14 @@
 
 namespace th06::Netplay
 {
+namespace
+{
+u16 NormalizeRollbackStartupSeed(u16 seed)
+{
+    return seed != 0 ? seed : 1;
+}
+} // namespace
+
 void ApplyNetplayMenuDefaults()
 {
     if (!g_State.savedDefaultDifficultyValid)
@@ -36,6 +44,7 @@ void PruneOldFrameData(int frame)
     g_State.remoteCtrls.erase(pruneFrame);
     g_State.predictedRemoteCtrls.erase(pruneFrame);
     g_State.remoteFramesPendingRollbackCheck.erase(pruneFrame);
+    g_State.authoritativeFrameHashes.erase(pruneFrame);
 }
 
 int OldestGameplaySnapshotFrame()
@@ -77,6 +86,11 @@ bool IsRollbackFrameTooOld(int frame, int *outOldestSnapshotFrame)
 
 bool QueueRollbackFromFrame(int frame, const char *reason)
 {
+#if !TH06_ENABLE_PREDICTION_ROLLBACK
+    (void)frame;
+    (void)reason;
+    return false;
+#else
     if (frame < 0)
     {
         return false;
@@ -103,6 +117,7 @@ bool QueueRollbackFromFrame(int frame, const char *reason)
     }
 
     return true;
+#endif
 }
 
 bool IsRollbackEpochFrame(int frame)
@@ -119,6 +134,7 @@ void ResetRollbackEpoch(int frame, const char *reason, int nextEpochStartFrame)
                     (int)g_State.rollbackSnapshots.size());
 
     g_State.rollbackActive = false;
+    g_State.rollbackSnapshotCaptureRequested = false;
     g_State.pendingRollbackFrame = -1;
     g_State.rollbackTargetFrame = 0;
     g_State.rollbackSendFrame = -1;
@@ -278,6 +294,10 @@ bool ResolveRemoteFrameInput(int frame, u16 &outInput, InGameCtrlType &outCtrl, 
         return true;
     }
 
+#if !TH06_ENABLE_PREDICTION_ROLLBACK
+    (void)allowPrediction;
+    return false;
+#else
     if (!allowPrediction || !g_State.predictionRollbackEnabled)
     {
         return false;
@@ -339,6 +359,7 @@ bool ResolveRemoteFrameInput(int frame, u16 &outInput, InGameCtrlType &outCtrl, 
     }
     outUsedPrediction = true;
     return true;
+#endif
 }
 
 bool FrameHasMenuBit(const std::map<int, Bits<16>> &inputMap, int frame)
@@ -390,7 +411,18 @@ Pack MakePing(Control ctrlType)
     pack.ctrl.ctrlType = ctrlType;
     pack.ctrl.initSetting.delay = g_State.delay;
     pack.ctrl.initSetting.ver = kProtocolVersion;
-    pack.ctrl.initSetting.flags = g_State.predictionRollbackEnabled ? InitSettingFlag_PredictionRollback : 0;
+    pack.ctrl.initSetting.flags = (g_State.predictionRollbackEnabled ? InitSettingFlag_PredictionRollback : 0) |
+                                  (g_State.authoritativeModeEnabled ? InitSettingFlag_AuthoritativeMode : 0);
+    pack.ctrl.initSetting.sharedSeed =
+        NormalizeRollbackStartupSeed(g_State.authoritySharedSeedKnown ? g_State.authoritySharedSeed : g_Rng.seed);
+    pack.ctrl.initSetting.hostIsPlayer1 = g_State.hostIsPlayer1 ? 1 : 0;
+    pack.ctrl.initSetting.difficulty = (u8)g_GameManager.difficulty;
+    pack.ctrl.initSetting.character1 = g_GameManager.character;
+    pack.ctrl.initSetting.shotType1 = g_GameManager.shotType;
+    pack.ctrl.initSetting.character2 = g_GameManager.character2;
+    pack.ctrl.initSetting.shotType2 = g_GameManager.shotType2;
+    pack.ctrl.initSetting.practiceMode = g_GameManager.isInPracticeMode ? 1 : 0;
+    std::memset(pack.ctrl.initSetting.reserved, 0, sizeof(pack.ctrl.initSetting.reserved));
     TraceLauncherPacket("launcher-send-ping", pack);
     return pack;
 }
@@ -402,13 +434,24 @@ int CurrentNetFrame()
 
 void CaptureGameplaySnapshot(int frame)
 {
+#if !TH06_ENABLE_PREDICTION_ROLLBACK
+    (void)frame;
+    g_State.rollbackSnapshotCaptureRequested = false;
+    return;
+#else
+    const bool forceCapture = g_State.rollbackSnapshotCaptureRequested;
     if (!g_State.isSessionActive || !g_State.isConnected || !Session::IsRemoteNetplaySession())
     {
+        g_State.rollbackSnapshotCaptureRequested = false;
         return;
     }
 
     if (!CanUseRollbackSnapshots() || g_State.rollbackActive)
     {
+        if (!g_State.rollbackActive)
+        {
+            g_State.rollbackSnapshotCaptureRequested = false;
+        }
         return;
     }
 
@@ -424,15 +467,19 @@ void CaptureGameplaySnapshot(int frame)
     // have no usable snapshot until the first interval boundary.
     if (frame < g_State.rollbackEpochStartFrame)
     {
-        return;
+        if (!forceCapture)
+        {
+            return;
+        }
     }
 
     if (!g_State.rollbackSnapshots.empty() && g_State.rollbackSnapshots.back().frame == frame)
     {
+        g_State.rollbackSnapshotCaptureRequested = false;
         return;
     }
 
-    if (!g_State.rollbackSnapshots.empty() && frame != 0 && frame % kRollbackSnapshotInterval != 0)
+    if (!forceCapture && !g_State.rollbackSnapshots.empty() && frame != 0 && frame % kRollbackSnapshotInterval != 0)
     {
         return;
     }
@@ -464,10 +511,21 @@ void CaptureGameplaySnapshot(int frame)
     {
         g_State.rollbackSnapshots.pop_front();
     }
+
+    g_State.rollbackSnapshotCaptureRequested = false;
+    if (forceCapture)
+    {
+        TraceDiagnostic("rollback-snapshot-refresh", "frame=%d snapshots=%d", frame, (int)g_State.rollbackSnapshots.size());
+    }
+#endif
 }
 
 bool RestoreGameplaySnapshot(const GameplaySnapshot &snapshot)
 {
+#if !TH06_ENABLE_PREDICTION_ROLLBACK
+    (void)snapshot;
+    return false;
+#else
     if (snapshot.stage != g_GameManager.currentStage)
     {
         return false;
@@ -494,6 +552,7 @@ bool RestoreGameplaySnapshot(const GameplaySnapshot &snapshot)
     g_State.currentDelayCooldown = snapshot.currentDelayCooldown;
     g_State.currentCtrl = IGC_NONE;
     return true;
+#endif
 }
 
 bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlType &outCtrl)
@@ -583,6 +642,12 @@ bool ResolveStoredFrameInput(int frame, bool isInUi, u16 &outInput, InGameCtrlTy
 
 bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderThanSnapshotFrame)
 {
+#if !TH06_ENABLE_PREDICTION_ROLLBACK
+    (void)currentFrame;
+    (void)mismatchFrame;
+    (void)olderThanSnapshotFrame;
+    return false;
+#else
     if (g_State.rollbackActive || g_State.rollbackSnapshots.empty() || mismatchFrame < 0)
     {
         TraceDiagnostic("rollback-start-skip", "current=%d mismatch=%d active=%d snapshots=%d", currentFrame,
@@ -618,7 +683,7 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
     const int latestSnapshotFrame = LatestGameplaySnapshotFrame();
     if (g_State.lastRollbackSnapshotFrame >= 0 && g_State.lastRollbackTargetFrame > g_State.lastRollbackSnapshotFrame &&
         mismatchFrame > g_State.lastRollbackTargetFrame && latestSnapshotFrame >= 0 &&
-        latestSnapshotFrame <= g_State.lastRollbackTargetFrame)
+        latestSnapshotFrame < g_State.lastRollbackTargetFrame)
     {
         TraceDiagnostic("rollback-start-drop-stale-window",
                         "current=%d mismatch=%d lastSnapshot=%d lastTarget=%d latestSnapshot=%d olderThan=%d",
@@ -708,7 +773,8 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
     g_State.lastRollbackTargetFrame = rollbackTargetFrame;
     g_State.lastRollbackSourceFrame = rollbackSourceFrame;
     g_State.seedValidationIgnoreUntilFrame =
-        std::max(g_State.seedValidationIgnoreUntilFrame, availableRemoteFrame + g_State.delay);
+        std::max(g_State.seedValidationIgnoreUntilFrame,
+                 std::max(availableRemoteFrame + g_State.delay, rollbackTargetFrame + kRollbackSnapshotInterval));
     g_State.currentNetFrame = snapshot->frame;
     g_State.lastFrame = snapshot->frame - 1;
     g_State.lastConfirmedSyncFrame = availableRemoteFrame;
@@ -723,10 +789,15 @@ bool TryStartAutomaticRollback(int currentFrame, int mismatchFrame, int olderTha
     NoteRecoveryHeuristicRollbackSuccess(currentFrame, mismatchFrame, snapshot->frame, rollbackTargetFrame);
     SetStatus("rollback catchup...");
     return true;
+#endif
 }
 
 bool TryStartQueuedRollback(int currentFrame)
 {
+#if !TH06_ENABLE_PREDICTION_ROLLBACK
+    (void)currentFrame;
+    return false;
+#else
     if (!g_State.predictionRollbackEnabled || g_State.rollbackActive || g_State.pendingRollbackFrame < 0)
     {
         return false;
@@ -762,6 +833,7 @@ bool TryStartQueuedRollback(int currentFrame)
     }
 
     return false;
+#endif
 }
 
 void RefreshRollbackFrameState(int frame)
@@ -800,6 +872,7 @@ void HandleDesync(int frame)
         return;
     }
 
+#if TH06_ENABLE_PREDICTION_ROLLBACK
     if (g_State.predictionRollbackEnabled)
     {
         if (g_State.rollbackActive || g_State.pendingRollbackFrame >= 0)
@@ -833,6 +906,7 @@ void HandleDesync(int frame)
         }
         return;
     }
+#endif
 
     if (g_State.resyncTriggered && g_State.resyncTargetFrame <= frame)
     {
@@ -916,10 +990,15 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                     FrameHasMenuBit(g_State.predictedRemoteInputs, delayedFrame - 1));
     const bool requiresAccurateRemoteInput =
         !isInUi && (rollbackEpochBarrier || ((selfInput & TH_BUTTON_MENU) != 0) || remoteMenuBarrier);
+#if TH06_ENABLE_PREDICTION_ROLLBACK
     const bool allowPrediction =
         g_State.predictionRollbackEnabled && CanUseRollbackSnapshots() && !isInUi && !requiresAccurateRemoteInput;
     const bool canRollbackNow =
         g_State.predictionRollbackEnabled && CanUseRollbackSnapshots() && !isInUi && !rollbackEpochBarrier;
+#else
+    const bool allowPrediction = false;
+    const bool canRollbackNow = false;
+#endif
     TraceDiagnostic("resolve-frame-begin",
                     "frame=%d delayed=%d ui=%d self=%s selfCtrl=%s allowPrediction=%d epochBarrier=%d "
                     "remoteMenuBarrier=%d requiresAccurate=%d canRollbackNow=%d",
@@ -954,6 +1033,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                         syncFrame, remoteSeedIt->second, localSeedIt->second, canRollbackNow ? 1 : 0,
                         IsCurrentUiFrame() ? 1 : 0);
 
+#if TH06_ENABLE_PREDICTION_ROLLBACK
         if (g_State.predictionRollbackEnabled)
         {
             if (!canRollbackNow)
@@ -1146,14 +1226,17 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
                 SetStatus(g_State.pendingRollbackFrame >= 0 ? "rollback pending..." : "desynced");
                 return false;
             }
+#endif
 
+        g_State.isSync = isInUi;
+        if (g_State.isSync)
+        {
+            g_State.desyncStartTick = 0;
+        }
+
+#if TH06_ENABLE_PREDICTION_ROLLBACK
         if (!canRollbackNow)
         {
-            g_State.isSync = isInUi;
-            if (g_State.isSync)
-            {
-                g_State.desyncStartTick = 0;
-            }
             return false;
         }
 
@@ -1164,6 +1247,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
             g_State.desyncStartTick = 0;
             return true;
         }
+#endif
         return false;
     };
 
@@ -1223,6 +1307,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
             return 0;
         }
     }
+#if TH06_ENABLE_PREDICTION_ROLLBACK
     else
     {
         if (TryStartQueuedRollback(frame))
@@ -1280,6 +1365,7 @@ u16 ResolveFrameInput(int frame, bool isInUi, InGameCtrlType &outCtrl, bool &out
             return 0;
         }
     }
+#endif
 
     if (selfCtrl != IGC_NONE && remoteCtrl != IGC_NONE)
     {
