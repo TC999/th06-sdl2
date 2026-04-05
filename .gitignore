@@ -23,9 +23,11 @@ unique_errors.txt
 
 # SDL2 build output
 build_sdl2/
+build_sdl2_*/
 build_linux/
 
 build_linux_gles/
+_build_sdl2_backup_*/
 
 # Android build
 android/SDL2_src/
