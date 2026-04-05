@@ -10,6 +10,7 @@ build.ninja
 __pycache__
 
 # Temp files
+.ai/
 .claude/
 .codemap/
 SDL2_MIGRATION_PLAN.md
