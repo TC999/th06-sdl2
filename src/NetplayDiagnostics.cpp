@@ -326,6 +326,47 @@ void HashAnmVm(DiagnosticHashBuilder &hash, const AnmVm &vm)
     hash.AddRaw(vm.fontHeight);
 }
 
+// Hash AnmVm excluding fields that are overwritten by Stage::RenderObjects (Draw callback).
+// pos, scaleX, scaleY are set by the Draw chain based on viewport/camera projection,
+// not by game logic, so they must be excluded for deterministic consistency checking.
+void HashAnmVmStageQuad(DiagnosticHashBuilder &hash, const AnmVm &vm)
+{
+    HashVec3(hash, vm.rotation);
+    HashVec3(hash, vm.angleVel);
+    // scaleX/scaleY excluded: overwritten by RenderObjects
+    hash.AddFloat(vm.scaleInterpFinalY);
+    hash.AddFloat(vm.scaleInterpFinalX);
+    HashVec2(hash, vm.uvScrollPos);
+    HashTimer(hash, vm.currentTimeInScript);
+    // matrix excluded: derived from pos/scale/rotation, recomputed during Draw
+    hash.AddRaw(vm.color);
+    hash.AddRaw(vm.flags.flags);
+    hash.AddRaw(vm.alphaInterpEndTime);
+    hash.AddRaw(vm.scaleInterpEndTime);
+    hash.AddRaw(vm.autoRotate);
+    hash.AddRaw(vm.pendingInterrupt);
+    hash.AddRaw(vm.posInterpEndTime);
+    // pos excluded: overwritten by RenderObjects
+    hash.AddFloat(vm.scaleInterpInitialY);
+    hash.AddFloat(vm.scaleInterpInitialX);
+    HashTimer(hash, vm.scaleInterpTime);
+    hash.AddRaw(vm.activeSpriteIndex);
+    hash.AddRaw(vm.baseSpriteIndex);
+    hash.AddRaw(vm.anmFileIndex);
+    hash.AddRaw((int64_t)NormalizeByteOffset(vm.beginingOfScript, vm.currentInstruction));
+    hash.AddRaw(vm.sprite != nullptr ? vm.sprite->spriteId : -1);
+    hash.AddRaw(vm.alphaInterpInitial);
+    hash.AddRaw(vm.alphaInterpFinal);
+    HashVec3(hash, vm.posInterpInitial);
+    HashVec3(hash, vm.posInterpFinal);
+    HashVec3(hash, vm.posOffset);
+    HashTimer(hash, vm.posInterpTime);
+    hash.AddRaw(vm.timeOfLastSpriteSet);
+    HashTimer(hash, vm.alphaInterpTime);
+    hash.AddRaw(vm.fontWidth);
+    hash.AddRaw(vm.fontHeight);
+}
+
 void HashPlayerBullet(DiagnosticHashBuilder &hash, const PlayerBullet &bullet)
 {
     hash.AddRaw(bullet.bulletState);
@@ -334,7 +375,7 @@ void HashPlayerBullet(DiagnosticHashBuilder &hash, const PlayerBullet &bullet)
         return;
     }
 
-    HashAnmVm(hash, bullet.sprite);
+    HashAnmVmStageQuad(hash, bullet.sprite);
     HashVec3(hash, bullet.position);
     HashVec3(hash, bullet.size);
     HashVec2(hash, bullet.velocity);
@@ -374,7 +415,7 @@ void HashPlayerBombInfo(DiagnosticHashBuilder &hash, const PlayerBombInfo &bombI
     {
         for (const AnmVm &vm : spriteRow)
         {
-            HashAnmVm(hash, vm);
+            HashAnmVmStageQuad(hash, vm);
         }
     }
 }
@@ -382,10 +423,13 @@ void HashPlayerBombInfo(DiagnosticHashBuilder &hash, const PlayerBombInfo &bombI
 uint64_t HashPlayerState(const Player &player)
 {
     DiagnosticHashBuilder hash;
-    HashAnmVm(hash, player.playerSprite);
+    // Use StageQuad variant to exclude pos/scaleX/scaleY which are overwritten
+    // by Player::OnDrawHighPrio (pos set from drawPosition + arcadeRegionTopLeftPos,
+    // and TryGetRenderOverride may use different positions on host vs guest).
+    HashAnmVmStageQuad(hash, player.playerSprite);
     for (const AnmVm &vm : player.orbsSprite)
     {
-        HashAnmVm(hash, vm);
+        HashAnmVmStageQuad(hash, vm);
     }
     HashVec3(hash, player.positionCenter);
     HashVec3(hash, player.unk_44c);
@@ -441,7 +485,11 @@ uint64_t HashPlayerState(const Player &player)
     HashTimer(hash, player.fireBulletTimer);
     HashTimer(hash, player.invulnerabilityTimer);
     HashPlayerBombInfo(hash, player.bombInfo);
-    HashAnmVm(hash, player.hitboxSprite);
+    // hitboxSprite: pos, scale, rotation, and color are all modified by
+    // OnDrawHighPrio and NOT restored. Use StageQuad variant (excludes pos/scale).
+    // rotation and color changes are derived from hitboxTime (already hashed)
+    // so they don't add gameplay info.
+    HashAnmVmStageQuad(hash, player.hitboxSprite);
     hash.AddRaw(player.hitboxTime);
     hash.AddRaw(player.lifegiveTime);
     return hash.Finish();
@@ -449,11 +497,11 @@ uint64_t HashPlayerState(const Player &player)
 
 void HashBulletTypeSprites(DiagnosticHashBuilder &hash, const BulletTypeSprites &sprites)
 {
-    HashAnmVm(hash, sprites.spriteBullet);
-    HashAnmVm(hash, sprites.spriteSpawnEffectFast);
-    HashAnmVm(hash, sprites.spriteSpawnEffectNormal);
-    HashAnmVm(hash, sprites.spriteSpawnEffectSlow);
-    HashAnmVm(hash, sprites.spriteSpawnEffectDonut);
+    HashAnmVmStageQuad(hash, sprites.spriteBullet);
+    HashAnmVmStageQuad(hash, sprites.spriteSpawnEffectFast);
+    HashAnmVmStageQuad(hash, sprites.spriteSpawnEffectNormal);
+    HashAnmVmStageQuad(hash, sprites.spriteSpawnEffectSlow);
+    HashAnmVmStageQuad(hash, sprites.spriteSpawnEffectDonut);
     HashVec3(hash, sprites.grazeSize);
     hash.AddRaw(sprites.unk_55c);
     hash.AddRaw(sprites.bulletHeight);
@@ -499,8 +547,8 @@ void HashLaser(DiagnosticHashBuilder &hash, const Laser &laser)
         return;
     }
 
-    HashAnmVm(hash, laser.vm0);
-    HashAnmVm(hash, laser.vm1);
+    HashAnmVmStageQuad(hash, laser.vm0);
+    HashAnmVmStageQuad(hash, laser.vm1);
     HashVec3(hash, laser.pos);
     hash.AddFloat(laser.angle);
     hash.AddFloat(laser.startOffset);
@@ -566,10 +614,10 @@ uint64_t HashEnemyState(const Enemy &enemy)
         return hash.Finish();
     }
 
-    HashAnmVm(hash, enemy.primaryVm);
+    HashAnmVmStageQuad(hash, enemy.primaryVm);
     for (const AnmVm &vm : enemy.vms)
     {
-        HashAnmVm(hash, vm);
+        HashAnmVmStageQuad(hash, vm);
     }
     HashEnemyContext(hash, enemy.currentContext);
     for (const EnemyEclContext &context : enemy.savedContextStack)
@@ -674,7 +722,7 @@ void HashItem(DiagnosticHashBuilder &hash, const Item &item)
         return;
     }
 
-    HashAnmVm(hash, item.sprite);
+    HashAnmVmStageQuad(hash, item.sprite);
     HashVec3(hash, item.currentPosition);
     HashVec3(hash, item.startPosition);
     HashVec3(hash, item.targetPosition);
@@ -704,7 +752,7 @@ void HashEffect(DiagnosticHashBuilder &hash, const Effect &effect)
         return;
     }
 
-    HashAnmVm(hash, effect.vm);
+    HashAnmVmStageQuad(hash, effect.vm);
     HashVec3(hash, effect.pos1);
     HashVec3(hash, effect.unk_11c);
     HashVec3(hash, effect.unk_128);
@@ -750,8 +798,8 @@ uint64_t HashStageState()
     hash.AddRaw(g_Stage.skyFogNeedsSetup);
     hash.AddRaw(g_Stage.spellcardState);
     hash.AddRaw(g_Stage.ticksSinceSpellcardStarted);
-    HashAnmVm(hash, g_Stage.spellcardBackground);
-    HashAnmVm(hash, g_Stage.unk2);
+    HashAnmVmStageQuad(hash, g_Stage.spellcardBackground);
+    HashAnmVmStageQuad(hash, g_Stage.unk2);
     hash.AddRaw(g_Stage.unpauseFlag);
     HashVec3(hash, g_Stage.facingDirInterpInitial);
     HashVec3(hash, g_Stage.facingDirInterpFinal);
@@ -770,7 +818,7 @@ uint64_t HashStageState()
     {
         for (int i = 0; i < g_Stage.quadCount; ++i)
         {
-            HashAnmVm(hash, g_Stage.quadVms[i]);
+            HashAnmVmStageQuad(hash, g_Stage.quadVms[i]);
         }
     }
     return hash.Finish();

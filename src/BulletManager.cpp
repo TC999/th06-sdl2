@@ -7,6 +7,7 @@
 #include "GameManager.hpp"
 #include "Gui.hpp"
 #include "ItemManager.hpp"
+#include "NetplaySession.hpp"
 #include "Player.hpp"
 #include "Rng.hpp"
 #include "Session.hpp"
@@ -697,6 +698,17 @@ ChainCallbackResult BulletManager::OnUpdate(BulletManager *mgr)
     i32 grazeState;
     const bool hasSecondPlayer = HasSecondPlayer();
 
+    // In netplay, isolate g_Rng consumption from bullet/laser ANM script
+    // processing. Bullets can diverge between peers (AngleProvokedPlayer re-aims
+    // at different player positions), causing different SetRandomSprite opcodes
+    // to fire during ExecuteScript, which would cascade into the shared game RNG.
+    const bool isolateRng = Netplay::IsSessionActive();
+    Rng savedRng;
+    if (isolateRng)
+    {
+        savedRng = g_Rng;
+    }
+
     curBullet = &mgr->bullets[0];
 
     if (g_GameManager.isTimeStopped)
@@ -1183,6 +1195,12 @@ ChainCallbackResult BulletManager::OnUpdate(BulletManager *mgr)
     }
 
     mgr->time.Tick();
+
+    if (isolateRng)
+    {
+        g_Rng = savedRng;
+    }
+
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 

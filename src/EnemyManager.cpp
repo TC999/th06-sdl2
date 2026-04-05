@@ -9,6 +9,7 @@
 #include "Player.hpp"
 #include "Rng.hpp"
 #include "Session.hpp"
+#include "NetplaySession.hpp"
 #include "diffbuild.hpp"
 #include "utils.hpp"
 #include "thprac_th06.h"
@@ -584,6 +585,14 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
     const bool hasSecondPlayer = HasSecondPlayer();
 
     local_8 = 0;
+
+    const bool isolateRng = Netplay::IsSessionActive();
+    Rng savedRng;
+    if (isolateRng)
+    {
+        savedRng = g_Rng;
+    }
+
     mgr->RunEclTimeline();
     for (curEnemy = &mgr->enemies[0], mgr->enemyCount = 0, enemyIdx = 0; enemyIdx < ARRAY_SIZE_SIGNED(mgr->enemies) - 1;
          enemyIdx++, curEnemy++)
@@ -824,6 +833,11 @@ ChainCallbackResult EnemyManager::OnUpdate(EnemyManager *mgr)
             THPrac::TH06::THPracLockTimerTick();
         }
     }
+    if (isolateRng)
+    {
+        g_Rng = savedRng;
+    }
+
     mgr->timelineTime.Tick();
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

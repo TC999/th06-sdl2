@@ -103,8 +103,12 @@ struct SoundPlayer
     CStreamingSound *backgroundMusic;
     void *backgroundMusicUpdateEvent;
     i32 isLooping;
+    char currentBgmPath[260];
+    char currentPosPath[260];
+    i32 bgmPlaybackStarted;
+    i32 bgmReloadSuppressed;
 };
-ZUN_ASSERT_SIZE(SoundPlayer, 0x638);
+ZUN_ASSERT_SIZE(SoundPlayer, 0x848);
 
 DIFFABLE_EXTERN(SoundBufferIdxVolume, g_SoundBufferIdxVol[32]);
 DIFFABLE_EXTERN(char, *g_SFXList[26]);

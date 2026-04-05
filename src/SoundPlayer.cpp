@@ -1,6 +1,7 @@
 #include "SoundPlayer.hpp"
 
 #include "FileSystem.hpp"
+#include "NetplaySession.hpp"
 #include "Supervisor.hpp"
 #include "i18n.hpp"
 #include "utils.hpp"
@@ -12,6 +13,20 @@
 
 namespace th06
 {
+namespace
+{
+void CopyBgmPath(char (&dest)[260], const char *src)
+{
+    if (src == nullptr)
+    {
+        dest[0] = '\0';
+        return;
+    }
+    std::strncpy(dest, src, sizeof(dest) - 1);
+    dest[sizeof(dest) - 1] = '\0';
+}
+} // namespace
+
 
 #define BACKGROUND_MUSIC_BUFFER_SIZE 0x8000
 #define BACKGROUND_MUSIC_WAV_NUM_CHANNELS 2
@@ -114,6 +129,10 @@ void SoundPlayer::StopBGM()
             this->backgroundMusic = NULL;
         }
     }
+    this->bgmPlaybackStarted = 0;
+    this->bgmReloadSuppressed = 0;
+    this->currentBgmPath[0] = '\0';
+    this->currentPosPath[0] = '\0';
     return;
 }
 
@@ -145,6 +164,13 @@ ZunResult SoundPlayer::LoadWav(char *path)
     {
         return ZUN_ERROR;
     }
+    if (Netplay::NeedsRollbackCatchup() && this->backgroundMusic != NULL && this->currentBgmPath[0] != '\0' &&
+        std::strcmp(this->currentBgmPath, path) == 0)
+    {
+        this->bgmReloadSuppressed = 1;
+        return ZUN_SUCCESS;
+    }
+    this->bgmReloadSuppressed = 0;
     this->StopBGM();
     utils::DebugPrint2("load BGM\n");
     res = waveFile.Open(path, NULL, WAVEFILE_READ);
@@ -181,6 +207,9 @@ ZunResult SoundPlayer::LoadWav(char *path)
     {
         curTime2 = SDL_GetTicks();
     }
+    CopyBgmPath(this->currentBgmPath, path);
+    this->currentPosPath[0] = '\0';
+    this->bgmPlaybackStarted = 0;
     return ZUN_SUCCESS;
 }
 
@@ -204,6 +233,10 @@ ZunResult SoundPlayer::LoadPos(char *path)
     {
         return ZUN_ERROR;
     }
+    if (this->bgmReloadSuppressed != 0 && this->currentPosPath[0] != '\0' && std::strcmp(this->currentPosPath, path) == 0)
+    {
+        return ZUN_SUCCESS;
+    }
 
     fileData = FileSystem::OpenPath(path, 0);
     if (fileData == NULL)
@@ -216,6 +249,7 @@ ZunResult SoundPlayer::LoadPos(char *path)
     bgmFile->m_loopStartPoint = loopStart;
     bgmFile->m_loopEndPoint = loopEnd;
     free(fileData);
+    CopyBgmPath(this->currentPosPath, path);
     return ZUN_SUCCESS;
 }
 
@@ -336,6 +370,11 @@ ZunResult SoundPlayer::PlayBGM(i32 isLooping)
     {
         return ZUN_ERROR;
     }
+    if (Netplay::NeedsRollbackCatchup() && this->bgmReloadSuppressed != 0 && this->bgmPlaybackStarted != 0 &&
+        this->isLooping == isLooping)
+    {
+        return ZUN_SUCCESS;
+    }
     res = this->backgroundMusic->Reset();
     if (res < 0)
     {
@@ -348,6 +387,8 @@ ZunResult SoundPlayer::PlayBGM(i32 isLooping)
     }
     utils::DebugPrint2("comp\n");
     this->isLooping = isLooping;
+    this->bgmPlaybackStarted = 1;
+    this->bgmReloadSuppressed = 0;
     return ZUN_SUCCESS;
 }
 

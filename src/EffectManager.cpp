@@ -4,6 +4,7 @@
 #include "Chain.hpp"
 #include "ChainPriorities.hpp"
 #include "GameManager.hpp"
+#include "NetplaySession.hpp"
 #include "Rng.hpp"
 #include "ZunResult.hpp"
 #include "thprac_th06.h"
@@ -253,6 +254,19 @@ ChainCallbackResult EffectManager::OnUpdate(EffectManager *mgr)
     i32 effectIdx;
     Effect *effect;
 
+    // In netplay, save and restore g_Rng around effect processing.
+    // Effect callbacks (EffectCallbackRandomSplash, etc.) consume g_Rng on their
+    // first tick, but the number of active effects can differ between peers when
+    // player-bullet-enemy collisions create hit-splash particles at different
+    // positions due to input prediction. Isolating effect RNG consumption prevents
+    // this cosmetic divergence from cascading into the shared game RNG.
+    const bool isolateRng = Netplay::IsSessionActive();
+    Rng savedRng;
+    if (isolateRng)
+    {
+        savedRng = g_Rng;
+    }
+
     effect = &mgr->effects[0];
     mgr->activeEffects = 0;
     for (effectIdx = 0; effectIdx < ARRAY_SIZE_SIGNED(mgr->effects) - 1; effectIdx++, effect++)
@@ -274,6 +288,11 @@ ChainCallbackResult EffectManager::OnUpdate(EffectManager *mgr)
         }
 
         effect->timer.Tick();
+    }
+
+    if (isolateRng)
+    {
+        g_Rng = savedRng;
     }
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
