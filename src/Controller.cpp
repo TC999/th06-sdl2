@@ -1,5 +1,6 @@
 #include "Controller.hpp"
 
+#include "AndroidTouchInput.hpp"
 #include "GameErrorContext.hpp"
 #include "Session.hpp"
 #include "Supervisor.hpp"
@@ -8,12 +9,18 @@
 #include "thprac_gui_input.h"
 #include "utils.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
 namespace th06
 {
 DIFFABLE_STATIC(u16, g_FocusButtonConflictState)
+
+// ── Analog input state ──────────────────────────────────────────────────────
+static AnalogInput g_AnalogInput = {};
+
+
 
 Controller::RuntimeState Controller::CaptureRuntimeState()
 {
@@ -410,6 +417,34 @@ u16 Controller::GetControllerInput(u16 buttons)
             buttons |= TH_BUTTON_UP;
     }
 
+    // ── Preserve analog axis values for proportional movement ────────────
+    // Normalize raw axis values (-32768..32767) to -1..1.
+    // Apply deadzone remapping: axis magnitudes below the threshold map to 0,
+    // then linearly ramp from 0 to 1 as the stick reaches full deflection.
+    // This produces a smooth onset that is consistent with the discrete
+    // thresholds above — direction buttons fire at the same stick position
+    // where analog magnitude becomes non-zero.
+    {
+        float normX = axisX / 32767.0f;
+        float normY = axisY / 32767.0f;
+        float deadzoneX = axisThresholdX / 32767.0f;
+        float deadzoneY = axisThresholdY / 32767.0f;
+        float deadzone = std::min(deadzoneX, deadzoneY);
+
+        float mag = std::sqrt(normX * normX + normY * normY);
+        if (mag > deadzone)
+        {
+            // Remap: [deadzone, 1] → [0, 1]
+            float remapped = (mag - deadzone) / (1.0f - deadzone);
+            if (remapped > 1.0f)
+                remapped = 1.0f;
+
+            g_AnalogInput.x = (normX / mag) * remapped;
+            g_AnalogInput.y = (normY / mag) * remapped;
+            g_AnalogInput.active = true;
+        }
+    }
+
 #ifdef __ANDROID__
     g_AndroidControllerDiagnostics.axisX = axisX;
     g_AndroidControllerDiagnostics.axisY = axisY;
@@ -463,6 +498,10 @@ u16 Controller::GetInput(void)
     u16 buttons;
     u16 keyboardButtons;
 
+    // Clear analog state at the start of each frame.
+    // GetControllerInput() or touch may set it below.
+    g_AnalogInput = {};
+
     buttons = 0;
     keyboardState = SDL_GetKeyboardState(NULL);
 
@@ -497,12 +536,61 @@ u16 Controller::GetInput(void)
     keyboardButtons = buttons;
     buttons = Controller::GetControllerInput(buttons);
 
+    // Merge touch-generated button flags (Android always; desktop in developer mode).
+    if (AndroidTouchInput::IsEnabled())
+    {
+        buttons |= AndroidTouchInput::GetTouchButtons();
+
+        // Touch analog direction overrides joystick analog when active.
+        const AnalogInput &touchAnalog = AndroidTouchInput::GetAnalogInput();
+        if (touchAnalog.active)
+        {
+            g_AnalogInput = touchAnalog;
+        }
+    }
+
+    // ── Synthesize analog vector from discrete buttons if no analog source ──
+    // This ensures GetAnalogInput() always returns a meaningful direction
+    // vector regardless of input source.  `active` stays false so Player
+    // does NOT apply proportional speed scaling — keyboard keeps its
+    // original fixed-speed behavior.
+    if (!g_AnalogInput.active)
+    {
+        float dx = 0.0f, dy = 0.0f;
+        if (buttons & TH_BUTTON_LEFT)  dx -= 1.0f;
+        if (buttons & TH_BUTTON_RIGHT) dx += 1.0f;
+        if (buttons & TH_BUTTON_UP)    dy -= 1.0f;
+        if (buttons & TH_BUTTON_DOWN)  dy += 1.0f;
+        // Normalize diagonal so magnitude is 1.0, not √2.
+        if (dx != 0.0f && dy != 0.0f)
+        {
+            constexpr float kInvSqrt2 = 0.70710678118f; // 1 / √2
+            dx *= kInvSqrt2;
+            dy *= kInvSqrt2;
+        }
+        g_AnalogInput.x = dx;
+        g_AnalogInput.y = dy;
+        // active remains false — this is synthesized, not from an analog source.
+    }
+
 #ifdef __ANDROID__
     LogAndroidInputSnapshot(keyboardButtons, buttons);
 #endif
 
     return buttons;
 }
+
+const AnalogInput &Controller::GetAnalogInput(void)
+{
+    return g_AnalogInput;
+}
+
+void Controller::SetAnalogInput(const AnalogInput &input)
+{
+    g_AnalogInput = input;
+}
+
+
 
 void Controller::ResetKeyboard(void)
 {
@@ -516,6 +604,7 @@ void Controller::ResetInputState(void)
 {
     ResetDeviceInputState();
     Session::ResetLegacyInputState();
+    AndroidTouchInput::Reset();
 #ifdef __ANDROID__
     SDL_Log("[input/native] ResetInputState");
 #endif

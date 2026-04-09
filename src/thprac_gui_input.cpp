@@ -1,4 +1,5 @@
 #include "thprac_gui_input.h"
+#include "AndroidTouchInput.hpp"
 #include <SDL.h>
 #include <cstring>
 
@@ -80,7 +81,9 @@ bool InGameInputGet(int key)
     SDL_Scancode sc = VKToScancode(key);
     if (sc == SDL_SCANCODE_UNKNOWN || sc >= numkeys)
         return false;
-    return state[sc] != 0;
+    if (state[sc] != 0)
+        return true;
+    return th06::AndroidTouchInput::IsEnabled() && th06::AndroidTouchInput::IsTouchScancode(sc);
 }
 
 void KeyboardInputUpdate()
@@ -90,6 +93,15 @@ void KeyboardInputUpdate()
     memcpy(s_prev_keys, s_curr_keys, sizeof(s_prev_keys));
     for (int i = 0; i < numkeys && i < SDL_NUM_SCANCODES; i++)
         s_curr_keys[i] = state[i] != 0;
+    // Merge touch virtual scancodes into the buffered keyboard state.
+    if (th06::AndroidTouchInput::IsEnabled())
+    {
+        for (int i = 0; i < SDL_NUM_SCANCODES; i++)
+        {
+            if (th06::AndroidTouchInput::IsTouchScancode((SDL_Scancode)i))
+                s_curr_keys[i] = true;
+        }
+    }
 }
 
 int KeyboardInputUpdate(int v_key)
@@ -121,7 +133,9 @@ bool KeyboardInputGetRaw(int v_key)
     SDL_Scancode sc = VKToScancode(v_key);
     if (sc == SDL_SCANCODE_UNKNOWN || sc >= numkeys)
         return false;
-    return state[sc] != 0;
+    if (state[sc] != 0)
+        return true;
+    return th06::AndroidTouchInput::IsEnabled() && th06::AndroidTouchInput::IsTouchScancode(sc);
 }
 
 void ResetKeyboardState()
@@ -132,7 +146,9 @@ void ResetKeyboardState()
 
 bool InGameInputGetConfirm()
 {
-    return InGameInputGet(VK_RETURN);
+    if (InGameInputGet(VK_RETURN))
+        return true;
+    return th06::AndroidTouchInput::IsEnabled() && th06::AndroidTouchInput::IsTouchScancode(SDL_SCANCODE_RETURN);
 }
 
 int GetBackspaceMenuChord()  { return ChordKey_Backspace; }

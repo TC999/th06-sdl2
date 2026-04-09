@@ -602,6 +602,9 @@ namespace TH06 {
     int g_lock_timer = 0;
     float g_speed_multiplier = 1.0f;  // CE-style speed: affects frame timing, not game logic
     bool g_developer_mode_enabled = false;
+    bool g_new_touch_enabled = false;
+    bool g_mouse_follow_enabled = false;
+    bool g_mouse_touch_drag_enabled = false;
     int g_portable_current_bgm_track_index = -1;
     int g_portable_current_boss_asset_profile = 0;
     bool g_debug_ending_jump_active = false;
@@ -2302,6 +2305,46 @@ namespace TH06 {
 #endif
         ImGui::SameLine();
         HelpMarker(RecoveryAutoDumpDesc());
+
+        ImGui::Separator();
+        ImGui::Checkbox(
+            TrLocal("启用新触控", "Enable New Touch", "新タッチ入力を有効にする"),
+            &g_new_touch_enabled);
+        ImGui::SameLine();
+        HelpMarker(TrLocal(
+            "启用后，桌面端鼠标点击将模拟触控输入（左键=点击，右键=返回）。安卓端始终启用触控。",
+            "When enabled, desktop mouse clicks simulate touch input (left click = tap, right click = back). Touch is always enabled on Android.",
+            "有効にすると、デスクトップでマウスクリックがタッチ入力をシミュレートします（左クリック＝タップ、右クリック＝戻る）。Android では常に有効です。"));
+
+        if (g_new_touch_enabled)
+        {
+            ImGui::Checkbox(
+                TrLocal("自机跟随鼠标", "Player Follows Mouse", "自機がマウスに追従"),
+                &g_mouse_follow_enabled);
+            ImGui::SameLine();
+            HelpMarker(TrLocal(
+                "启用后，游戏中自机的位置直接由鼠标位置决定。支持录像录制和回放。",
+                "When enabled, the player character position follows the mouse cursor during gameplay. Supports replay recording and playback.",
+                "有効にすると、ゲーム中の自機がマウスカーソルの位置に直接移動します。リプレイの録画と再生に対応しています。"));
+            if (g_mouse_follow_enabled)
+                g_mouse_touch_drag_enabled = false;
+
+            ImGui::Checkbox(
+                TrLocal("使用鼠标模拟手指拖拽", "Mouse Simulates Finger Drag", "マウスで指ドラッグをシミュレート"),
+                &g_mouse_touch_drag_enabled);
+            ImGui::SameLine();
+            HelpMarker(TrLocal(
+                "启用后，鼠标拖拽将模拟触控拖拽移动自机（相对位移，非跟随）。与「自机跟随鼠标」互斥。",
+                "When enabled, mouse drag simulates touch-drag to move the player character (relative displacement, not following). Mutually exclusive with Player Follows Mouse.",
+                "有効にすると、マウスドラッグがタッチドラッグをシミュレートして自機を移動します。「自機がマウスに追従」とは排他的です。"));
+            if (g_mouse_touch_drag_enabled)
+                g_mouse_follow_enabled = false;
+        }
+        else
+        {
+            g_mouse_follow_enabled = false;
+            g_mouse_touch_drag_enabled = false;
+        }
 
         ImGui::Separator();
         ImGui::Text("%s", AstroBotSectionLabel());
@@ -4956,6 +4999,21 @@ namespace TH06 {
     bool THPracIsDeveloperModeEnabled()
     {
         return g_developer_mode_enabled;
+    }
+
+    bool THPracIsNewTouchEnabled()
+    {
+        return g_new_touch_enabled;
+    }
+
+    bool THPracIsMouseFollowEnabled()
+    {
+        return g_mouse_follow_enabled;
+    }
+
+    bool THPracIsMouseTouchDragEnabled()
+    {
+        return g_mouse_touch_drag_enabled;
     }
 
     bool THPracIsAstroBotEnabled()

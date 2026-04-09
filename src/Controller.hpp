@@ -5,6 +5,47 @@
 
 namespace th06
 {
+
+// ────────────────────────────────────────────────────────────────────────────
+// Input semantics: context and analog direction
+// ────────────────────────────────────────────────────────────────────────────
+
+// Semantic context for interpreting direction input.
+// Gameplay: player movement — supports proportional analog speed.
+// Menu: UI navigation — always discrete 4/8-way, no analog scaling.
+enum class InputContext
+{
+    Gameplay,
+    Menu,
+};
+
+// How to interpret the analog vector values.
+enum class AnalogMode
+{
+    // x, y are a direction × magnitude in [-1, 1].  Player speed is scaled
+    // by magnitude (from character speed tables).
+    Direction,
+    // x, y are pixel displacement per frame (integer, clamped to ±127).
+    // Player position is directly offset by (x, y).
+    // Used by mouse-follow mode for replay-deterministic free movement.
+    Displacement,
+};
+
+// Continuous analog direction vector from gamepad stick or touch input.
+// When `active` is true, an analog source (gamepad axes / touch drag) is
+// providing continuous direction + magnitude.  Player movement can scale
+// speed proportionally.
+// When `active` is false, movement uses the original discrete-speed tables.
+struct AnalogInput
+{
+    float x;     // -1.0 (full left)  …  1.0 (full right), 0 = neutral
+    float y;     // -1.0 (full up)    …  1.0 (full down),  0 = neutral
+    bool active; // true ⟹ source is analog (joystick / touch)
+    AnalogMode mode = AnalogMode::Direction;
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+
 enum TouhouButton
 {
     TH_BUTTON_SHOOT = 1 << 0,
@@ -59,6 +100,8 @@ u32 SetButtonFromControllerInputs(u16 *outButtons, i16 controllerButtonToTest, e
 u16 GetControllerInput(u16 buttons);
 u8 *GetControllerState();
 u16 GetInput(void);
+const AnalogInput &GetAnalogInput(void);
+void SetAnalogInput(const AnalogInput &input);
 void ResetKeyboard(void);
 void ResetDeviceInputState(void);
 void ResetInputState(void);

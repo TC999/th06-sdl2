@@ -1,4 +1,5 @@
 #include "GameWindow.hpp"
+#include "AndroidTouchInput.hpp"
 #include "AnmManager.hpp"
 #include "Controller.hpp"
 #include "GameErrorContext.hpp"
@@ -16,6 +17,7 @@
 #include "sdl2_renderer.hpp"
 #include "thprac_games.h"
 #include "thprac_gui_integration.h"
+#include <imgui.h>
 #include <cmath>
 #include <cstdio>
 
@@ -128,6 +130,13 @@ static void LogAndroidInputEvent(const SDL_Event &event)
         SDL_Log("[input/sdl] controller button %s which=%d button=%d state=%d",
                 event.type == SDL_CONTROLLERBUTTONDOWN ? "down" : "up", event.cbutton.which,
                 event.cbutton.button, event.cbutton.state);
+        break;
+    case SDL_FINGERDOWN:
+    case SDL_FINGERMOTION:
+    case SDL_FINGERUP:
+        SDL_Log("[input/sdl] finger %s id=%lld x=%.3f y=%.3f",
+                event.type == SDL_FINGERDOWN ? "down" : (event.type == SDL_FINGERUP ? "up" : "motion"),
+                (long long)event.tfinger.fingerId, event.tfinger.x, event.tfinger.y);
         break;
     default:
         break;
@@ -260,6 +269,14 @@ RenderResult GameWindow::Render()
                 g_Chain.RunDrawChain();
                 g_Renderer->EndScene();
                 g_Renderer->SetTexture(0);
+                // Invalidate AnmManager's texture cache so it stays in sync
+                // with the renderer.  Without this, the next frame's first
+                // draw call may skip SetTexture (cache hit in AnmManager)
+                // while the renderer/GL has a completely different texture
+                // bound (e.g. the FBO color texture from EndFrame's blit),
+                // causing the previous frame's scene to "leak" onto sprites.
+                g_AnmManager->SetCurrentTexture(0);
+                g_AnmManager->SetCurrentSprite(nullptr);
             }
         }
 
@@ -414,6 +431,16 @@ void GameWindow::Present()
     {
         // Begin next frame (binds FBO)
         g_Renderer->BeginFrame();
+        // Invalidate AnmManager's render-state caches so the first draw of
+        // the new frame always re-applies GL state.  EndFrame changes GL
+        // state (FBO blit, state restore) behind AnmManager's back, so
+        // stale caches here would cause the wrong texture / blend mode to
+        // be used for sprites whose state happens to match the previous
+        // frame's last draw.
+        if (g_AnmManager != nullptr)
+        {
+            g_AnmManager->InvalidateDrawCaches();
+        }
     }
     return;
 }
@@ -428,6 +455,7 @@ i32 GameWindow::InitD3dInterface(void)
         GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_D3D_ERR_COULD_NOT_CREATE_OBJ);
         return 1;
     }
+    AndroidTouchInput::Init();
     return 0;
 }
 
@@ -527,6 +555,17 @@ void GameWindow_ProcessEvents()
                 g_GameWindow.isAppActive = ShouldFreezeWhenInactive() ? 1 : 0;
                 Controller::ResetInputState();
             }
+            else if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            {
+                // Update real screen dimensions for touch coordinate conversion.
+                if (g_Renderer != nullptr)
+                {
+                    int drawW, drawH;
+                    SDL_GL_GetDrawableSize(g_GameWindow.sdlWindow, &drawW, &drawH);
+                    g_Renderer->realScreenWidth = drawW;
+                    g_Renderer->realScreenHeight = drawH;
+                }
+            }
             break;
         case SDL_APP_WILLENTERBACKGROUND:
         case SDL_APP_DIDENTERBACKGROUND:
@@ -547,10 +586,61 @@ void GameWindow_ProcessEvents()
             Controller::RefreshSDLController();
             Controller::ResetInputState();
             break;
+        case SDL_FINGERDOWN:
+            if (!ImGui::GetIO().WantCaptureMouse)
+                AndroidTouchInput::HandleFingerDown(event.tfinger);
+            break;
+        case SDL_FINGERMOTION:
+            if (!ImGui::GetIO().WantCaptureMouse)
+                AndroidTouchInput::HandleFingerMotion(event.tfinger);
+            break;
+        case SDL_FINGERUP:
+            if (!ImGui::GetIO().WantCaptureMouse)
+                AndroidTouchInput::HandleFingerUp(event.tfinger);
+            break;
+#ifndef __ANDROID__
+        case SDL_MOUSEBUTTONDOWN:
+            if (AndroidTouchInput::IsEnabled())
+            {
+                // Right-click (game back/cancel) always goes through, bypassing ImGui.
+                // Left-click respects ImGui capture for thprac UI interaction.
+                if (event.button.button == SDL_BUTTON_RIGHT || !ImGui::GetIO().WantCaptureMouse)
+                {
+                    int w, h;
+                    SDL_GetWindowSize(g_GameWindow.sdlWindow, &w, &h);
+                    AndroidTouchInput::HandleMouseButtonDown(event.button, w, h);
+                }
+            }
+            break;
+        case SDL_MOUSEMOTION:
+            if (AndroidTouchInput::IsEnabled())
+            {
+                // Always process during left-button drag (prevents lost updates).
+                // Otherwise respect ImGui capture.
+                if ((event.motion.state & SDL_BUTTON_LMASK) || !ImGui::GetIO().WantCaptureMouse)
+                {
+                    int w, h;
+                    SDL_GetWindowSize(g_GameWindow.sdlWindow, &w, &h);
+                    AndroidTouchInput::HandleMouseMotion(event.motion, w, h);
+                }
+            }
+            break;
+        case SDL_MOUSEBUTTONUP:
+            if (AndroidTouchInput::IsEnabled())
+            {
+                // Always process button-up to prevent stuck drag state.
+                int w, h;
+                SDL_GetWindowSize(g_GameWindow.sdlWindow, &w, &h);
+                AndroidTouchInput::HandleMouseButtonUp(event.button, w, h);
+            }
+            break;
+#endif
         default:
             break;
         }
     }
+
+    AndroidTouchInput::Update();
 }
 
 #pragma var_order(using_d3d_hal, display_mode, present_params, camera_distance, half_height, half_width, aspect_ratio, \
