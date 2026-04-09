@@ -6,6 +6,7 @@
 #include "BulletData.hpp"
 #include "BulletManager.hpp"
 #include "ChainPriorities.hpp"
+#include "Controller.hpp"
 #include "EclManager.hpp"
 #include "EffectManager.hpp"
 #include "EnemyManager.hpp"
@@ -455,6 +456,9 @@ ChainCallbackResult Player::OnUpdate(Player *p)
                         else
                         {
                             g_GameManager.isInRetryMenu = 1;
+                            SDL_Log("[retry] isInRetryMenu set to 1, livesRemaining=%d numRetries=%d difficulty=%d practiceMode=%d isInReplay=%d",
+                                    (int)livesRemaining, (int)g_GameManager.numRetries, (int)g_GameManager.difficulty,
+                                    (int)g_GameManager.isInPracticeMode, (int)g_GameManager.isInReplay);
                         }
                     }
                 }
@@ -1138,6 +1142,29 @@ ZunResult Player::HandlePlayerInputs()
         verticalSpeed = horizontalSpeed;
     }
 
+    // ── Analog magnitude scaling (InputContext::Gameplay) ────────────────
+    // When an analog source (gamepad stick / touch) is active, scale the
+    // direction-specific speed by the analog vector's magnitude.
+    // This preserves:
+    //   • 8-way direction detection (from discrete buttons → PlayerDirection)
+    //   • Character-specific speed ratios (orthogonal vs diagonal)
+    //   • Focus / unfocus speed tables
+    // while adding proportional speed control for analog inputs.
+    // Keyboard input (analog.active == false) is completely unaffected.
+    // In Displacement mode the speed tables are bypassed entirely (see below).
+    const AnalogInput &analog = Controller::GetAnalogInput();
+    if (this->playerType == 1 && analog.mode != AnalogMode::Displacement)
+    {
+        if (analog.active && this->playerDirection != MOVEMENT_NONE)
+        {
+            float mag = std::sqrt(analog.x * analog.x + analog.y * analog.y);
+            if (mag > 1.0f)
+                mag = 1.0f;
+            horizontalSpeed *= mag;
+            verticalSpeed *= mag;
+        }
+    }
+
     if (horizontalSpeed < 0.0f && this->previousHorizontalSpeed >= 0.0f)
     {
         g_AnmManager->SetAndExecuteScriptIdx(&this->playerSprite, PlayerMoveLeftScript(this));
@@ -1159,11 +1186,24 @@ ZunResult Player::HandlePlayerInputs()
     this->previousHorizontalSpeed = horizontalSpeed;
     this->previousVerticalSpeed = verticalSpeed;
 
-    // TODO: Match stack variables here
-    this->positionCenter[0] +=
-        horizontalSpeed * this->horizontalMovementSpeedMultiplierDuringBomb * g_Supervisor.effectiveFramerateMultiplier;
-    this->positionCenter[1] +=
-        verticalSpeed * this->verticalMovementSpeedMultiplierDuringBomb * g_Supervisor.effectiveFramerateMultiplier;
+    // ── Movement ────────────────────────────────────────────────────────
+    if (this->playerType == 1 && analog.mode == AnalogMode::Displacement && analog.active)
+    {
+        // Displacement mode (mouse-follow): apply pixel delta directly.
+        // The values are pre-clamped and rounded to integers in
+        // AndroidTouchInput, matching the replay i8 encoding exactly.
+        this->positionCenter[0] += analog.x * g_Supervisor.effectiveFramerateMultiplier;
+        this->positionCenter[1] += analog.y * g_Supervisor.effectiveFramerateMultiplier;
+    }
+    else
+    {
+        // Normal speed-based movement.
+        // TODO: Match stack variables here
+        this->positionCenter[0] +=
+            horizontalSpeed * this->horizontalMovementSpeedMultiplierDuringBomb * g_Supervisor.effectiveFramerateMultiplier;
+        this->positionCenter[1] +=
+            verticalSpeed * this->verticalMovementSpeedMultiplierDuringBomb * g_Supervisor.effectiveFramerateMultiplier;
+    }
 
     if (this->positionCenter.x < g_GameManager.playerMovementAreaTopLeftPos.x)
     {
