@@ -178,7 +178,7 @@ ZunResult DecodeReplayBlob(ReplayBlob *data, i32 fileSize)
         return ZUN_ERROR;
     }
 
-    if (data->version != GAME_VERSION)
+    if (!IsValidReplayVersion(data->version))
     {
         return ZUN_ERROR;
     }
@@ -674,12 +674,43 @@ ChainCallbackResult ReplayManager::OnUpdate(ReplayManager *mgr)
         return CHAIN_CALLBACK_RESULT_CONTINUE;
     }
     inputs = IS_PRESSED(TH_BUTTON_REPLAY_CAPTURE);
-    if (inputs != mgr->replayInputs->inputKey)
+
+    // Encode current analog state as signed bytes for the replay stream.
+    // Two modes determined by AnalogMode:
+    //   Direction:    standard encoding — direction × magnitude scaled to [-127, 127]
+    //   Displacement: pixel delta per frame — already integer, stored raw
+    // Displacement mode sets bit 3 (TH_BUTTON_MENU) in inputKey as a per-frame
+    // flag so playback knows how to interpret the analog fields.
+    const AnalogInput &analog = Controller::GetAnalogInput();
+    i8 aX = 0, aY = 0;
+    if (analog.active)
+    {
+        if (analog.mode == AnalogMode::Displacement)
+        {
+            // Pixel displacement: already clamped to ±127 and rounded in AndroidTouchInput.
+            aX = static_cast<i8>(analog.x);
+            aY = static_cast<i8>(analog.y);
+            inputs |= TH_BUTTON_MENU; // per-frame displacement flag
+        }
+        else
+        {
+            float clampedX = analog.x < -1.0f ? -1.0f : (analog.x > 1.0f ? 1.0f : analog.x);
+            float clampedY = analog.y < -1.0f ? -1.0f : (analog.y > 1.0f ? 1.0f : analog.y);
+            aX = static_cast<i8>(clampedX * 127.0f);
+            aY = static_cast<i8>(clampedY * 127.0f);
+        }
+    }
+
+    if (inputs != mgr->replayInputs->inputKey ||
+        aX != mgr->replayInputs->analogX ||
+        aY != mgr->replayInputs->analogY)
     {
         mgr->replayInputs += 1;
         mgr->replayInputStageBookmarks[g_GameManager.currentStage - 1] = mgr->replayInputs + 1;
         mgr->replayInputs->frameNum = mgr->frameId;
         mgr->replayInputs->inputKey = inputs;
+        mgr->replayInputs->analogX = aX;
+        mgr->replayInputs->analogY = aY;
     }
     mgr->frameId += 1;
     return CHAIN_CALLBACK_RESULT_CONTINUE;
@@ -739,7 +770,82 @@ ChainCallbackResult ReplayManager::OnUpdateDemoHighPrio(ReplayManager *mgr)
     const u16 previousHeldFrames = mgr->replayHeldFrames;
     const u16 liveUncapturedInput = IS_PRESSED(0xFFFFFFFF & ~TH_BUTTON_REPLAY_CAPTURE);
     LogReplayLiveInputLeak(mgr, liveUncapturedInput);
-    g_CurFrameInput = liveUncapturedInput | mgr->replayInputs->inputKey;
+
+    // Check per-frame displacement flag (bit 3 = TH_BUTTON_MENU).
+    const u16 replayInputKey = mgr->replayInputs->inputKey;
+    const bool isDisplacementFrame = (replayInputKey & TH_BUTTON_MENU) != 0;
+    // Strip the displacement flag before applying to game input.
+    g_CurFrameInput = liveUncapturedInput | (replayInputKey & ~TH_BUTTON_MENU);
+
+    // Restore analog direction from replay data (version >= 0x103 only).
+    // For old replays (0x102), the padding field may contain garbage,
+    // so we must NOT read it — the player will use discrete-only movement.
+    if (mgr->replayData->version >= REPLAY_VERSION_ANALOG)
+    {
+        i8 aX = mgr->replayInputs->analogX;
+        i8 aY = mgr->replayInputs->analogY;
+        if (isDisplacementFrame)
+        {
+            // Displacement mode: analog fields contain pixel delta (raw i8).
+            AnalogInput replayAnalog = {};
+            replayAnalog.x = static_cast<float>(aX);
+            replayAnalog.y = static_cast<float>(aY);
+            replayAnalog.active = true;
+            replayAnalog.mode = AnalogMode::Displacement;
+            Controller::SetAnalogInput(replayAnalog);
+        }
+        else if (aX != 0 || aY != 0)
+        {
+            AnalogInput replayAnalog;
+            replayAnalog.x = aX / 127.0f;
+            replayAnalog.y = aY / 127.0f;
+            replayAnalog.active = true;
+            Controller::SetAnalogInput(replayAnalog);
+        }
+        else
+        {
+            // Analog (0,0) from replay: no analog source was active during recording.
+            // Synthesize from button flags (same as live keyboard behavior).
+            AnalogInput noAnalog = {};
+            float dx = 0.0f, dy = 0.0f;
+            if (g_CurFrameInput & TH_BUTTON_LEFT)  dx -= 1.0f;
+            if (g_CurFrameInput & TH_BUTTON_RIGHT) dx += 1.0f;
+            if (g_CurFrameInput & TH_BUTTON_UP)    dy -= 1.0f;
+            if (g_CurFrameInput & TH_BUTTON_DOWN)  dy += 1.0f;
+            if (dx != 0.0f && dy != 0.0f)
+            {
+                constexpr float kInvSqrt2 = 0.70710678118f;
+                dx *= kInvSqrt2;
+                dy *= kInvSqrt2;
+            }
+            noAnalog.x = dx;
+            noAnalog.y = dy;
+            noAnalog.active = false;
+            Controller::SetAnalogInput(noAnalog);
+        }
+    }
+    else
+    {
+        // Old replay format (0x102): no analog data in the file.
+        // CRITICAL: Clear live analog state to prevent leak.
+        AnalogInput noAnalog = {};
+        float dx = 0.0f, dy = 0.0f;
+        if (g_CurFrameInput & TH_BUTTON_LEFT)  dx -= 1.0f;
+        if (g_CurFrameInput & TH_BUTTON_RIGHT) dx += 1.0f;
+        if (g_CurFrameInput & TH_BUTTON_UP)    dy -= 1.0f;
+        if (g_CurFrameInput & TH_BUTTON_DOWN)  dy += 1.0f;
+        if (dx != 0.0f && dy != 0.0f)
+        {
+            constexpr float kInvSqrt2 = 0.70710678118f;
+            dx *= kInvSqrt2;
+            dy *= kInvSqrt2;
+        }
+        noAnalog.x = dx;
+        noAnalog.y = dy;
+        noAnalog.active = false;
+        Controller::SetAnalogInput(noAnalog);
+    }
+
     g_IsEigthFrameOfHeldInput = 0;
     if (g_LastFrameInput == g_CurFrameInput)
     {
@@ -804,7 +910,7 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *mgr)
         memcpy(&mgr->replayData->magic[0], "T6RP", 4);
         mgr->replayData->shottypeChara = g_GameManager.character * 2 + g_GameManager.shotType;
         mgr->replayData->shottypeChara2 = g_GameManager.character2 * 2 + g_GameManager.shotType2;
-        mgr->replayData->version = 0x102;
+        mgr->replayData->version = REPLAY_VERSION_ANALOG;
         mgr->replayData->difficulty = g_GameManager.difficulty;
         utils::CopyStringToFixedField(mgr->replayData->name, sizeof(mgr->replayData->name), "NO NAME");
         for (idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->replayData->stageReplayData); idx += 1)
@@ -840,6 +946,7 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *mgr)
     mgr->replayInputs = stageReplayData->replayInputs;
     mgr->replayInputs->frameNum = 0;
     mgr->replayInputs->inputKey = 0;
+    mgr->replayInputs->padding = 0;  // analogX = analogY = 0 (no analog input)
     mgr->replayHeldFrames = 0;
     mgr->replayTraceFlags = 0;
     mgr->unk44 = 0;
