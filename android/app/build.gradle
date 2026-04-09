@@ -5,6 +5,15 @@ android {
     compileSdkVersion 34
     ndkVersion "21.4.7075529"
 
+    signingConfigs {
+        release {
+            storeFile file('../../android/th06-debug.keystore')
+            storePassword 'th06debug'
+            keyAlias 'th06'
+            keyPassword 'th06debug'
+        }
+    }
+
     defaultConfig {
         applicationId "com.th06.game"
         minSdkVersion 23
@@ -23,6 +32,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
         }
     }
     applicationVariants.all { variant ->
@@ -43,6 +53,38 @@ android {
     lint {
         abortOnError false
     }
+}
+
+// Sync game resources from Windows build directory to Android assets.
+// Run manually: ./gradlew syncGameAssets
+// Or it runs automatically before assembleRelease.
+task syncGameAssets {
+    def winBuildDir = file("${rootProject.projectDir}/../build_sdl2/Release")
+    def assetsDir = file('src/main/assets')
+    doLast {
+        if (!winBuildDir.exists()) {
+            logger.warn("Windows build dir not found: ${winBuildDir}")
+            return
+        }
+        // Sync DAT files
+        winBuildDir.listFiles()?.findAll { it.name.endsWith('.DAT') || it.name.endsWith('.dat') }?.each { datFile ->
+            copy { from datFile; into assetsDir }
+        }
+        // Sync BGM directory
+        def bgmSrc = new File(winBuildDir, 'BGM')
+        if (bgmSrc.exists()) {
+            copy { from bgmSrc; into new File(assetsDir, 'BGM') }
+        }
+        // Sync font: copy CONTENTS of font/ into assets/font/ (no nesting)
+        def fontSrc = new File(winBuildDir, 'font')
+        if (fontSrc.exists()) {
+            copy { from fontSrc; into new File(assetsDir, 'font') }
+        }
+    }
+}
+
+tasks.matching { it.name =~ /assemble.*Release/ }.configureEach {
+    dependsOn syncGameAssets
 }
 
 dependencies {
