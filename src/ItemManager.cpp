@@ -9,10 +9,22 @@
 #include "SoundPlayer.hpp"
 #include "utils.hpp"
 
+// Diagnostic for point item rendering bug
+#include <stdio.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#define ITEM_DIAG(fmt, ...) __android_log_print(ANDROID_LOG_WARN, "TH06_DIAG", fmt, ##__VA_ARGS__)
+#else
+extern FILE* _diag_get_file();
+#define ITEM_DIAG(fmt, ...) do { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } while(0)
+#endif
+
 #include "sdl2_compat.hpp"
+#include <SDL.h>
 
 namespace th06
 {
+
 DIFFABLE_STATIC(ItemManager, g_ItemManager);
 
 namespace
@@ -600,6 +612,25 @@ void ItemManager::OnDraw()
                 curItem->sprite.color = COLOR_WHITE;
             }
         }
+        // Diagnostic: log ALL item VM states to debug rendering failure
+        {
+            static i32 itemDiagCounter = 0;
+            itemDiagCounter++;
+            if (itemDiagCounter % 60 == 1)
+            {
+                ITEM_DIAG(
+                    "ITEM_ONDRAW type=%d activeSprite=%d isVis=%d flag1=%d color=0x%08X unk142=%d posY=%.1f srcFileIdx=%d",
+                    (int)curItem->itemType,
+                    (int)curItem->sprite.activeSpriteIndex,
+                    (int)curItem->sprite.flags.isVisible,
+                    (int)curItem->sprite.flags.flag1,
+                    (unsigned)curItem->sprite.color,
+                    (int)curItem->unk_142,
+                    curItem->currentPosition.y,
+                    curItem->sprite.sprite ? curItem->sprite.sprite->sourceFileIndex : -999);
+            }
+        }
+
         g_AnmManager->DrawNoRotation(&curItem->sprite);
     }
     return;

@@ -115,6 +115,23 @@ struct AnmManager
         this->currentSprite = sprite;
     }
 
+    void InvalidateDrawCaches()
+    {
+        this->currentTexture = (u32)-1;
+        this->currentBlendMode = 0xff;
+        this->currentColorOp = 0xff;
+        this->currentZWriteDisable = 0xff;
+        // NOTE: do NOT invalidate currentTextureFactor here.
+        // textureFactor is not GL state — it's a renderer-internal variable
+        // applied at draw time.  EndFrame never changes it, so the cache
+        // stays in sync with the renderer.  Setting it to (D3DCOLOR)-1
+        // (== 0xFFFFFFFF == white) would cause a false cache-hit when the
+        // first sprite of the next frame uses white, skipping SetTextureFactor
+        // and leaving the renderer with the previous frame's stale color.
+        this->currentSprite = nullptr;
+        this->currentVertexShader = 0xff;
+    }
+
     i32 ExecuteScript(AnmVm *vm);
     ZunResult Draw(AnmVm *vm);
     void DrawTextToSprite(u32 spriteDstIndex, i32 xPos, i32 yPos, i32 spriteWidth, i32 spriteHeight, i32 fontWidth,

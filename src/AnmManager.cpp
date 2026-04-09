@@ -1,6 +1,7 @@
 #include "AnmManager.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
+#include "IRenderer.hpp"
 #include "Rng.hpp"
 #include "Supervisor.hpp"
 #include "TextHelper.hpp"
@@ -8,8 +9,28 @@
 #include "i18n.hpp"
 #include "utils.hpp"
 
+// Diagnostic logging for point item texture bug investigation
 #include <stdio.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <GLES2/gl2.h>
+#define DIAG_LOG(fmt, ...) __android_log_print(ANDROID_LOG_WARN, "TH06_DIAG", fmt, ##__VA_ARGS__)
+#define DIAG_LOG_INFO(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "TH06_DIAG", fmt, ##__VA_ARGS__)
+#else
+#include <SDL_opengl.h>
+FILE* _diag_get_file() {
+    static FILE* f = nullptr;
+    if (!f) { f = fopen("diag_log.txt", "w"); }
+    return f;
+}
+#define DIAG_LOG(fmt, ...) do { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } while(0)
+#define DIAG_LOG_INFO(fmt, ...) do { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG_INFO] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } while(0)
+#endif
+
 #include <cmath>
+#include <SDL_image.h>
+
+#include <SDL.h>
 
 namespace th06
 {
@@ -203,10 +224,136 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, char *path, i32 spriteIdxOffset)
     anm->textureIdx = anmIdx;
 
     char *anmName = (char *)((u8 *)anm + anm->nameOffset);
+    bool alphaAlreadyMerged = false;
+
+    if (anmIdx == 6 || anmIdx == 4) // etama3 or stagebg
+    {
+        DIAG_LOG_INFO(
+            "LoadAnm idx=%d path=%s texName=%s numSprites=%d numScripts=%d "
+            "texW=%d texH=%d fmt=%u colorKey=0x%08X mipmapOff=%u",
+            anmIdx, path, anmName, anm->numSprites, anm->numScripts,
+            anm->width, anm->height, anm->format, anm->colorKey,
+            anm->mipmapNameOffset);
+    }
 
     if (*anmName == '@')
     {
         this->CreateEmptyTexture(anm->textureIdx, anm->width, anm->height, anm->format);
+    }
+    else if (anm->mipmapNameOffset != 0 && IsUsingGLES())
+    {
+        // GLES path: merge alpha on CPU before uploading to avoid fragile FBO readback.
+
+        // Load and decode main texture image
+        this->imageDataArray[anm->textureIdx] = FileSystem::OpenPath(anmName, 0);
+        if (this->imageDataArray[anm->textureIdx] == NULL)
+        {
+            GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_ANMMANAGER_TEXTURE_CORRUPTED, anmName);
+            return ZUN_ERROR;
+        }
+        i32 mainSize = (i32)g_LastFileSize;
+
+        SDL_RWops *rw1 = SDL_RWFromConstMem(this->imageDataArray[anm->textureIdx], mainSize);
+        SDL_Surface *mainSurf = rw1 ? IMG_Load_RW(rw1, 1) : NULL;
+        if (!mainSurf)
+        {
+            GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_ANMMANAGER_TEXTURE_CORRUPTED, anmName);
+            return ZUN_ERROR;
+        }
+        SDL_Surface *mainRgba = SDL_ConvertSurfaceFormat(mainSurf, SDL_PIXELFORMAT_RGBA32, 0);
+        SDL_FreeSurface(mainSurf);
+        if (!mainRgba)
+        {
+            GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_ANMMANAGER_TEXTURE_CORRUPTED, anmName);
+            return ZUN_ERROR;
+        }
+
+        // Apply colorKey transparency
+        if (anm->colorKey != 0)
+        {
+            u8 ckR = D3DCOLOR_R(anm->colorKey);
+            u8 ckG = D3DCOLOR_G(anm->colorKey);
+            u8 ckB = D3DCOLOR_B(anm->colorKey);
+            SDL_LockSurface(mainRgba);
+            u8 *pixels = (u8 *)mainRgba->pixels;
+            for (i32 i = 0; i < mainRgba->w * mainRgba->h; i++)
+            {
+                u8 *p = pixels + i * 4;
+                if (p[0] == ckR && p[1] == ckG && p[2] == ckB)
+                    p[3] = 0;
+                else
+                    p[3] = 255; // D3D8 forces non-key pixels to fully opaque
+            }
+            SDL_UnlockSurface(mainRgba);
+        }
+
+        // Load and decode alpha channel image
+        char *alphaName = (char *)((u8 *)anm + anm->mipmapNameOffset);
+        u8 *alphaData = FileSystem::OpenPath(alphaName, 0);
+        if (alphaData == NULL)
+        {
+            SDL_FreeSurface(mainRgba);
+            GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_ANMMANAGER_TEXTURE_CORRUPTED, alphaName);
+            return ZUN_ERROR;
+        }
+        i32 alphaSize = (i32)g_LastFileSize;
+        SDL_RWops *rw2 = SDL_RWFromConstMem(alphaData, alphaSize);
+        SDL_Surface *alphaSurf = rw2 ? IMG_Load_RW(rw2, 1) : NULL;
+        if (!alphaSurf)
+        {
+            free(alphaData);
+            SDL_FreeSurface(mainRgba);
+            GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_ANMMANAGER_TEXTURE_CORRUPTED, alphaName);
+            return ZUN_ERROR;
+        }
+        SDL_Surface *alphaRgba = SDL_ConvertSurfaceFormat(alphaSurf, SDL_PIXELFORMAT_RGBA32, 0);
+        SDL_FreeSurface(alphaSurf);
+
+        // Merge: copy blue channel of alpha image as alpha channel of main image.
+        if (alphaRgba)
+        {
+            i32 copyW = alphaRgba->w < mainRgba->w ? alphaRgba->w : mainRgba->w;
+            i32 copyH = alphaRgba->h < mainRgba->h ? alphaRgba->h : mainRgba->h;
+            SDL_LockSurface(mainRgba);
+            SDL_LockSurface(alphaRgba);
+
+            for (i32 y = 0; y < copyH; y++)
+            {
+                u8 *src = (u8 *)alphaRgba->pixels + y * alphaRgba->pitch;
+                u8 *dst = (u8 *)mainRgba->pixels + y * mainRgba->pitch;
+                for (i32 x = 0; x < copyW; x++)
+                    dst[x * 4 + 3] = src[x * 4 + 0]; // blue → alpha
+            }
+            SDL_UnlockSurface(alphaRgba);
+            SDL_UnlockSurface(mainRgba);
+            SDL_FreeSurface(alphaRgba);
+        }
+        free(alphaData);
+
+        // Upload merged texture directly — no FBO readback needed
+        GLuint tex;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mainRgba->w, mainRgba->h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, mainRgba->pixels);
+
+        // Restore the previously-bound texture, matching the behaviour of
+        // CreateTextureFromMemory / CreateEmptyTexture, so the renderer's
+        // currentTexture cache stays in sync with the actual GL binding.
+        u32 prevTex = g_Renderer->currentTexture;
+        if (prevTex != 0 && prevTex != (u32)-1)
+            glBindTexture(GL_TEXTURE_2D, prevTex);
+        else
+            glBindTexture(GL_TEXTURE_2D, 0);
+
+        SDL_FreeSurface(mainRgba);
+
+        this->textures[anm->textureIdx] = (u32)tex;
+        alphaAlreadyMerged = true;
     }
     else if (this->LoadTexture(anm->textureIdx, anmName, anm->format, anm->colorKey) != ZUN_SUCCESS)
     {
@@ -214,7 +361,14 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, char *path, i32 spriteIdxOffset)
         return ZUN_ERROR;
     }
 
-    if (anm->mipmapNameOffset != 0)
+    if (anmIdx == 6 || anmIdx == 4) // etama3 or stagebg
+    {
+        DIAG_LOG_INFO(
+            "LoadAnm idx=%d texture loaded: textures[%u]=%u alphaAlreadyMerged=%d",
+            anmIdx, anm->textureIdx, this->textures[anm->textureIdx], (int)alphaAlreadyMerged);
+    }
+
+    if (anm->mipmapNameOffset != 0 && !alphaAlreadyMerged)
     {
         anmName = (char *)((u8 *)anm + anm->mipmapNameOffset);
         if (this->LoadTextureAlphaChannel(anm->textureIdx, anmName, anm->format, anm->colorKey) != ZUN_SUCCESS)
@@ -244,12 +398,41 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, char *path, i32 spriteIdxOffset)
         loadedSprite.textureWidth = (float)anm->width;
         loadedSprite.textureHeight = (float)anm->height;
         this->LoadSprite(rawSprite->id + spriteIdxOffset, &loadedSprite);
+
+        // Log sprite data for etama3 (anmIdx==6) — items
+        if (anmIdx == 6)
+        {
+            DIAG_LOG_INFO(
+                "LoadAnm[%d] sprite raw_id=%u global_id=%u srcFileIdx=%d "
+                "px=[%.0f,%.0f]-[%.0f,%.0f] texSize=%dx%d",
+                anmIdx, rawSprite->id, rawSprite->id + spriteIdxOffset,
+                loadedSprite.sourceFileIndex,
+                rawSprite->offset.x, rawSprite->offset.y,
+                rawSprite->offset.x + rawSprite->size.x,
+                rawSprite->offset.y + rawSprite->size.y,
+                anm->width, anm->height);
+        }
     }
 
     for (index = 0; index < anm->numScripts; index++, curSpriteOffset += 2)
     {
         this->scripts[curSpriteOffset[0] + spriteIdxOffset] = (AnmRawInstr *)((u8 *)anm + curSpriteOffset[1]);
         this->spriteIndices[curSpriteOffset[0] + spriteIdxOffset] = spriteIdxOffset;
+
+        // Log script loading for etama3
+        if (anmIdx == 6)
+        {
+            u32 globalIdx = curSpriteOffset[0] + spriteIdxOffset;
+            AnmRawInstr *scriptPtr = this->scripts[globalIdx];
+            AnmRawInstr *rawInstrPtr = (AnmRawInstr *)((u8 *)anm + curSpriteOffset[1]);
+            DIAG_LOG_INFO(
+                "LoadAnm[6] script #%d raw_id=%u global_id=%u byteOff=%u "
+                "ptr=%p firstOpcode=%d firstTime=%d",
+                index, curSpriteOffset[0], globalIdx, curSpriteOffset[1],
+                (void *)scriptPtr,
+                scriptPtr ? (int)((const u8 *)scriptPtr)[2] : -1,
+                scriptPtr ? (int)((const i16 *)scriptPtr)[0] : -1);
+        }
     }
 
     this->anmFilesSpriteIndexOffsets[anmIdx] = spriteIdxOffset;
@@ -346,6 +529,14 @@ void AnmManager::SetAndExecuteScript(AnmVm *vm, AnmRawInstr *beginingOfScript)
 {
     ZunTimer *timer;
 
+    // Diagnostic for item scripts (global index 533-540)
+    if (vm->anmFileIndex >= 533 && vm->anmFileIndex <= 540)
+    {
+        DIAG_LOG_INFO(
+            "ITEM_SETEXEC idx=%d script_ptr=%p isNull=%d",
+            (int)vm->anmFileIndex, (void *)beginingOfScript, beginingOfScript == NULL);
+    }
+
     vm->flags.flip = 0;
     vm->Initialize();
     vm->beginingOfScript = beginingOfScript;
@@ -360,6 +551,16 @@ void AnmManager::SetAndExecuteScript(AnmVm *vm, AnmRawInstr *beginingOfScript)
     if (beginingOfScript)
     {
         this->ExecuteScript(vm);
+    }
+
+    // Post-execution diagnostic for item scripts
+    if (vm->anmFileIndex >= 533 && vm->anmFileIndex <= 540)
+    {
+        DIAG_LOG_INFO(
+            "ITEM_AFTEREXEC idx=%d isVis=%d flag1=%d activeSprite=%d color=0x%08X spritePtr=%p",
+            (int)vm->anmFileIndex, (int)vm->flags.isVisible, (int)vm->flags.flag1,
+            (int)vm->activeSpriteIndex, (unsigned)vm->color,
+            (void *)vm->sprite);
     }
 }
 
@@ -464,6 +665,38 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, i32 param_3)
         this->currentVertexShader = 2;
     }
     this->SetRenderStateForVm(vm);
+
+    // Diagnostic: log state for item sprites to identify
+    // the "background bleeding into point items" bug on Android Stage 1.
+    // 512=power, 513=point, 519=power_above, 520=point_above
+    if (vm->activeSpriteIndex >= 512 && vm->activeSpriteIndex <= 520)
+    {
+        static i32 diagFrameCounter = 0;
+        static i32 lastLoggedSprite = -1;
+        diagFrameCounter++;
+        // Log each sprite type once every ~2 seconds
+        if (diagFrameCounter % 120 == 1 || lastLoggedSprite != vm->activeSpriteIndex)
+        {
+            lastLoggedSprite = vm->activeSpriteIndex;
+            GLint glBoundTex = 0;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &glBoundTex);
+            DIAG_LOG(
+                "ITEM sprite=%d srcFileIdx=%d tex[srcIdx]=%u anmCurTex=%u rendCurTex=%u glBound=%d "
+                "uv=[%.4f,%.4f]-[%.4f,%.4f] color=0x%08X blend=%d colorOp=%d flags=0x%04X",
+                (int)vm->activeSpriteIndex,
+                vm->sprite->sourceFileIndex,
+                this->textures[vm->sprite->sourceFileIndex],
+                this->currentTexture,
+                g_Renderer->currentTexture,
+                glBoundTex,
+                vm->sprite->uvStart.x, vm->sprite->uvStart.y,
+                vm->sprite->uvEnd.x, vm->sprite->uvEnd.y,
+                (unsigned)vm->color,
+                (int)vm->flags.blendMode, (int)vm->flags.colorOp,
+                (unsigned)vm->flags.flags);
+        }
+    }
+
     if (((g_Supervisor.cfg.opts >> GCOS_DONT_USE_VERTEX_BUF) & 1) == 0)
     {
         g_Renderer->DrawTriangleStripTex(g_PrimitivesToDrawVertexBuf, 4);
