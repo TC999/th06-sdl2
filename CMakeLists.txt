@@ -152,6 +152,8 @@ endif()
 # 收集源文件 (排除原版构建专用文件和测试文件)
 set(TH06_GAME_SOURCES
     src/main.cpp
+    src/AndroidTouchInput.cpp
+    src/TouchVirtualButtons.cpp
     src/AnmManager.cpp
     src/AsciiManager.cpp
     src/AstroBot.cpp
@@ -213,6 +215,9 @@ set(TH06_GAME_SOURCES
     src/TextHelper.cpp
     src/utils.cpp
     src/WatchdogWin.cpp
+    src/WatchdogPosix.cpp
+    src/CrashHandlerPosix.cpp
+    src/CrashHandlerWin.cpp
     src/ZunTimer.cpp
     src/zwave.cpp
     # pbg3 文件解析库
@@ -269,11 +274,17 @@ endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_compile_options(th06 PRIVATE
         -m32                     # 强制32位编译 (文件格式和结构体布局依赖sizeof(void*)==4)
+        -fsigned-char            # ARM默认char为unsigned; 统一为signed以匹配x86和游戏逻辑
         -Wno-unknown-pragmas     # 忽略MSVC的 #pragma function / #pragma var_order
         $<$<COMPILE_LANGUAGE:CXX>:-fpermissive>         # 允许GCC不支持的MSVC兼容语法 (额外限定名, 取右值地址等)
-        $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning> # union成员名与类型名相同 (EclManager.hpp)
     )
     target_link_options(th06 PRIVATE -m32)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(th06 PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning> # union成员名与类型名相同 (EclManager.hpp)
+    )
 endif()
 
 # 包含目录
