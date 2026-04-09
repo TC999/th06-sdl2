@@ -41,3 +41,10 @@ android/app/libs/
 android/app/src/main/assets/
 android/local.properties
 android/cmake_test/
+android/*.keystore
+android/*.pasword.txt
+
+# AI/docs
+CLAUDE.md
+.vscode/
+blog/
