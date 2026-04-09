@@ -61,7 +61,8 @@ void AppendPortableValidationTraceLine(const char *phase)
     GamePaths::EnsureParentDir(resolvedLogPath);
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedLogPath, "a") != 0 || file == nullptr)
+    file = std::fopen(resolvedLogPath, "a");
+    if (file == nullptr)
     {
         return;
     }

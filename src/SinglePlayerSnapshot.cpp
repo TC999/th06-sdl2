@@ -221,7 +221,8 @@ void LogPortableLoadTrialResult(const char *status, const DGS::PortableGameplayB
     GamePaths::EnsureParentDir(resolvedLogPath);
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedLogPath, "a") == 0 && file != nullptr)
+    file = std::fopen(resolvedLogPath, "a");
+    if (file != nullptr)
     {
         std::fprintf(file, "%s", line);
         std::fflush(file);
@@ -250,7 +251,8 @@ void LogQuickSnapshotEvent(const char *tag, const char *detail)
     GamePaths::EnsureParentDir(resolvedLogPath);
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedLogPath, "a") == 0 && file != nullptr)
+    file = std::fopen(resolvedLogPath, "a");
+    if (file != nullptr)
     {
         std::fprintf(file, "%s", line);
         std::fflush(file);
@@ -276,7 +278,8 @@ void LogPortableSaveTrialResult(const char *status, size_t rawBytes, size_t byte
     GamePaths::EnsureParentDir(resolvedLogPath);
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedLogPath, "a") == 0 && file != nullptr)
+    file = std::fopen(resolvedLogPath, "a");
+    if (file != nullptr)
     {
         std::fprintf(file, "%s", line);
         std::fflush(file);
@@ -318,7 +321,8 @@ bool WritePortableSnapshotBytesToSaveFile(const std::vector<u8> &bytes, char *ou
     GamePaths::EnsureParentDir(resolvedDumpPath);
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedDumpPath, "wb") != 0 || file == nullptr)
+    file = std::fopen(resolvedDumpPath, "wb");
+    if (file == nullptr)
     {
         return false;
     }
@@ -360,7 +364,8 @@ bool ReadPortableSnapshotBytesFromSaveFile(std::vector<u8> &bytes, char *outPath
     GamePaths::Resolve(resolvedDumpPath, sizeof(resolvedDumpPath), "./Save/portable_state.bin");
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedDumpPath, "rb") != 0 || file == nullptr)
+    file = std::fopen(resolvedDumpPath, "rb");
+    if (file == nullptr)
     {
         return false;
     }
@@ -585,7 +590,8 @@ void LogPortableValidationResult(const char *status, uint64_t before, uint64_t a
     GamePaths::EnsureParentDir(resolvedLogPath);
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedLogPath, "a") != 0 || file == nullptr)
+    file = std::fopen(resolvedLogPath, "a");
+    if (file == nullptr)
     {
         return;
     }

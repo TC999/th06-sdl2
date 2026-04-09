@@ -409,7 +409,8 @@ void LogLine(const char *line)
     GamePaths::EnsureParentDir(resolvedLogPath);
 
     FILE *file = nullptr;
-    if (fopen_s(&file, resolvedLogPath, "a") == 0 && file != nullptr)
+    file = std::fopen(resolvedLogPath, "a");
+    if (file != nullptr)
     {
         std::fprintf(file, "%s\n", line);
         std::fflush(file);
@@ -1774,7 +1775,8 @@ bool ReadDiskBytes(const char *path, std::vector<u8> &bytes)
     }
 
     FILE *file = nullptr;
-    if (fopen_s(&file, path, "rb") != 0 || file == nullptr)
+    file = std::fopen(path, "rb");
+    if (file == nullptr)
     {
         return false;
     }

@@ -59,7 +59,7 @@ const char *GameErrorContext::Log(GameErrorContext *ctx, const char *fmt, ...)
     va_list args;
 
     va_start(args, fmt);
-    _vsnprintf(tmpBuffer, sizeof(tmpBuffer) - 1, fmt, args);
+    vsnprintf(tmpBuffer, sizeof(tmpBuffer) - 1, fmt, args);
     tmpBuffer[sizeof(tmpBuffer) - 1] = '\0';
 
     tmpBufferSize = strlen(tmpBuffer);
@@ -84,7 +84,7 @@ const char *GameErrorContext::Fatal(GameErrorContext *ctx, const char *fmt, ...)
     va_list args;
 
     va_start(args, fmt);
-    _vsnprintf(tmpBuffer, sizeof(tmpBuffer) - 1, fmt, args);
+    vsnprintf(tmpBuffer, sizeof(tmpBuffer) - 1, fmt, args);
     tmpBuffer[sizeof(tmpBuffer) - 1] = '\0';
 
     tmpBufferSize = strlen(tmpBuffer);
