@@ -11,6 +11,7 @@
 
 #include "MainMenu.hpp"
 
+#include "AndroidTouchInput.hpp"
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
 #include "ChainPriorities.hpp"
@@ -373,7 +374,8 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             g_GameManager.demoMode = 1;
             g_GameManager.demoFrames = 0;
             g_Supervisor.framerateMultiplier = 1.0;
-            strcpy(g_GameManager.replayFile, "data/demo/demo00.rpy");
+            strncpy((char *)g_GameManager.replayFile, "data/demo/demo00.rpy", sizeof(g_GameManager.replayFile) - 1);
+            g_GameManager.replayFile[sizeof(g_GameManager.replayFile) - 1] = '\0';
             g_GameManager.currentStage = 3;
             g_GameManager.difficulty = LUNATIC;
             g_Supervisor.curState = SUPERVISOR_STATE_GAMEMANAGER;
@@ -430,6 +432,11 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
     case STATE_KEYCONFIG:
         THPrac::TH06::THPracResetEndingShortcut();
         MoveCursor(menu, 11);
+        // Touch: tap on keyconfig item to select.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            AndroidTouchInput::TryTouchSelect(&menu->vm[34], 11, menu->cursor);
+        }
         vmList = &menu->vm[34];
         for (i = 0; i < 11; i++, vmList++)
         {
@@ -652,6 +659,13 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                 memcpy(vmList->posOffset, &pos3, sizeof(D3DXVECTOR3));
             }
         }
+        // Touch: tap on a difficulty item to select it directly.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            int diffCount = (g_GameManager.difficulty < 4) ? 4 : 1;
+            AnmVm *diffStart = (g_GameManager.difficulty < 4) ? &menu->vm[81] : &menu->vm[85];
+            AndroidTouchInput::TryTouchSelect(diffStart, diffCount, menu->cursor);
+        }
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
             menu->gameState = STATE_CHARACTER_LOAD;
@@ -822,6 +836,70 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
             break;
         }
+        // Touch: swipe left/right or tap to select a character.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            // Horizontal swipe → switch character.
+            float swipeDX;
+            if (AndroidTouchInput::ConsumeSwipeX(swipeDX))
+            {
+                int newChar = (swipeDX > 0) ? 1 : 0;
+                if (newChar != menu->cursor)
+                {
+                    menu->cursor = newChar;
+                    g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                    vmList = &menu->vm[86];
+                    for (i = 0; i < 2; i++, vmList++)
+                    {
+                        if (i == menu->cursor)
+                        {
+                            vmList->pendingInterrupt = (newChar == 0) ? 9 : 10;
+                            vmList++;
+                            vmList->pendingInterrupt = (newChar == 0) ? 9 : 10;
+                        }
+                        else
+                        {
+                            vmList->pendingInterrupt = (newChar == 0) ? 12 : 11;
+                            vmList++;
+                            vmList->pendingInterrupt = (newChar == 0) ? 12 : 11;
+                        }
+                    }
+                }
+            }
+            // Tap on character portrait.
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                // Character portraits are left/right halves of screen.
+                int tappedChar = (tapX >= 320.0f) ? 1 : 0;
+                if (menu->cursor == tappedChar)
+                {
+                    g_CurFrameInput |= TH_BUTTON_SHOOT;
+                    g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                }
+                else
+                {
+                    menu->cursor = tappedChar;
+                    g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                    vmList = &menu->vm[86];
+                    for (i = 0; i < 2; i++, vmList++)
+                    {
+                        if (i == menu->cursor)
+                        {
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
+                            vmList++;
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
+                        }
+                        else
+                        {
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
+                            vmList++;
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
+                        }
+                    }
+                }
+            }
+        }
         if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
         {
             menu->gameState = STATE_SHOT_SELECT;
@@ -920,6 +998,11 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         if (30 > menu->stateTimer)
         {
             break;
+        }
+        // Touch: tap on a shot type to select it directly.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            AndroidTouchInput::TryTouchSelect(&menu->vm[92 + g_GameManager.character * 2], 2, menu->cursor);
         }
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
@@ -1203,6 +1286,69 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                 }
             }
         }
+        // Touch: swipe left/right or tap to select character.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            // Horizontal swipe → switch character.
+            float swipeDX;
+            if (AndroidTouchInput::ConsumeSwipeX(swipeDX))
+            {
+                int newChar = (swipeDX > 0) ? 1 : 0;
+                if (newChar != menu->cursor)
+                {
+                    menu->cursor = newChar;
+                    g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                    vmList = &menu->vm[86];
+                    for (i = 0; i < 2; i++, vmList++)
+                    {
+                        if (i == menu->cursor)
+                        {
+                            vmList->pendingInterrupt = (newChar == 0) ? 9 : 10;
+                            vmList++;
+                            vmList->pendingInterrupt = (newChar == 0) ? 9 : 10;
+                        }
+                        else
+                        {
+                            vmList->pendingInterrupt = (newChar == 0) ? 12 : 11;
+                            vmList++;
+                            vmList->pendingInterrupt = (newChar == 0) ? 12 : 11;
+                        }
+                    }
+                }
+            }
+            // Tap on character portrait.
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                int tappedChar = (tapX >= 320.0f) ? 1 : 0;
+                if (menu->cursor == tappedChar)
+                {
+                    g_CurFrameInput |= TH_BUTTON_SHOOT;
+                    g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                }
+                else
+                {
+                    menu->cursor = tappedChar;
+                    g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                    vmList = &menu->vm[86];
+                    for (i = 0; i < 2; i++, vmList++)
+                    {
+                        if (i == menu->cursor)
+                        {
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
+                            vmList++;
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
+                        }
+                        else
+                        {
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
+                            vmList++;
+                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
+                        }
+                    }
+                }
+            }
+        }
     here2:
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
@@ -1348,6 +1494,11 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         {
             break;
         }
+        // Touch: tap on shot type to select.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            AndroidTouchInput::TryTouchSelect(&menu->vm[92 + g_GameManager.character2 * 2], 2, menu->cursor);
+        }
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
             menu->gameState = STATE_DIFFICULTY_SELECT;
@@ -1445,6 +1596,31 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         if (30 > menu->stateTimer)
         {
             break;
+        }
+        // Touch: tap on practice stage text row.
+        // ChoosePracticeLevel draws "STAGE N ..." at (320, 200 + stage*24).
+        if (AndroidTouchInput::IsEnabled())
+        {
+            float gx, gy;
+            if (AndroidTouchInput::ConsumeTap(gx, gy))
+            {
+                if (gx >= 280.0f && gx <= 560.0f && gy >= 200.0f && gy < 200.0f + chosenStage * 24.0f)
+                {
+                    int tapped = (int)((gy - 200.0f) / 24.0f);
+                    if (tapped >= 0 && tapped < chosenStage)
+                    {
+                        if (menu->cursor == tapped)
+                        {
+                            g_CurFrameInput |= TH_BUTTON_SHOOT;
+                            g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                        }
+                        else
+                        {
+                            menu->cursor = tapped;
+                        }
+                    }
+                }
+            }
         }
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
@@ -1710,6 +1886,17 @@ ZunBool MainMenu::WeirdSecondInputCheck()
         return true;
     }
 
+    // Touch: tap anywhere on the opening screen to enter main menu.
+    if (AndroidTouchInput::IsEnabled())
+    {
+        float gx, gy;
+        if (AndroidTouchInput::ConsumeTap(gx, gy))
+        {
+            g_CurFrameInput |= TH_BUTTON_SHOOT;
+            g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+        }
+    }
+
     if (!WAS_PRESSED_WEIRD(TH_BUTTON_SELECTMENU | TH_BUTTON_BOMB | TH_BUTTON_MENU))
     {
         return true;
@@ -1769,6 +1956,12 @@ ZunResult MainMenu::DrawStartMenu(void)
     }
     if (this->stateTimer >= 0x14)
     {
+        // Touch: tap on a main menu item to select it directly.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            AndroidTouchInput::TryTouchSelect(this->vm, 8, this->cursor);
+            AndroidTouchInput::TryTouchSelectRect(440.0f, 394.0f, 560.0f, 420.0f, 8, this->cursor);
+        }
         if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
         {
             switch (this->cursor)
@@ -1954,7 +2147,8 @@ i32 MainMenu::ReplayHandling()
                         continue;
                     }
                     this->replayFileData[replayFileIdx] = *replayData;
-                    strcpy(this->replayFilePaths[replayFileIdx], replayFilePath);
+                    strncpy(this->replayFilePaths[replayFileIdx], replayFilePath, sizeof(this->replayFilePaths[0]) - 1);
+                    this->replayFilePaths[replayFileIdx][sizeof(this->replayFilePaths[0]) - 1] = '\0';
                     sprintf(this->replayFileName[replayFileIdx], "No.%.2d", cur + 1);
                     replayFileIdx++;
                     free(replayData);
@@ -2051,6 +2245,33 @@ i32 MainMenu::ReplayHandling()
         {
             MoveCursor(this, this->replayFilesNum);
             this->chosenReplay = this->cursor;
+            // Touch: tap on a replay file to select it (wide rect hit area).
+            if (AndroidTouchInput::IsEnabled())
+            {
+                float tapX, tapY;
+                if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+                {
+                    for (int ri = 0; ri < this->replayFilesNum; ri++)
+                    {
+                        AnmVm *rowVm = &this->vm[99 + ri];
+                        float rowY = rowVm->pos.y + rowVm->posOffset.y;
+                        if (tapX >= 30.0f && tapX <= 610.0f && tapY >= rowY - 2.0f && tapY < rowY + 18.0f)
+                        {
+                            if (this->cursor == ri)
+                            {
+                                g_CurFrameInput |= TH_BUTTON_SHOOT;
+                                g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                            }
+                            else
+                            {
+                                this->cursor = ri;
+                            }
+                            this->chosenReplay = this->cursor;
+                            break;
+                        }
+                    }
+                }
+            }
             if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
             {
                 this->gameState = STATE_REPLAY_SELECT;
@@ -2134,11 +2355,42 @@ i32 MainMenu::ReplayHandling()
                 }
             }
         }
+        // Touch: tap on a replay stage row (vm[115..121]).
+        if (AndroidTouchInput::IsEnabled())
+        {
+            float gx, gy;
+            if (AndroidTouchInput::ConsumeTap(gx, gy))
+            {
+                for (cur = 0; cur < 7; cur++)
+                {
+                    AnmVm *stageVm = &this->vm[115 + cur];
+                    if (this->replayFileData[this->chosenReplay].stageReplayData[cur] == NULL)
+                        continue;
+                    // Hit-test using the vm position (text row ~18px tall, ~200px wide).
+                    float sy = stageVm->pos.y;
+                    float sx = stageVm->pos.x;
+                    if (gx >= sx - 10.0f && gx <= sx + 200.0f && gy >= sy - 2.0f && gy <= sy + 16.0f)
+                    {
+                        if (this->cursor == cur)
+                        {
+                            g_CurFrameInput |= TH_BUTTON_SHOOT;
+                            g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                        }
+                        else
+                        {
+                            this->cursor = cur;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         if (WAS_PRESSED(TH_BUTTON_SELECTMENU) && this->currentReplay[this->cursor].stageReplayData)
         {
             g_GameManager.isInReplay = 1;
             g_Supervisor.framerateMultiplier = 1.0;
-            strcpy(g_GameManager.replayFile, this->replayFilePaths[this->chosenReplay]);
+            strncpy((char *)g_GameManager.replayFile, this->replayFilePaths[this->chosenReplay], sizeof(g_GameManager.replayFile) - 1);
+            g_GameManager.replayFile[sizeof(g_GameManager.replayFile) - 1] = '\0';
             g_GameManager.difficulty = (Difficulty)this->currentReplay->difficulty;
             g_GameManager.character = this->currentReplay->shottypeChara / 2;
             g_GameManager.shotType = this->currentReplay->shottypeChara % 2;
@@ -2401,6 +2653,121 @@ u32 MainMenu::OnUpdateOptionsMenu()
     }
     if (this->stateTimer >= 32)
     {
+        // Touch: tap on an option item to move cursor (first tap) or confirm (second tap on same item).
+        // Also tap sub-items (value selectors) directly when cursor is on the correct row.
+        if (AndroidTouchInput::IsEnabled())
+        {
+            float gx, gy;
+            if (AndroidTouchInput::ConsumeTap(gx, gy))
+            {
+                bool handled = false;
+
+                // First, check sub-items for the currently selected row.
+                switch (this->cursor)
+                {
+                case CURSOR_OPTIONS_POS_LIFECOUNT:
+                    for (int t = 0; t < 5; t++)
+                    {
+                        if (AndroidTouchInput::VmContainsPoint(this->vm[14 + t], gx, gy))
+                        {
+                            g_Supervisor.cfg.lifeCount = t;
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                            handled = true;
+                            break;
+                        }
+                    }
+                    break;
+                case CURSOR_OPTIONS_POS_BOMBCOUNT:
+                    for (int t = 0; t < 4; t++)
+                    {
+                        if (AndroidTouchInput::VmContainsPoint(this->vm[19 + t], gx, gy))
+                        {
+                            g_Supervisor.cfg.bombCount = t;
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                            handled = true;
+                            break;
+                        }
+                    }
+                    break;
+                case CURSOR_OPTIONS_POS_COLORMODE:
+                    for (int t = 0; t < 2; t++)
+                    {
+                        if (AndroidTouchInput::VmContainsPoint(this->vm[23 + t], gx, gy))
+                        {
+                            g_Supervisor.cfg.colorMode16bit = t;
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                            handled = true;
+                            break;
+                        }
+                    }
+                    break;
+                case CURSOR_OPTIONS_POS_PLAYSOUNDS:
+                    for (int t = 0; t < 2; t++)
+                    {
+                        if (AndroidTouchInput::VmContainsPoint(this->vm[25 + t], gx, gy))
+                        {
+                            g_Supervisor.cfg.playSounds = t;
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                            handled = true;
+                            break;
+                        }
+                    }
+                    break;
+                case CURSOR_OPTIONS_POS_MUSICMODE:
+                    for (int t = 0; t < 3; t++)
+                    {
+                        if (AndroidTouchInput::VmContainsPoint(this->vm[77 + t], gx, gy))
+                        {
+                            g_Supervisor.StopAudio();
+                            g_Supervisor.cfg.musicMode = t;
+                            g_Supervisor.SetupMidiPlayback("bgm/th06_01.mid");
+                            g_Supervisor.PlayAudio("bgm/th06_01.mid");
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                            handled = true;
+                            break;
+                        }
+                    }
+                    break;
+                case CURSOR_OPTIONS_POS_SCREENMODE:
+                    for (int t = 0; t < 2; t++)
+                    {
+                        if (AndroidTouchInput::VmContainsPoint(this->vm[75 + t], gx, gy))
+                        {
+                            this->windowed = t;
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                            handled = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+                // If sub-item wasn't hit, check main label items.
+                if (!handled)
+                {
+                    AnmVm *optVms[] = {
+                        &this->vm[8], &this->vm[9], &this->vm[10], &this->vm[11], &this->vm[12],
+                        &this->vm[72], &this->vm[73], &this->vm[74], &this->vm[13]
+                    };
+                    for (int t = 0; t < 9; t++)
+                    {
+                        if (AndroidTouchInput::VmContainsPoint(*optVms[t], gx, gy))
+                        {
+                            if (this->cursor == t)
+                            {
+                                g_CurFrameInput |= TH_BUTTON_SHOOT;
+                                g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                            }
+                            else
+                            {
+                                this->cursor = t;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         if (WAS_PRESSED_WEIRD(TH_BUTTON_LEFT))
         {
             switch (this->cursor)

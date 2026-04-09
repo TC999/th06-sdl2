@@ -1,6 +1,7 @@
 #include "MusicRoom.hpp"
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
+#include "AndroidTouchInput.hpp"
 #include "Chain.hpp"
 #include "ChainPriorities.hpp"
 #include "Controller.hpp"
@@ -61,6 +62,52 @@ ZunBool MusicRoom::ProcessInput()
             if (this->listingOffset <= this->cursor - 10)
             {
                 this->listingOffset = this->cursor - 9;
+            }
+        }
+    }
+
+    // Touch: tap on a song row to select/confirm.
+    if (AndroidTouchInput::IsEnabled())
+    {
+        float gx, gy;
+        if (AndroidTouchInput::ConsumeTap(gx, gy))
+        {
+            // Song list rows: x≈[33,590], first row y=102, each 18px apart, 10 visible.
+            if (gx >= 33.0f && gx <= 590.0f && gy >= 102.0f && gy < 102.0f + 10 * 18.0f)
+            {
+                int row = (int)((gy - 102.0f) / 18.0f);
+                int newCursor = this->listingOffset + row;
+                if (newCursor >= 0 && newCursor < this->numDescriptors)
+                {
+                    if (this->cursor == newCursor)
+                    {
+                        g_CurFrameInput |= TH_BUTTON_SHOOT;
+                        g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                    }
+                    else
+                    {
+                        this->cursor = newCursor;
+                    }
+                }
+            }
+        }
+        // Swipe: scroll the song list.
+        float swipeDY;
+        if (AndroidTouchInput::ConsumeSwipeY(swipeDY))
+        {
+            int scrollRows = (int)(swipeDY / 18.0f);
+            if (scrollRows != 0)
+            {
+                this->cursor += scrollRows;
+                if (this->cursor < 0)
+                    this->cursor = 0;
+                else if (this->cursor >= this->numDescriptors)
+                    this->cursor = this->numDescriptors - 1;
+                // Update listingOffset to keep cursor visible.
+                if (this->listingOffset > this->cursor)
+                    this->listingOffset = this->cursor;
+                else if (this->listingOffset <= this->cursor - 10)
+                    this->listingOffset = this->cursor - 9;
             }
         }
     }

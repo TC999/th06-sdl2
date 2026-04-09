@@ -1,6 +1,7 @@
 #include "AsciiManager.hpp"
 #include "StageMenu.hpp"
 
+#include "AndroidTouchInput.hpp"
 #include "AnmManager.hpp"
 #include "ChainPriorities.hpp"
 #include "Controller.hpp"
@@ -155,6 +156,17 @@ ZunResult AsciiManager::AddedCallback(AsciiManager *s)
     {
         return ZUN_ERROR;
     }
+    // Fix edge-of-texture color bleed: sprites at the texture boundary (UV=1.0)
+    // get contaminated by wrapped pixels from the opposite edge with GL_REPEAT.
+    // Font textures have no tiling need, so use GL_CLAMP_TO_EDGE.
+    if (g_AnmManager->textures[ANM_FILE_ASCII] != 0)
+    {
+        glBindTexture(GL_TEXTURE_2D, g_AnmManager->textures[ANM_FILE_ASCII]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (g_Renderer->currentTexture != 0)
+            glBindTexture(GL_TEXTURE_2D, g_Renderer->currentTexture);
+    }
     if (g_AnmManager->LoadAnm(ANM_FILE_ASCIIS, "data/asciis.anm", ANM_OFFSET_ASCIIS) != ZUN_SUCCESS)
     {
         return ZUN_ERROR;
@@ -226,9 +238,8 @@ void AsciiManager::AddString(D3DXVECTOR3 *position, char *text)
 
     AsciiManagerString *curString = &this->strings[this->numStrings];
     this->numStrings += 1;
-    // Hello unguarded strcpy my old friend. If text is bigger than 64
-    // characters, kboom.
-    strcpy(curString->text, text);
+    strncpy(curString->text, text, sizeof(curString->text) - 1);
+    curString->text[sizeof(curString->text) - 1] = '\0';
     curString->position = *position;
     curString->color = this->color;
     curString->scale.x = this->scale.x;
@@ -502,6 +513,16 @@ i32 StageMenu::OnUpdateGameMenu()
             {
                 this->curState = GAME_MENU_PAUSE_CURSOR_QUIT;
             }
+            // Touch: tap on Unpause to confirm, or Quit to switch cursor.
+            if (AndroidTouchInput::IsEnabled())
+            {
+                int pauseCursor = 0;
+                if (AndroidTouchInput::TryTouchSelect(&this->menuSprites[GAME_MENU_SPRITE_CURSOR_UNPAUSE], 2, pauseCursor))
+                {
+                    if (pauseCursor == 1)
+                        this->curState = GAME_MENU_PAUSE_CURSOR_QUIT;
+                }
+            }
             if (WAS_PRESSED(TH_BUTTON_SHOOT))
             {
                 for (vmIdx = GAME_MENU_SPRITES_START_PAUSE; vmIdx < GAME_MENU_SPRITES_END_PAUSE; vmIdx++)
@@ -528,6 +549,16 @@ i32 StageMenu::OnUpdateGameMenu()
             if (WAS_PRESSED(TH_BUTTON_UP) || WAS_PRESSED(TH_BUTTON_DOWN))
             {
                 this->curState = GAME_MENU_PAUSE_CURSOR_UNPAUSE;
+            }
+            // Touch: tap on Unpause to switch cursor, or Quit to confirm.
+            if (AndroidTouchInput::IsEnabled())
+            {
+                int pauseCursor = 1;
+                if (AndroidTouchInput::TryTouchSelect(&this->menuSprites[GAME_MENU_SPRITE_CURSOR_UNPAUSE], 2, pauseCursor))
+                {
+                    if (pauseCursor == 0)
+                        this->curState = GAME_MENU_PAUSE_CURSOR_UNPAUSE;
+                }
             }
             if (WAS_PRESSED(TH_BUTTON_SHOOT))
             {
@@ -571,6 +602,16 @@ i32 StageMenu::OnUpdateGameMenu()
             {
                 this->curState = GAME_MENU_QUIT_CURSOR_NO;
             }
+            // Touch: tap on Yes or No.
+            if (AndroidTouchInput::IsEnabled())
+            {
+                int quitCursor = 0;
+                if (AndroidTouchInput::TryTouchSelect(&this->menuSprites[GAME_MENU_SPRITE_CURSOR_YES], 2, quitCursor))
+                {
+                    if (quitCursor == 1)
+                        this->curState = GAME_MENU_QUIT_CURSOR_NO;
+                }
+            }
             if (WAS_PRESSED(TH_BUTTON_SHOOT))
             {
                 for (vmIdx = GAME_MENU_SPRITES_START_QUIT; vmIdx < GAME_MENU_SPRITES_END_QUIT; vmIdx++)
@@ -596,6 +637,16 @@ i32 StageMenu::OnUpdateGameMenu()
             if (WAS_PRESSED(TH_BUTTON_UP) || WAS_PRESSED(TH_BUTTON_DOWN))
             {
                 this->curState = GAME_MENU_QUIT_CURSOR_YES;
+            }
+            // Touch: tap on Yes or No.
+            if (AndroidTouchInput::IsEnabled())
+            {
+                int quitCursor = 1;
+                if (AndroidTouchInput::TryTouchSelect(&this->menuSprites[GAME_MENU_SPRITE_CURSOR_YES], 2, quitCursor))
+                {
+                    if (quitCursor == 0)
+                        this->curState = GAME_MENU_QUIT_CURSOR_YES;
+                }
             }
             if (WAS_PRESSED(TH_BUTTON_SHOOT))
             {
@@ -689,6 +740,7 @@ i32 StageMenu::OnUpdateRetryMenu()
 
     if (g_GameManager.isInPracticeMode)
     {
+        SDL_Log("[retry] SKIPPED: isInPracticeMode=1");
         g_GameManager.isInRetryMenu = 0;
         g_GameManager.guiScore = g_GameManager.score;
         g_Supervisor.curState = SUPERVISOR_STATE_RESULTSCREEN_FROMGAME;
@@ -696,6 +748,7 @@ i32 StageMenu::OnUpdateRetryMenu()
     }
     if (g_GameManager.isInReplay)
     {
+        SDL_Log("[retry] SKIPPED: isInReplay=1");
         g_GameManager.isInRetryMenu = 0;
         g_Supervisor.curState = SUPERVISOR_STATE_MAINMENU_REPLAY;
         g_GameManager.guiScore = g_GameManager.score;
@@ -703,11 +756,14 @@ i32 StageMenu::OnUpdateRetryMenu()
     }
     if (g_GameManager.numRetries >= 3 || g_GameManager.difficulty >= EXTRA)
     {
+        SDL_Log("[retry] SKIPPED: numRetries=%d difficulty=%d", (int)g_GameManager.numRetries, (int)g_GameManager.difficulty);
         g_GameManager.isInRetryMenu = 0;
         g_Supervisor.curState = SUPERVISOR_STATE_RESULTSCREEN_FROMGAME;
         g_GameManager.guiScore = g_GameManager.score;
         return 1;
     }
+    SDL_Log("[retry] OnUpdateRetryMenu: curState=%d numFrames=%d input=0x%04x lastInput=0x%04x",
+            (int)this->curState, this->numFrames, (int)g_CurFrameInput, (int)g_LastFrameInput);
     switch (this->curState)
     {
     case RETRY_MENU_OPENING:
@@ -749,12 +805,23 @@ i32 StageMenu::OnUpdateRetryMenu()
         this->menuSprites[RETRY_MENU_SPRITE_NO].posOffset = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
         if (4 <= this->numFrames)
         {
+            if (AndroidTouchInput::IsEnabled())
+            {
+                int retryCursor = 0; // 0 = YES, 1 = NO
+                if (AndroidTouchInput::TryTouchSelect(&this->menuSprites[RETRY_MENU_SPRITE_YES], 2, retryCursor))
+                {
+                    if (retryCursor == 1)
+                        this->curState = RETRY_MENU_CURSOR_NO;
+                }
+            }
             if (WAS_PRESSED(TH_BUTTON_UP) || WAS_PRESSED(TH_BUTTON_DOWN))
             {
                 this->curState = RETRY_MENU_CURSOR_NO;
             }
             if (WAS_PRESSED(TH_BUTTON_SHOOT))
             {
+                SDL_Log("[retry] CURSOR_YES: SHOOT pressed! input=0x%04x lastInput=0x%04x numFrames=%d",
+                        (int)g_CurFrameInput, (int)g_LastFrameInput, this->numFrames);
                 for (idx = RETRY_MENU_SPRITES_START; idx < RETRY_MENU_SPRITES_END; idx++)
                 {
                     this->menuSprites[idx].pendingInterrupt = 2;
@@ -776,12 +843,23 @@ i32 StageMenu::OnUpdateRetryMenu()
         this->menuSprites[RETRY_MENU_SPRITE_YES].posOffset = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
         if (this->numFrames >= 30)
         {
+            if (AndroidTouchInput::IsEnabled())
+            {
+                int retryCursor = 1; // 0 = YES, 1 = NO
+                if (AndroidTouchInput::TryTouchSelect(&this->menuSprites[RETRY_MENU_SPRITE_YES], 2, retryCursor))
+                {
+                    if (retryCursor == 0)
+                        this->curState = RETRY_MENU_CURSOR_YES;
+                }
+            }
             if (WAS_PRESSED(TH_BUTTON_UP) || WAS_PRESSED(TH_BUTTON_DOWN))
             {
                 this->curState = RETRY_MENU_CURSOR_YES;
             }
             if (WAS_PRESSED(TH_BUTTON_SHOOT))
             {
+                SDL_Log("[retry] CURSOR_NO: SHOOT pressed! input=0x%04x lastInput=0x%04x numFrames=%d",
+                        (int)g_CurFrameInput, (int)g_LastFrameInput, this->numFrames);
                 for (idx = RETRY_MENU_SPRITES_START; idx < RETRY_MENU_SPRITES_END; idx++)
                 {
                     this->menuSprites[idx].pendingInterrupt = 2;

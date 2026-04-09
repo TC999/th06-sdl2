@@ -1,4 +1,5 @@
 #include "ResultScreen.hpp"
+#include "AndroidTouchInput.hpp"
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
 #include "BulletManager.hpp"
@@ -7,6 +8,7 @@
 #include "Controller.hpp"
 #include "FileSystem.hpp"
 #include "GameManager.hpp"
+#include "GamePaths.hpp"
 #include "Player.hpp"
 #include "ReplayManager.hpp"
 #include "Rng.hpp"
@@ -31,7 +33,7 @@ DIFFABLE_STATIC_ARRAY_ASSIGN(f32, 5, g_DifficultyWeightsList) = {-30.0f, -10.0f,
 DIFFABLE_STATIC_ASSIGN(u32, g_DefaultMagic) = 'DMYS';
 
 DIFFABLE_STATIC_ASSIGN(char *, g_AlphabetList) =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ.,:;･@abcdefghijklmnopqrstuvwxyz+-/*=%0123456789(){}[]<>#!?'\"$      --";
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ.,:;_@abcdefghijklmnopqrstuvwxyz+-/*=%0123456789(){}[]<>#!?'\"$      --";
 
 DIFFABLE_STATIC_ARRAY_ASSIGN(char *, 6, g_CharacterList) = {TH_HAKUREI_REIMU_SPIRIT,  TH_HAKUREI_REIMU_DREAM,
                                                             TH_KIRISAME_MARISA_DEVIL, TH_KIRISAME_MARISA_LOVE,
@@ -608,6 +610,45 @@ i32 ResultScreen::HandleResultKeyboard()
     {
         return 0;
     }
+    // Touch: virtual keyboard hit-test
+    {
+        float tapX, tapY;
+        if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+        {
+            const float kbLeft = 160.0f, kbTop = 356.0f;
+            const float cellW = 20.0f, cellH = 18.0f;
+            const float kbRight = kbLeft + RESULT_KEYBOARD_COLUMNS * cellW;
+            const float kbBottom = kbTop + RESULT_KEYBOARD_ROWS * cellH;
+
+            if (tapX >= kbLeft && tapX < kbRight && tapY >= kbTop && tapY < kbBottom)
+            {
+                int col = (int)((tapX - kbLeft) / cellW);
+                int row = (int)((tapY - kbTop) / cellH);
+                int charIdx = row * RESULT_KEYBOARD_COLUMNS + col;
+
+                if (charIdx >= 88 && charIdx <= 93)
+                {
+                    // Empty cells on last row → Backspace
+                    g_CurFrameInput |= TH_BUTTON_BOMB;
+                    g_LastFrameInput &= ~TH_BUTTON_BOMB;
+                }
+                else if (charIdx >= 0 && charIdx < RESULT_KEYBOARD_CHARACTERS &&
+                         g_AlphabetList[charIdx] != ' ')
+                {
+                    if (this->selectedCharacter == charIdx)
+                    {
+                        g_CurFrameInput |= TH_BUTTON_SHOOT;
+                        g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                    }
+                    else
+                    {
+                        this->selectedCharacter = charIdx;
+                        g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                    }
+                }
+            }
+        }
+    }
     if (WAS_PRESSED_WEIRD(TH_BUTTON_UP))
     {
         for (;;)
@@ -716,6 +757,11 @@ i32 ResultScreen::HandleResultKeyboard()
         g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
     }
 
+    if (WAS_PRESSED(TH_BUTTON_SKIP))
+    {
+        goto RETURN_TO_STATS_SCREEN;
+    }
+
     if (WAS_PRESSED_WEIRD(TH_BUTTON_RETURNMENU))
     {
         replayNameIdx2 = this->cursor >= 8 ? 7 : this->cursor;
@@ -807,6 +853,7 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
         {
             return 0;
         }
+        AndroidTouchInput::TryTouchSelect(&this->unk_40[16], 2, this->cursor);
         ResultScreen::MoveCursorHorizontally(this, 2);
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU) || WAS_PRESSED(TH_BUTTON_MENU))
         {
@@ -851,6 +898,16 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
             return 0;
         }
 
+        // Touch: any tap to dismiss
+        {
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                g_CurFrameInput |= TH_BUTTON_SHOOT;
+                g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+            }
+        }
+
         if (WAS_PRESSED(TH_BUTTON_SELECTMENU) || WAS_PRESSED(TH_BUTTON_RETURNMENU))
         {
 
@@ -871,10 +928,12 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
 
         if (this->frameTimer == 0)
         {
+            char replayDir[512];
+            GamePaths::Resolve(replayDir, sizeof(replayDir), "./replay");
 #ifdef _WIN32
-            _mkdir("replay");
+            _mkdir(replayDir);
 #else
-            mkdir("replay", 0755);
+            mkdir(replayDir, 0755);
 #endif
             for (idx = 0; idx < ARRAY_SIZE_SIGNED(this->replays); idx++)
             {
@@ -894,6 +953,32 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
             return 0;
         }
 
+        // Touch: tap on a replay row (use wide rect based on sprite Y position).
+        if (AndroidTouchInput::IsEnabled())
+        {
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                for (idx = 0; idx < 15; idx++)
+                {
+                    AnmVm *rowVm = &this->unk_40[22 + idx];
+                    float rowY = rowVm->pos.y + rowVm->posOffset.y;
+                    if (tapX >= 30.0f && tapX <= 610.0f && tapY >= rowY - 2.0f && tapY < rowY + 18.0f)
+                    {
+                        if (this->cursor == idx)
+                        {
+                            g_CurFrameInput |= TH_BUTTON_SHOOT;
+                            g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                        }
+                        else
+                        {
+                            this->cursor = idx;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         MoveCursor(this, 15);
         this->replayNumber = this->cursor;
         if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
@@ -912,7 +997,7 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
 #endif
             (this->defaultReplay).score = g_GameManager.score;
             if (memcmp(this->replays[this->cursor].magic, "T6RP", 4) != 0 ||
-                this->replays[this->cursor].version != GAME_VERSION)
+                !IsValidReplayVersion(this->replays[this->cursor].version))
             {
                 sprite = &this->unk_40[0];
                 for (idx = 0; idx < ARRAY_SIZE_SIGNED(this->unk_40); idx++, sprite++)
@@ -953,6 +1038,45 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
         if (this->frameTimer < 30)
         {
             return 0;
+        }
+        // Touch: virtual keyboard hit-test
+        {
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                const float kbLeft = 160.0f, kbTop = 356.0f;
+                const float cellW = 20.0f, cellH = 18.0f;
+                const float kbRight = kbLeft + RESULT_KEYBOARD_COLUMNS * cellW;
+                const float kbBottom = kbTop + RESULT_KEYBOARD_ROWS * cellH;
+
+                if (tapX >= kbLeft && tapX < kbRight && tapY >= kbTop && tapY < kbBottom)
+                {
+                    int col = (int)((tapX - kbLeft) / cellW);
+                    int row = (int)((tapY - kbTop) / cellH);
+                    int charIdx = row * RESULT_KEYBOARD_COLUMNS + col;
+
+                    if (charIdx >= 88 && charIdx <= 93)
+                    {
+                        // Empty cells on last row → Backspace
+                        g_CurFrameInput |= TH_BUTTON_BOMB;
+                        g_LastFrameInput &= ~TH_BUTTON_BOMB;
+                    }
+                    else if (charIdx >= 0 && charIdx < RESULT_KEYBOARD_CHARACTERS &&
+                             g_AlphabetList[charIdx] != ' ')
+                    {
+                        if (this->selectedCharacter == charIdx)
+                        {
+                            g_CurFrameInput |= TH_BUTTON_SHOOT;
+                            g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+                        }
+                        else
+                        {
+                            this->selectedCharacter = charIdx;
+                            g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+                        }
+                    }
+                }
+            }
         }
         if (WAS_PRESSED_WEIRD(TH_BUTTON_UP))
         {
@@ -1069,6 +1193,21 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
             g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
         }
 
+        if (WAS_PRESSED(TH_BUTTON_SKIP))
+        {
+            sprintf(replayPath, "./replay/th6_%.2d.rpy", this->replayNumber + 1);
+            ReplayManager::SaveReplay(replayPath, this->replayName);
+            this->frameTimer = 0;
+            this->resultScreenState = RESULT_SCREEN_STATE_EXITING;
+            sprite = &this->unk_40[0];
+            for (idx = 0; idx < ARRAY_SIZE_SIGNED(this->unk_40); idx++, sprite++)
+            {
+                sprite->pendingInterrupt = 2;
+            }
+            g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+            break;
+        }
+
         if (WAS_PRESSED_WEIRD(TH_BUTTON_RETURNMENU))
         {
             replayNameCharacter2 = this->cursor >= 8 ? 7 : this->cursor;
@@ -1103,6 +1242,7 @@ i32 ResultScreen::HandleReplaySaveKeyboard()
         {
             return 0;
         }
+        AndroidTouchInput::TryTouchSelect(&this->unk_40[16], 2, this->cursor);
         MoveCursorHorizontally(this, 2);
 
         if (WAS_PRESSED(TH_BUTTON_RETURNMENU) || WAS_PRESSED(TH_BUTTON_MENU))
@@ -1193,6 +1333,16 @@ ZunResult ResultScreen::CheckConfirmButton()
         {
             viewport = &this->unk_40[37];
             viewport->pendingInterrupt = 16;
+        }
+        // Touch: any tap to continue
+        if (this->frameTimer >= 90)
+        {
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                g_CurFrameInput |= TH_BUTTON_SHOOT;
+                g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+            }
         }
         if (this->frameTimer >= 90 && WAS_PRESSED(TH_BUTTON_SELECTMENU))
         {
@@ -1461,6 +1611,7 @@ ChainCallbackResult ResultScreen::OnUpdate(ResultScreen *resultScreen)
 
     case RESULT_SCREEN_STATE_CHOOSING_DIFFICULTY:
 
+        AndroidTouchInput::TryTouchSelect(&resultScreen->unk_40[1], 7, resultScreen->cursor);
         ResultScreen::MoveCursor(resultScreen, 7);
 
         vm = &resultScreen->unk_40[1];
@@ -1632,6 +1783,30 @@ ChainCallbackResult ResultScreen::OnUpdate(ResultScreen *resultScreen)
         {
             break;
         }
+        // Touch: tap left half for character A, right half for character B
+        {
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                int tappedChar = (tapX >= 320.0f) ? 1 : 0;
+                if (resultScreen->cursor == tappedChar)
+                {
+                    // Back to difficulty selection
+                    g_CurFrameInput |= TH_BUTTON_BOMB;
+                    g_LastFrameInput &= ~TH_BUTTON_BOMB;
+                }
+                else
+                {
+                    resultScreen->cursor = tappedChar;
+                    resultScreen->frameTimer = 0;
+                    vm = &resultScreen->unk_40[0];
+                    for (i = 0; i < ARRAY_SIZE_SIGNED(resultScreen->unk_40); i++, vm++)
+                    {
+                        vm->pendingInterrupt = resultScreen->diffSelected + 3;
+                    }
+                }
+            }
+        }
         if (ResultScreen::MoveCursorHorizontally(resultScreen, 2))
         {
             resultScreen->frameTimer = 0;
@@ -1684,6 +1859,30 @@ ChainCallbackResult ResultScreen::OnUpdate(ResultScreen *resultScreen)
         if (resultScreen->frameTimer < 30)
         {
             break;
+        }
+        // Touch: tap left half for prev page, right half for next page
+        {
+            float tapX, tapY;
+            if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+            {
+                if (tapX >= 320.0f)
+                {
+                    resultScreen->cursor++;
+                    if (resultScreen->cursor >= 7) resultScreen->cursor = 0;
+                }
+                else
+                {
+                    resultScreen->cursor--;
+                    if (resultScreen->cursor < 0) resultScreen->cursor = 6;
+                }
+                resultScreen->frameTimer = 0;
+                vm = &resultScreen->unk_40[0];
+                for (i = 0; i < ARRAY_SIZE_SIGNED(resultScreen->unk_40); i++, vm++)
+                {
+                    vm->pendingInterrupt = resultScreen->diffSelected + 3;
+                }
+                g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
+            }
         }
         if (ResultScreen::MoveCursorHorizontally(resultScreen, 7))
         {
@@ -1976,7 +2175,15 @@ ChainCallbackResult th06::ResultScreen::OnDraw(ResultScreen *resultScreen)
 
                 if (row == 5)
                 {
-                    if (column == 14)
+                    if (column == 10)
+                    {
+                        keyboardCharacter[0] = 'B'; // BS label (part 1)
+                    }
+                    else if (column == 11)
+                    {
+                        keyboardCharacter[0] = 'S'; // BS label (part 2)
+                    }
+                    else if (column == 14)
                     {
                         keyboardCharacter[0] = 0x80; // SP
                     }
@@ -2038,7 +2245,7 @@ ChainCallbackResult th06::ResultScreen::OnDraw(ResultScreen *resultScreen)
                 g_AsciiManager.AddFormatText(spritePos.AsD3dXVec(), "      %8s", &name);
             }
             else if (memcmp(resultScreen->replays[row].magic, "T6RP", 4) != 0 ||
-                     resultScreen->replays[row].version != GAME_VERSION)
+                     !IsValidReplayVersion(resultScreen->replays[row].version))
             {
                 g_AsciiManager.AddFormatText(spritePos.AsD3dXVec(), "No.%.2d -------- --/--/-- -------         0",
                                              row + 1);
@@ -2140,7 +2347,8 @@ ZunResult ResultScreen::AddedCallback(ResultScreen *resultScreen)
 
                 resultScreen->LinkScoreEx(resultScreen->defaultScore[i][characterShot] + slot, i, characterShot);
 
-                strcpy(resultScreen->defaultScore[i][characterShot][slot].name, DEFAULT_HIGH_SCORE_NAME);
+                strncpy(resultScreen->defaultScore[i][characterShot][slot].name, DEFAULT_HIGH_SCORE_NAME, sizeof(resultScreen->defaultScore[0][0][0].name) - 1);
+                resultScreen->defaultScore[i][characterShot][slot].name[sizeof(resultScreen->defaultScore[0][0][0].name) - 1] = '\0';
             }
         }
     }
