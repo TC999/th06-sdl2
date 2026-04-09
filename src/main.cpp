@@ -6,6 +6,7 @@
 #include "AnmManager.hpp"
 #include "Chain.hpp"
 #include "Controller.hpp"
+#include "CrashHandler.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GamePaths.hpp"
@@ -81,6 +82,8 @@ int main(int argc, char *argv[])
 #endif
 
     GamePaths::Init();
+
+    CrashHandler::Init();
 
     if (g_Supervisor.LoadConfig(TH_CONFIG_FILE) != ZUN_SUCCESS)
     {
@@ -203,6 +206,7 @@ stop:
 
     SDL_ShowCursor(SDL_ENABLE);
     g_GameErrorContext.Flush();
+    CrashHandler::Shutdown();
     SDL_Quit();
     return 0;
 }

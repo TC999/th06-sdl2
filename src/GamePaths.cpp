@@ -20,17 +20,31 @@ static char s_userPath[512] = "";
 void Init()
 {
 #ifdef __ANDROID__
-    const char *internalPath = SDL_AndroidGetInternalStoragePath();
-    if (internalPath)
+    // Use external storage (/storage/emulated/0/Android/data/{pkg}/files/)
+    // so save files are accessible via file manager and persist across app updates.
+    const char *extPath = SDL_AndroidGetExternalStoragePath();
+    if (extPath)
     {
-        snprintf(s_userPath, sizeof(s_userPath), "%s/", internalPath);
+        snprintf(s_userPath, sizeof(s_userPath), "%s/", extPath);
         SDL_Log("GamePaths: user data path = %s", s_userPath);
     }
     else
     {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "GamePaths: SDL_AndroidGetInternalStoragePath() returned NULL, using cwd");
-        s_userPath[0] = '\0';
+        // Fallback: internal storage if external is unavailable.
+        const char *internalPath = SDL_AndroidGetInternalStoragePath();
+        if (internalPath)
+        {
+            snprintf(s_userPath, sizeof(s_userPath), "%s/", internalPath);
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "GamePaths: external storage unavailable, falling back to internal: %s",
+                        s_userPath);
+        }
+        else
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "GamePaths: both external and internal storage unavailable, using cwd");
+            s_userPath[0] = '\0';
+        }
     }
 #else
     // Desktop: all files relative to the working directory.
