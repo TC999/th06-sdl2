@@ -8,9 +8,9 @@ android {
     signingConfigs {
         release {
             storeFile file('../../android/th06-debug.keystore')
-            storePassword 'th06debug'
+            storePassword System.getenv("TH06_STORE_PASSWORD") ?: ''
             keyAlias 'th06'
-            keyPassword 'th06debug'
+            keyPassword System.getenv("TH06_KEY_PASSWORD") ?: ''
         }
     }
 
