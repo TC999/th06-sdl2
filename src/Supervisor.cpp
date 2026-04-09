@@ -614,7 +614,8 @@ i32 Supervisor::LoadPbg3(i32 pbg3FileIdx, char *filename)
 
         if (loadResult != 0)
         {
-            strcpy(this->pbg3ArchiveNames[pbg3FileIdx], filename);
+            strncpy(this->pbg3ArchiveNames[pbg3FileIdx], filename, sizeof(Pbg3ArchiveName) - 1);
+            this->pbg3ArchiveNames[pbg3FileIdx][sizeof(Pbg3ArchiveName) - 1] = '\0';
 
             char verPath[128];
             sprintf(verPath, "ver%.4x.dat", GAME_VERSION);
@@ -865,8 +866,10 @@ ZunResult Supervisor::PlayAudio(char *path)
     }
     else if (g_Supervisor.cfg.musicMode == WAV)
     {
-        strcpy(wavName, path);
-        strcpy(wavPos, path);
+        strncpy(wavName, path, sizeof(wavName) - 1);
+        wavName[sizeof(wavName) - 1] = '\0';
+        strncpy(wavPos, path, sizeof(wavPos) - 1);
+        wavPos[sizeof(wavPos) - 1] = '\0';
         pathExtension = strrchr(wavName, L'.');
         pathExtension[1] = 'w';
         pathExtension[2] = 'a';

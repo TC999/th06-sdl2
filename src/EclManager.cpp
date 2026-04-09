@@ -935,7 +935,8 @@ ZunResult EclManager::RunEcl(Enemy *enemy)
                 csum = 0;
                 if (!g_GameManager.isInReplay)
                 {
-                    strcpy(local_70->name, RAW_ARG_PTR(char, EclRawInstrSpellcardStartArgs, spellcardName));
+                    strncpy(local_70->name, RAW_ARG_PTR(char, EclRawInstrSpellcardStartArgs, spellcardName), sizeof(local_70->name) - 1);
+                    local_70->name[sizeof(local_70->name) - 1] = '\0';
                     local_74 = strlen(local_70->name);
                     while (0 < local_74)
                     {
