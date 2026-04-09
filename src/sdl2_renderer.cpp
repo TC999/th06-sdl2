@@ -59,6 +59,13 @@ static bool LoadFBOExtensions()
            glFramebufferRenderbufferEXT_ && glCheckFramebufferStatusEXT_;
 }
 
+// Diagnostic file helper for Windows builds
+FILE* _diag_get_file_sdl() {
+    static FILE* f = nullptr;
+    if (!f) { f = fopen("diag_log.txt", "a"); }
+    return f;
+}
+
 namespace th06
 {
 
@@ -718,6 +725,10 @@ GLuint RendererGL::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR
             {
                 p[3] = 0;
             }
+            else
+            {
+                p[3] = 255; // D3D8 forces non-key pixels to fully opaque
+            }
         }
         SDL_UnlockSurface(rgba);
     }
@@ -732,6 +743,36 @@ GLuint RendererGL::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+    // Diagnostic: dump alpha values at key positions for texture analysis
+    {
+        static i32 texLoadCount = 0;
+        texLoadCount++;
+        SDL_LockSurface(rgba);
+        u8 *px = (u8 *)rgba->pixels;
+        // Use same diag file as AnmManager
+        extern FILE* _diag_get_file_sdl();
+        FILE* _df = _diag_get_file_sdl();
+        if (_df) fprintf(_df, "[TH06_DIAG] CreateTex #%d size=%dx%d colorKey=0x%08X\n",
+            texLoadCount, rgba->w, rgba->h, (unsigned)colorKey);
+        for (i32 by = 0; by < 4 && by * 16 < rgba->h; by++) {
+            char buf[512];
+            int pos = 0;
+            for (i32 bx = 0; bx < 16 && bx * 16 < rgba->w; bx++) {
+                i32 cx = bx * 16 + 8;
+                i32 cy = by * 16 + 8;
+                if (cx < rgba->w && cy < rgba->h) {
+                    u8 *p = px + cy * rgba->pitch + cx * 4;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "[%d,%d]=%02X%02X%02X.%02X ", bx, by, p[0], p[1], p[2], p[3]);
+                }
+            }
+            if (_df) fprintf(_df, "[TH06_DIAG]   row%d: %s\n", by, buf);
+        }
+        if (_df) fflush(_df);
+        SDL_UnlockSurface(rgba);
+    }
+
     UploadRgbaSurface(tex, rgba);
 
     SDL_FreeSurface(rgba);
@@ -1214,11 +1255,15 @@ void RendererGL::EndFrame()
     }
     else
     {
-        // Non-FBO path: render ImGui directly to the screen
+        // Non-FBO path: render ImGui directly to the screen.
+        // Push/pop all GL state so ImGui rendering doesn't desync the
+        // renderer's dirty-flag caches from actual GL state.
+        glPushAttrib(GL_ALL_ATTRIB_BITS);
         glDisable(GL_ALPHA_TEST);
         glDisable(GL_FOG);
         THPrac::THPracGuiRender();
         SDL_GL_SwapWindow(this->window);
+        glPopAttrib();
     }
 }
 

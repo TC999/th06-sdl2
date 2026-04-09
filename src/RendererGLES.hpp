@@ -223,6 +223,7 @@ struct RendererGLES : public IRenderer
 
     // Internal helpers
     void BlitFBOToScreen();
+    void DrawScreenSpaceButtons();
     void UploadUniforms();
     void UploadMVP();
     void DrawArrays(GLenum mode, const f32 *positions, const f32 *colors, const f32 *texcoords, i32 vertCount);

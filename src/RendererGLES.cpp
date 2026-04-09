@@ -6,12 +6,17 @@
 #include "RendererGLES.hpp"
 #include "AnmManager.hpp"
 #include "Supervisor.hpp"
+#include "TouchVirtualButtons.hpp"
 #include "thprac_gui_integration.h"
 #include "gles_shaders.h"
 #include <SDL_image.h>
 #include <cstring>
 #include <cstdio>
 #include <vector>
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // GL 2.0 shader / FBO function pointers (loaded via SDL_GL_GetProcAddress)
@@ -870,6 +875,8 @@ void RendererGLES::SetWorldTransform(const D3DXMATRIX *matrix)
 
 void RendererGLES::SetTextureTransform(const D3DXMATRIX *matrix)
 {
+    if (memcmp(&this->textureMatrix, matrix, sizeof(*matrix)) == 0)
+        return;
     if (this->batch3DQuadCount != 0)
         Flush3DBatch(Flush3D_State);
     this->textureMatrix = *matrix;
@@ -1125,6 +1132,15 @@ void RendererGLES::FlushBatch(Flush2DReason reason)
         this->fogAttribEnabled = false;
     }
 
+    // 2D sprites use GL_NEAREST filtering, matching the desktop renderer's
+    // ApplySamplerFor2D().  Without this, GL_LINEAR (the default for game
+    // textures) creates sub-pixel blending at sprite-atlas edges, producing
+    // semi-transparent fringe pixels.  Combined with no per-frame FBO clear,
+    // the previous frame's background "leaks through" those fringes via
+    // alpha blending.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
     pglVertexAttribPointer(this->loc_a_Position, 3, GL_FLOAT,
                            GL_FALSE, stride, (void *)0);
     pglVertexAttribPointer(this->loc_a_Color, 4, GL_UNSIGNED_BYTE,
@@ -1136,6 +1152,10 @@ void RendererGLES::FlushBatch(Flush2DReason reason)
     glDrawElements(GL_TRIANGLES, this->batchQuadCount * 6,
                    GL_UNSIGNED_SHORT, 0);
     pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    // Restore GL_LINEAR for subsequent 3D draws / other texture usage.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     this->stats.drawCalls++;
     this->stats.batch2DFlushes++;
@@ -1677,6 +1697,8 @@ u32 RendererGLES::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR 
             u8 *p = pixels + i * 4;
             if (p[0] == ckR && p[1] == ckG && p[2] == ckB)
                 p[3] = 0;
+            else
+                p[3] = 255; // D3D8 forces non-key pixels to fully opaque
         }
         SDL_UnlockSurface(rgba);
     }
@@ -1694,6 +1716,36 @@ u32 RendererGLES::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR 
     this->stats.textureBinds++;
     this->stats.textureUploads++;
     this->stats.textureUploadBytes += (u64)rgba->w * rgba->h * 4;
+
+#ifdef __ANDROID__
+    // Diagnostic: dump alpha values at key positions for texture analysis
+    {
+        static i32 texLoadCount = 0;
+        texLoadCount++;
+        SDL_LockSurface(rgba);
+        u8 *px = (u8 *)rgba->pixels;
+        __android_log_print(ANDROID_LOG_INFO, "TH06_DIAG",
+            "CreateTex #%d size=%dx%d colorKey=0x%08X",
+            texLoadCount, rgba->w, rgba->h, (unsigned)colorKey);
+        // Dump RGBA at center of each 16x16 block in first 4 rows
+        for (i32 by = 0; by < 4 && by * 16 < rgba->h; by++) {
+            char buf[512];
+            int pos = 0;
+            for (i32 bx = 0; bx < 16 && bx * 16 < rgba->w; bx++) {
+                i32 cx = bx * 16 + 8;
+                i32 cy = by * 16 + 8;
+                if (cx < rgba->w && cy < rgba->h) {
+                    u8 *p = px + cy * rgba->pitch + cx * 4;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "[%d,%d]=%02X%02X%02X.%02X ", bx, by, p[0], p[1], p[2], p[3]);
+                }
+            }
+            __android_log_print(ANDROID_LOG_INFO, "TH06_DIAG", "  row%d: %s", by, buf);
+        }
+        SDL_UnlockSurface(rgba);
+    }
+#endif
+
     UploadRgbaSurface(tex, rgba);
     SDL_FreeSurface(rgba);
 
@@ -2004,7 +2056,188 @@ void RendererGLES::TakeScreenshot(u32 dstTex, i32 left, i32 top, i32 width, i32 
     delete[] flipped;
 }
 
-// continued below — BlitFBOToScreen / EndFrame
+// continued below — DrawScreenSpaceButtons / EndFrame
+
+void RendererGLES::DrawScreenSpaceButtons()
+{
+    TouchButtonInfo buttons[4];
+    int count = TouchVirtualButtons::GetButtonInfo(buttons, 4);
+    if (count == 0)
+        return;
+
+    i32 rw = this->realScreenWidth;
+    i32 rh = this->realScreenHeight;
+
+    // Recompute pillarbox layout
+    i32 scaledW, scaledH;
+    if (rw * this->screenHeight > rh * this->screenWidth)
+    {
+        scaledH = rh;
+        scaledW = rh * this->screenWidth / this->screenHeight;
+    }
+    else
+    {
+        scaledW = rw;
+        scaledH = rw * this->screenHeight / this->screenWidth;
+    }
+    i32 offsetX = (rw - scaledW) / 2;
+    i32 offsetY = (rh - scaledH) / 2;
+
+    // Need at least some pillarbox to render on
+    if (offsetX < 5)
+        return;
+
+    // Set up full-screen render state
+    glViewport(0, 0, rw, rh);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    // Ortho projection: pixel coordinates [0,rw]×[0,rh], Y top-down
+    D3DXMATRIX ortho;
+    memset(&ortho, 0, sizeof(ortho));
+    ortho._11 = 2.0f / rw;
+    ortho._22 = -2.0f / rh;
+    ortho._33 = 1.0f;
+    ortho._44 = 1.0f;
+    ortho._41 = -1.0f;
+    ortho._42 = 1.0f;
+    pglUniformMatrix4fv(this->loc_u_MVP, 1, GL_FALSE, &ortho.m[0][0]);
+
+    D3DXMATRIX ident;
+    D3DXMatrixIdentity(&ident);
+    pglUniformMatrix4fv(this->loc_u_TexMatrix, 1, GL_FALSE, &ident.m[0][0]);
+    pglUniformMatrix4fv(this->loc_u_ModelView, 1, GL_FALSE, &ident.m[0][0]);
+
+    pglUniform1i(this->loc_u_TextureEnabled, 0);
+    pglUniform1i(this->loc_u_FogEnabled, 0);
+    pglUniform1f(this->loc_u_AlphaRef, 0.0f);
+
+    constexpr int HALF_SEGS = 16;
+    constexpr float BORDER_W = 2.0f;
+    constexpr float PI = 3.14159265358979323846f;
+    float yScale = (float)scaledH / 480.0f;
+
+    for (int i = 0; i < count; i++)
+    {
+        // Map game coords → screen coords
+        float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
+        float sr = buttons[i].gameRadius * yScale;
+        // Button right edge touches game viewport left edge
+        float sx = (float)offsetX - sr;
+        if (sx < sr)
+            sx = sr;
+
+        // --- Filled circle (horizontal-band triangle strip) ---
+        {
+            D3DCOLOR c = buttons[i].fillColor;
+            float cr = D3DCOLOR_R(c) / 255.0f, cg = D3DCOLOR_G(c) / 255.0f;
+            float cb = D3DCOLOR_B(c) / 255.0f, ca = D3DCOLOR_A(c) / 255.0f;
+
+            int nv = (HALF_SEGS + 1) * 2;
+            size_t needed = (size_t)nv * 9;
+            if (this->drawScratch.size() < needed)
+                this->drawScratch.resize(needed);
+            f32 *buf = this->drawScratch.data();
+
+            for (int j = 0; j <= HALF_SEGS; j++)
+            {
+                float angle = PI / 2.0f - j * PI / HALF_SEGS;
+                float cosa = cosf(angle), sina = sinf(angle);
+                f32 *L = buf + (j * 2) * 9;
+                L[0] = sx - sr * cosa; L[1] = sy - sr * sina; L[2] = 0;
+                L[3] = cr; L[4] = cg; L[5] = cb; L[6] = ca;
+                L[7] = 0; L[8] = 0;
+                f32 *R = buf + (j * 2 + 1) * 9;
+                R[0] = sx + sr * cosa; R[1] = sy - sr * sina; R[2] = 0;
+                R[3] = cr; R[4] = cg; R[5] = cb; R[6] = ca;
+                R[7] = 0; R[8] = 0;
+            }
+            DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, nv);
+        }
+
+        // --- Border ring ---
+        {
+            D3DCOLOR c = buttons[i].borderColor;
+            float cr = D3DCOLOR_R(c) / 255.0f, cg = D3DCOLOR_G(c) / 255.0f;
+            float cb = D3DCOLOR_B(c) / 255.0f, ca = D3DCOLOR_A(c) / 255.0f;
+            float innerR = sr - BORDER_W;
+
+            int segs = HALF_SEGS * 2;
+            int nv = (segs + 1) * 2;
+            size_t needed = (size_t)nv * 9;
+            if (this->drawScratch.size() < needed)
+                this->drawScratch.resize(needed);
+            f32 *buf = this->drawScratch.data();
+
+            for (int j = 0; j <= segs; j++)
+            {
+                float angle = j * 2.0f * PI / segs;
+                float cosa = cosf(angle), sina = sinf(angle);
+                f32 *O = buf + (j * 2) * 9;
+                O[0] = sx + sr * cosa; O[1] = sy + sr * sina; O[2] = 0;
+                O[3] = cr; O[4] = cg; O[5] = cb; O[6] = ca;
+                O[7] = 0; O[8] = 0;
+                f32 *I = buf + (j * 2 + 1) * 9;
+                I[0] = sx + innerR * cosa; I[1] = sy + innerR * sina; I[2] = 0;
+                I[3] = cr; I[4] = cg; I[5] = cb; I[6] = ca;
+                I[7] = 0; I[8] = 0;
+            }
+            DrawArrays(GL_TRIANGLE_STRIP, nullptr, nullptr, nullptr, nv);
+        }
+    }
+
+    // --- Text labels using ascii.anm texture ---
+    if (g_AnmManager && g_AnmManager->textures[ANM_FILE_ASCII] != 0)
+    {
+        pglUniform1i(this->loc_u_TextureEnabled, 1);
+        this->stats.textureBinds++;
+        glBindTexture(GL_TEXTURE_2D, g_AnmManager->textures[ANM_FILE_ASCII]);
+
+        for (int i = 0; i < count; i++)
+        {
+            const char *label = buttons[i].label;
+            int len = (int)strlen(label);
+            if (len == 0)
+                continue;
+
+            float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
+            float sr = buttons[i].gameRadius * yScale;
+            float sx = (float)offsetX - sr;
+            if (sx < sr) sx = sr;
+
+            float charW = 14.0f * buttons[i].textScale * yScale;
+            float charH = 16.0f * buttons[i].textScale * yScale;
+            float totalW = len * charW;
+            float startX = sx - totalW / 2.0f;
+            float startY = sy - charH / 2.0f;
+
+            for (int ci = 0; ci < len; ci++)
+            {
+                u8 ch = (u8)label[ci];
+                if (ch < 0x21) continue;
+
+                AnmLoadedSprite *spr = &g_AnmManager->sprites[ch - 0x15];
+                float u0 = spr->uvStart.x, v0 = spr->uvStart.y;
+                float u1 = spr->uvEnd.x,   v1 = spr->uvEnd.y;
+
+                float x0 = startX + ci * charW, x1 = x0 + charW;
+                float y0 = startY, y1 = y0 + charH;
+
+                f32 pos[] = { x0,y0,0, x1,y0,0, x0,y1,0, x1,y1,0 };
+                f32 col[] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
+                f32 tc[]  = { u0,v0, u1,v0, u0,v1, u1,v1 };
+                DrawArrays(GL_TRIANGLE_STRIP, pos, col, tc, 4);
+            }
+        }
+    }
+
+    // Restore alpha ref
+    pglUniform1f(this->loc_u_AlphaRef, 4.0f / 255.0f);
+}
 
 void RendererGLES::BlitFBOToScreen()
 {
@@ -2097,12 +2330,14 @@ void RendererGLES::EndFrame()
         // Re-activate game shader (ImGui may have switched the active program)
         pglUseProgram(this->shaderProgram);
 
-        // Blit FBO -> screen, swap
+        // Blit FBO -> screen, draw overlay, swap
         BlitFBOToScreen();
+        DrawScreenSpaceButtons();
         SDL_GL_SwapWindow(this->window);
 #ifndef __ANDROID__
         // Post-swap blit for desktop capture tools (OBS, etc.)
         BlitFBOToScreen();
+        DrawScreenSpaceButtons();
 #endif
 
         // Restore state for next frame
@@ -2136,6 +2371,24 @@ void RendererGLES::EndFrame()
         this->attribsEnabled = false;
         this->fogAttribEnabled = false;
         SDL_GL_SwapWindow(this->window);
+
+        // Non-FBO path: ImGui rendering changed GL state (blend, texture,
+        // depth, etc.) behind the cache's back.  Invalidate renderer caches
+        // so the next frame's state-setting calls always go through to GL,
+        // matching the FBO path's cache invalidation.
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_SCISSOR_TEST);
+        pglUniform1i(this->loc_u_FogEnabled, this->fogEnabled);
+        pglUniform1f(this->loc_u_AlphaRef, 4.0f / 255.0f);
+        pglUniform1i(this->loc_u_TextureEnabled, this->textureEnabled);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask(this->currentZWriteDisable ? GL_FALSE : GL_TRUE);
+        this->currentTexture = (u32)-1;
+        this->currentBlendMode = 0xff;
+        this->currentColorOp = 0xff;
+        this->currentZWriteDisable = 0xff;
         this->usingVertexFog = false;
         FinishFrameStats();
     }
