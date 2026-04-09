@@ -26,12 +26,16 @@
 #include "inttypes.hpp"
 #include "utils.hpp"
 #include "sdl2_renderer.hpp"
+#include "AndroidTouchInput.hpp"
 #include <stdio.h>
 #include <string.h>
 #include <SDL.h>
 #ifndef _WIN32
 #ifdef __ANDROID__
 #include <dirent.h>
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <jni.h>
 #else
 #include <glob.h>
 #endif
@@ -62,6 +66,7 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
         g_SoundPlayer.backgroundMusic->UpdateFadeOut();
     }
     Session::AdvanceFrameInput();
+    AndroidTouchInput::InjectDeferredButtons();
     PortableGameplayRestore::TickPortableRestore();
     if (PortableGameplayRestore::ConsumeFrameBreakRequested())
     {
@@ -260,6 +265,8 @@ ChainCallbackResult Supervisor::OnDraw(Supervisor *s)
     anmm5->currentZWriteDisable = 0xff;
 
     Supervisor::DrawFpsCounter();
+    // Virtual buttons are drawn in screen-space by RendererGLES::EndFrame
+    // (after BlitFBOToScreen, on the pillarbox black border).
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -519,27 +526,75 @@ static const wchar_t *FindDatBySuffixW(const char *filename, wchar_t *outBuf, si
     FindClose(hFind);
     return outBuf;
 #elif defined(__ANDROID__)
-    // Android: APK assets can't be listed via opendir.
-    // Try known prefixes for the .dat files.
-    static const char *kPrefixes[] = {"KOUMAKYO_", "紅魔郷"};
-    size_t sfxLen = strlen(suffix);
-    for (size_t pi = 0; pi < sizeof(kPrefixes) / sizeof(kPrefixes[0]); pi++)
+    // Android: enumerate APK assets in root directory using AAssetManager,
+    // equivalent to FindFirstFileW("*suffix") on Windows.
+    // AAssetDir_getNextFileName returns files in unspecified order, so we
+    // enumerate ALL matches and prefer non-fallback archives (TOLOL/TOTOL)
+    // over fallback ones.  This ensures th06c_CM.DAT is loaded as the
+    // primary archive when both th06c_CM.DAT and TOLOL_CM.DAT are present.
     {
-        char tryName[256];
-        snprintf(tryName, sizeof(tryName), "%s%s", kPrefixes[pi], suffix);
-        // Verify the file exists via SDL_RWFromFile
-        SDL_RWops *rw = SDL_RWFromFile(tryName, "rb");
-        if (rw)
+        JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+        jobject activity = (jobject)SDL_AndroidGetActivity();
+        jclass activityClass = env->GetObjectClass(activity);
+        jmethodID getAssets = env->GetMethodID(activityClass, "getAssets",
+                                               "()Landroid/content/res/AssetManager;");
+        jobject jAssetManager = env->CallObjectMethod(activity, getAssets);
+        AAssetManager *mgr = AAssetManager_fromJava(env, jAssetManager);
+
+        if (mgr)
         {
-            SDL_RWclose(rw);
-            size_t nameLen = strlen(tryName);
-            if (nameLen < outBufLen)
+            AAssetDir *dir = AAssetManager_openDir(mgr, "");
+            if (dir)
             {
-                for (size_t i = 0; i <= nameLen; i++)
-                    outBuf[i] = (wchar_t)(unsigned char)tryName[i];
-                return outBuf;
+                size_t sfxLen = strlen(suffix);
+                const char *assetName;
+                bool haveFallback = false;
+                while ((assetName = AAssetDir_getNextFileName(dir)) != NULL)
+                {
+                    size_t nameLen = strlen(assetName);
+                    if (nameLen > sfxLen && nameLen < outBufLen)
+                    {
+                        const char *tail = assetName + nameLen - sfxLen;
+                        if (strcasecmp(tail, suffix) == 0)
+                        {
+                            // Check if this is a fallback archive (TOLOL/TOTOL)
+                            bool isFallback = (strncasecmp(assetName, "TOLOL", 5) == 0 ||
+                                               strncasecmp(assetName, "TOTOL", 5) == 0);
+                            if (!isFallback)
+                            {
+                                // Non-fallback match: use immediately
+                                for (size_t i = 0; i <= nameLen; i++)
+                                    outBuf[i] = (wchar_t)(unsigned char)assetName[i];
+                                AAssetDir_close(dir);
+                                env->DeleteLocalRef(jAssetManager);
+                                env->DeleteLocalRef(activityClass);
+                                env->DeleteLocalRef(activity);
+                                return outBuf;
+                            }
+                            else if (!haveFallback)
+                            {
+                                // Remember fallback in case no primary is found
+                                for (size_t i = 0; i <= nameLen; i++)
+                                    outBuf[i] = (wchar_t)(unsigned char)assetName[i];
+                                haveFallback = true;
+                            }
+                        }
+                    }
+                }
+                AAssetDir_close(dir);
+                if (haveFallback)
+                {
+                    env->DeleteLocalRef(jAssetManager);
+                    env->DeleteLocalRef(activityClass);
+                    env->DeleteLocalRef(activity);
+                    return outBuf;
+                }
             }
         }
+
+        env->DeleteLocalRef(jAssetManager);
+        env->DeleteLocalRef(activityClass);
+        env->DeleteLocalRef(activity);
     }
     return NULL;
 #else
