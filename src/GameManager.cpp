@@ -269,7 +269,7 @@ ChainCallbackResult GameManager::OnUpdate(GameManager *gameManager)
             gameManager->nextScoreIncrement = 0;
             gameManager->guiScore = gameManager->score;
         }
-        if (gameManager->extraLives >= 0 && g_ExtraLivesScores[gameManager->extraLives] <= gameManager->guiScore)
+        if ((int8_t)gameManager->extraLives >= 0 && g_ExtraLivesScores[gameManager->extraLives] <= gameManager->guiScore)
         {
             const bool hasSecondPlayer = HasSecondPlayer();
             if (gameManager->livesRemaining < MAX_LIVES || (hasSecondPlayer && gameManager->livesRemaining2 < MAX_LIVES))
