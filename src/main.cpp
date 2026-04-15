@@ -68,6 +68,10 @@ int main(int argc, char *argv[])
 {
     i32 renderResult = 0;
 
+#ifdef _WIN32
+    timeBeginPeriod(1);
+#endif
+
 #if defined(_MSC_VER) && defined(_M_IX86)
     ConfigureReplayCompatibleFloatingPoint();
 #endif
@@ -208,5 +212,8 @@ stop:
     g_GameErrorContext.Flush();
     CrashHandler::Shutdown();
     SDL_Quit();
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
     return 0;
 }

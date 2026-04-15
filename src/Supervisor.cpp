@@ -403,10 +403,10 @@ void Supervisor::DrawFpsCounter()
     D3DXVECTOR3 fpsCounterPos;
 
     static u32 g_NumFramesSinceLastTime = 0;
-    static DWORD g_LastTime = timeGetTime();
+    static DWORD g_LastTime = SDL_GetTicks();
     static char g_FpsCounterBuffer[256];
 
-    curTime = timeGetTime();
+    curTime = SDL_GetTicks();
     g_NumFramesSinceLastTime = g_NumFramesSinceLastTime + 1 + (u32)g_Supervisor.cfg.frameskipConfig;
     if (500 <= curTime - g_LastTime)
     {

@@ -50,7 +50,11 @@ static int GetPreferredSwapInterval(bool windowed)
     // coarse SDL_Delay-based software limiter.
     return 1;
 #else
-    return windowed ? 1 : 0;
+    // In windowed mode on desktop, the software busy-wait in Render() handles
+    // frame pacing (matching the original D3D8 behaviour where windowed Present
+    // is immediate).  Enabling VSync here would add an extra display-period
+    // delay on top of the busy-wait, halving the effective frame rate.
+    return 0;
 #endif
 }
 
@@ -322,7 +326,7 @@ RenderResult GameWindow::Render()
         if (this->curFrame != 0)
         {
             g_Supervisor.framerateMultiplier = 1.0;
-            slowdown = timeGetTime();
+            slowdown = SDL_GetTicks();
             if (slowdown < g_LastFrameTime)
             {
                 g_LastFrameTime = slowdown;
@@ -358,7 +362,7 @@ RenderResult GameWindow::Render()
         {
             if (2 <= g_TickCountToEffectiveFramerate)
             {
-                curtime = timeGetTime();
+                curtime = SDL_GetTicks();
                 if (curtime < g_Supervisor.lastFrameTime)
                 {
                     g_Supervisor.lastFrameTime = curtime;
@@ -407,18 +411,30 @@ void GameWindow::Present()
         if (g_GameWindow.screenWidth != 0)
         {
             static u32 s_lastPresentTime = 0;
-            u32 curTime = timeGetTime();
+            static double s_frameBudget = 0.0;
+            u32 curTime = SDL_GetTicks();
             if (s_lastPresentTime != 0)
             {
                 float speedMul = Session::IsRemoteNetplaySession() ? 1.0f : THPrac::THPracGetSpeedMultiplier();
-                u32 targetMs = (speedMul > 0.01f) ? (u32)(16.0f / speedMul) : 16;
+                double targetMs = (speedMul > 0.01f) ? (FRAME_TIME / speedMul) : FRAME_TIME;
                 u32 elapsed = curTime - s_lastPresentTime;
-                if (elapsed < targetMs)
+                s_frameBudget += targetMs - (double)elapsed;
+                // Clamp to prevent budget from drifting too far during lag
+                if (s_frameBudget < -targetMs)
+                    s_frameBudget = -targetMs;
+                else if (s_frameBudget > targetMs)
+                    s_frameBudget = targetMs;
+                if (s_frameBudget > 0.0)
                 {
-                    SDL_Delay(targetMs - elapsed);
+                    u32 delayMs = (u32)s_frameBudget;
+                    if (delayMs > 0)
+                        SDL_Delay(delayMs);
                 }
             }
-            s_lastPresentTime = timeGetTime();
+            // Record time BEFORE any delay — so the next frame's 'elapsed'
+            // measures the full frame period (draw + calc + previous delay),
+            // not just the draw+calc portion.
+            s_lastPresentTime = curTime;
         }
  #endif
     }
