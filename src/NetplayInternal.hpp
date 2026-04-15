@@ -21,6 +21,7 @@
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
+#include "TouchFrameData.hpp"
 #include "ZunColor.hpp"
 #include "thprac_th06.h"
 
@@ -263,6 +264,9 @@ enum ConsistencyDatagramKind
     ConsistencyDatagram_DetailRequest,
     ConsistencyDatagram_DetailHash
 };
+
+// Per-frame touch event data — defined in TouchFrameData.hpp.
+// Included transitively via NetplayInternal.hpp for packet structs.
 
 template <int NBits> struct Bits
 {
@@ -576,10 +580,12 @@ struct CtrlPack
     };
     InGameCtrlType inGameCtrl[kKeyPackFrameCount] {};
     u16 rngSeed[kKeyPackFrameCount] {};
+    TouchFrameData touchData[kKeyPackFrameCount] {};
 
     CtrlPack()
     {
         std::memset(keys, 0, sizeof(keys));
+        std::memset(touchData, 0, sizeof(touchData));
     }
 };
 
@@ -645,8 +651,9 @@ static_assert(sizeof(AuthoritativeEnemyChunkDatagram) <= kRelayMaxDatagramBytes,
               "AuthoritativeEnemyChunkDatagram layout mismatch");
 static_assert(sizeof(AuthoritativeItemChunkDatagram) <= kRelayMaxDatagramBytes,
               "AuthoritativeItemChunkDatagram layout mismatch");
-static_assert(sizeof(CtrlPack) == 128, "CtrlPack layout mismatch");
-static_assert(sizeof(Pack) == 152, "Pack layout mismatch");
+static_assert(sizeof(TouchFrameData) == 19, "TouchFrameData layout mismatch");
+static_assert(sizeof(CtrlPack) == 128 + sizeof(TouchFrameData) * kKeyPackFrameCount, "CtrlPack layout mismatch");
+static_assert(sizeof(Pack) == 152 + sizeof(TouchFrameData) * kKeyPackFrameCount, "Pack layout mismatch");
 
 struct DatagramBuffer
 {
@@ -1153,6 +1160,8 @@ struct RuntimeState
     std::map<int, InGameCtrlType> localCtrls;
     std::map<int, InGameCtrlType> remoteCtrls;
     std::map<int, InGameCtrlType> predictedRemoteCtrls;
+    std::map<int, TouchFrameData> localTouchData;
+    std::map<int, TouchFrameData> remoteTouchData;
     std::set<int> remoteFramesPendingRollbackCheck;
     std::deque<GameplaySnapshot> rollbackSnapshots;
     bool predictionRollbackEnabled = TH06_ENABLE_PREDICTION_ROLLBACK != 0;
@@ -1329,6 +1338,7 @@ bool TryActivateFromStartupPacket(u16 *outPeerSharedSeed = nullptr);
 bool ReceiveRuntimePackets();
 void SendStartupBootstrapPacket();
 void SendKeyPacket(int frame);
+void ApplyRemoteTouchForCurrentFrame(int frame);
 bool SendDatagramImmediate(const void *data, size_t size);
 bool SendAuthoritativeFrameStateDatagram(const AuthoritativeReplicator::ReplicatedWorldState &state);
 bool HandleAuthoritativeStateDatagram(const AuthoritativeStateDatagramHeader &header);

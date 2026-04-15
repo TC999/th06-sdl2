@@ -2,6 +2,7 @@
 
 #include "Controller.hpp"
 #include "AnmVm.hpp"
+#include "TouchFrameData.hpp"
 #include <SDL.h>
 
 namespace th06
@@ -67,6 +68,40 @@ void Reset();
 // Inject deferred button presses (right-click/back gesture) into g_CurFrameInput.
 // Call AFTER Session::AdvanceFrameInput() to bypass the controller pipeline.
 void InjectDeferredButtons();
+
+// Tell the touch system that a dialogue overlay is active during gameplay.
+// While active, taps are NOT discarded by the per-frame gameplay tap clearing.
+void SetDialogueOverlay(bool active);
+
+// Returns true if any non-button finger has been held down for at least
+// minDurationMs. Used to detect long-press for dialogue fast-forward (Ctrl).
+bool IsAnyFingerHeld(Uint32 minDurationMs = 500);
+
+// Inject a scancode into the current frame's touch scancode state directly
+// (bypasses the pending buffer). Used by TouchVirtualButtons for held
+// function keys whose output is scancodes rather than TouhouButton flags.
+void InjectHeldScancode(SDL_Scancode sc);
+
+// Capture a snapshot of the current frame's touch events for lockstep serialization.
+// Call AFTER Update() in the same frame. The returned struct contains tap, swipe,
+// deferred bomb, and analog displacement data for this frame.
+TouchFrameData CaptureTouchFrameData();
+
+// Apply remote touch data received from a netplay peer.
+// Sets the local touch globals (tap/swipe/bomb/analog) so that subsequent game
+// update code (TryTouchSelect, ConsumeTap, etc.) processes them identically.
+// Call AFTER ApplyLegacyFrameInput() and BEFORE the game update.
+void ApplyRemoteTouchFrameData(const TouchFrameData &data);
+
+// Clear all pending touch state after CaptureTouchFrameData() has recorded it.
+// Used in netplay to prevent immediate (non-lockstep) processing of local
+// taps/swipes; the touch data will be re-applied from the delay buffer.
+void ClearPendingTouchAfterCapture();
+
+// Returns true if there is any pending touch data (tap, swipe) that should
+// be processed by the game update chain. Used to bypass IsEnabled() guards
+// when remote netplay touch data has been applied.
+bool HasPendingTouchData();
 
 }; // namespace AndroidTouchInput
 }; // namespace th06

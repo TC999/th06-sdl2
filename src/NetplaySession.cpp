@@ -1,5 +1,6 @@
 #include "NetplayInternal.hpp"
 
+#include "AndroidTouchInput.hpp"
 #include "AstroBot.hpp"
 
 namespace th06::Netplay
@@ -651,6 +652,7 @@ void NetSession::AdvanceFrameInput()
     g_State.localInputs[frame] = localBits;
     g_State.localSeeds[frame] = g_Rng.seed;
     g_State.localCtrls[frame] = localCtrl;
+    g_State.localTouchData[frame] = AndroidTouchInput::CaptureTouchFrameData();
     TraceDiagnostic("capture-local-frame", "frame=%d input=%s seed=%u ctrl=%s", frame,
                     FormatInputBits(localInput).c_str(), g_Rng.seed, InGameCtrlToString(g_State.localCtrls[frame]));
     PruneOldFrameData(frame);
@@ -1265,6 +1267,87 @@ bool ConsumeFrameStallRequested()
         TraceDiagnostic("consume-frame-stall", "-");
     }
     return requested;
+}
+
+void ApplyReceivedRemoteTouchData()
+{
+    if (g_State.lastFrame < 0)
+        return;
+
+    // For rollback sessions, apply touch data with the same delay as u16 input
+    // so that both machines process the same tap at the same game frame.
+    // The local touch state was cleared by ClearPendingTouchAfterCapture() in
+    // Supervisor::OnUpdate(), so we restore it from the delay buffer here.
+    const SessionKind kind = Session::GetKind();
+    if (kind == SessionKind::Netplay)
+    {
+        const int delayedFrame = g_State.lastFrame - g_State.delay;
+        if (delayedFrame < 0)
+            return;
+
+        // Apply local touch data (delayed — own buffered tap/swipe/bomb).
+        const auto localIt = g_State.localTouchData.find(delayedFrame);
+        if (localIt != g_State.localTouchData.end() && localIt->second.flags != 0)
+        {
+            AndroidTouchInput::ApplyRemoteTouchFrameData(localIt->second);
+        }
+
+        // Apply remote touch data (delayed — peer's tap/swipe/bomb).
+        ApplyRemoteTouchForCurrentFrame(delayedFrame);
+    }
+    else
+    {
+        // Authoritative: apply remote touch without delay (host is source of truth).
+        ApplyRemoteTouchForCurrentFrame(g_State.lastFrame);
+    }
+}
+
+void RouteAnalogInputsToPlayers()
+{
+    if (g_State.lastFrame < 0)
+        return;
+
+    const int delayedFrame = g_State.lastFrame - g_State.delay;
+    if (delayedFrame < 0)
+        return;
+
+    // Extract per-player analog displacement from the delayed touch data.
+    AnalogInput localAnalog = {};
+    AnalogInput remoteAnalog = {};
+
+    const auto localIt = g_State.localTouchData.find(delayedFrame);
+    if (localIt != g_State.localTouchData.end() && (localIt->second.flags & TouchFrameData::kFlagAnalog))
+    {
+        localAnalog.x = static_cast<float>(localIt->second.analogX);
+        localAnalog.y = static_cast<float>(localIt->second.analogY);
+        localAnalog.active = true;
+        localAnalog.mode = AnalogMode::Displacement;
+    }
+
+    const auto remoteIt = g_State.remoteTouchData.find(delayedFrame);
+    if (remoteIt != g_State.remoteTouchData.end() && (remoteIt->second.flags & TouchFrameData::kFlagAnalog))
+    {
+        remoteAnalog.x = static_cast<float>(remoteIt->second.analogX);
+        remoteAnalog.y = static_cast<float>(remoteIt->second.analogY);
+        remoteAnalog.active = true;
+        remoteAnalog.mode = AnalogMode::Displacement;
+    }
+
+    // Route: Player 1 gets the P1-side analog, Player 2 gets the P2-side analog.
+    if (IsLocalPlayer1())
+    {
+        if (localAnalog.active)
+            Controller::SetAnalogInput(localAnalog);
+        if (remoteAnalog.active)
+            Controller::SetAnalogInputP2(remoteAnalog);
+    }
+    else
+    {
+        if (remoteAnalog.active)
+            Controller::SetAnalogInput(remoteAnalog);
+        if (localAnalog.active)
+            Controller::SetAnalogInputP2(localAnalog);
+    }
 }
 
 int GetDelay()

@@ -102,6 +102,8 @@ u8 *GetControllerState();
 u16 GetInput(void);
 const AnalogInput &GetAnalogInput(void);
 void SetAnalogInput(const AnalogInput &input);
+const AnalogInput &GetAnalogInputP2(void);
+void SetAnalogInputP2(const AnalogInput &input);
 void ResetKeyboard(void);
 void ResetDeviceInputState(void);
 void ResetInputState(void);

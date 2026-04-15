@@ -1,5 +1,6 @@
 #include "AndroidTouchInput.hpp"
 #include "TouchVirtualButtons.hpp"
+#include "MenuTouchButtons.hpp"
 
 #include "IRenderer.hpp"
 #include "GameWindow.hpp"
@@ -77,6 +78,9 @@ static float g_SwipeYDelta = 0.0f;
 // Pending swipe (horizontal) in game-coordinate pixels.
 static bool g_SwipeXPending = false;
 static float g_SwipeXDelta = 0.0f;
+
+// Dialogue overlay flag: when true, taps are preserved during gameplay (not cleared in Update).
+static bool g_DialogueOverlayActive = false;
 
 // Continuous drag swipe accumulator.
 static float g_DragSwipeAccumY = 0.0f;
@@ -262,6 +266,9 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
         NormalizedToGameCoords(event.x, event.y, gx, gy);
         if (TouchVirtualButtons::HandleFingerDown(event.fingerId, gx, gy))
             return;
+        // Check menu-context buttons (OK / Cancel).
+        if (MenuTouchButtons::HandleFingerDown(event.fingerId, gx, gy))
+            return;
     }
 
     // In gameplay, claim the first non-button finger as the movement finger.
@@ -274,7 +281,8 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
         bool touchDragAllowed = THPrac::TH06::THPracIsMouseTouchDragEnabled();
 #endif
         if (touchDragAllowed && AndroidTouchInput::IsEnabled()
-            && g_GameManager.isInMenu != 0 && !g_MoveFingerActive)
+            && g_GameManager.isInMenu != 0 && !g_MoveFingerActive
+            && !g_DialogueOverlayActive)
         {
             g_MoveFingerActive = true;
             g_MoveFingerId = event.fingerId;
@@ -364,6 +372,10 @@ void AndroidTouchInput::HandleFingerUp(const SDL_TouchFingerEvent &event)
 {
     // Check if this finger belonged to a virtual button.
     if (TouchVirtualButtons::HandleFingerUp(event.fingerId))
+        return;
+
+    // Check if this finger belonged to a menu button.
+    if (MenuTouchButtons::HandleFingerUp(event.fingerId))
         return;
 
     // Check if this was the movement finger.
@@ -459,9 +471,19 @@ void AndroidTouchInput::Update()
     // an unintended confirm on the player's first deliberate tap.
     // Clearing here is safe: Update() runs before the calc chain, so
     // taps generated while a menu is open (isInMenu == 0) are preserved.
-    if (g_GameManager.isInMenu != 0)
+    // Exception: dialogue overlay active → preserve taps for dialogue advance.
+    if (g_GameManager.isInMenu != 0 && !g_DialogueOverlayActive)
     {
         g_TapPending = false;
+    }
+
+    // ── Dialogue long-press → SKIP (pre-lockstep) ──────────────────────
+    // During dialogue, a long finger hold (500ms+) injects TH_BUTTON_SKIP
+    // into the touch button state so it flows through Controller::GetInput()
+    // → lockstep, ensuring both netplay machines see SKIP at the same frame.
+    if (g_DialogueOverlayActive && IsAnyFingerHeld(500))
+    {
+        g_TouchButtonsCur |= TH_BUTTON_SKIP;
     }
 
     // ── Touch-drag gameplay movement ────────────────────────────────────
@@ -593,7 +615,8 @@ void AndroidTouchInput::Update()
 
 u16 AndroidTouchInput::GetTouchButtons()
 {
-    return g_TouchButtonsCur | TouchVirtualButtons::GetButtonFlags();
+    return g_TouchButtonsCur | TouchVirtualButtons::GetButtonFlags()
+                             | MenuTouchButtons::GetButtonFlags();
 }
 
 const AnalogInput &AndroidTouchInput::GetAnalogInput()
@@ -665,7 +688,7 @@ bool AndroidTouchInput::VmContainsPoint(const AnmVm &vm, float gameX, float game
 
 bool AndroidTouchInput::TryTouchSelect(AnmVm *items, int count, int &cursor, int stride)
 {
-    if (!IsEnabled() || !g_TapPending)
+    if (!g_TapPending)
         return false;
 
     float gx = g_TapGameX;
@@ -700,7 +723,7 @@ bool AndroidTouchInput::TryTouchSelect(AnmVm *items, int count, int &cursor, int
 bool AndroidTouchInput::TryTouchSelectRect(float left, float top, float right, float bottom,
                                             int index, int &cursor)
 {
-    if (!IsEnabled() || !g_TapPending)
+    if (!g_TapPending)
         return false;
 
     float gx = g_TapGameX;
@@ -775,6 +798,7 @@ void AndroidTouchInput::Reset()
     std::memset(g_TouchScancodesPrev, 0, sizeof(g_TouchScancodesPrev));
     std::memset(g_PendingScancodes, 0, sizeof(g_PendingScancodes));
     TouchVirtualButtons::Reset();
+    MenuTouchButtons::Reset();
 }
 
 void AndroidTouchInput::InjectDeferredButtons()
@@ -790,6 +814,89 @@ void AndroidTouchInput::InjectDeferredButtons()
     }
 }
 
+TouchFrameData AndroidTouchInput::CaptureTouchFrameData()
+{
+    TouchFrameData d;
+    d.Clear();
+
+    if (g_TapPending)
+    {
+        d.flags |= TouchFrameData::kFlagTap;
+        d.tapGameX = g_TapGameX;
+        d.tapGameY = g_TapGameY;
+    }
+    if (g_SwipeXPending)
+    {
+        d.flags |= TouchFrameData::kFlagSwipeX;
+        d.swipeXDelta = g_SwipeXDelta;
+    }
+    if (g_SwipeYPending)
+    {
+        d.flags |= TouchFrameData::kFlagSwipeY;
+        d.swipeYDelta = g_SwipeYDelta;
+    }
+    if (g_DeferredBombPending)
+    {
+        d.flags |= TouchFrameData::kFlagBomb;
+    }
+    if (g_TouchAnalogInput.active)
+    {
+        d.flags |= TouchFrameData::kFlagAnalog;
+        // Clamp to i8 range (already clamped in Update, but be safe).
+        float ax = g_TouchAnalogInput.x;
+        float ay = g_TouchAnalogInput.y;
+        if (ax < -127.0f) ax = -127.0f;
+        if (ax >  127.0f) ax =  127.0f;
+        if (ay < -127.0f) ay = -127.0f;
+        if (ay >  127.0f) ay =  127.0f;
+        d.analogX = static_cast<i8>(ax);
+        d.analogY = static_cast<i8>(ay);
+    }
+
+    return d;
+}
+
+void AndroidTouchInput::ApplyRemoteTouchFrameData(const TouchFrameData &data)
+{
+
+    // Tap event.
+    if (data.flags & TouchFrameData::kFlagTap)
+    {
+        g_TapPending = true;
+        g_TapGameX = data.tapGameX;
+        g_TapGameY = data.tapGameY;
+    }
+
+    // Swipe X.
+    if (data.flags & TouchFrameData::kFlagSwipeX)
+    {
+        g_SwipeXPending = true;
+        g_SwipeXDelta = data.swipeXDelta;
+    }
+
+    // Swipe Y.
+    if (data.flags & TouchFrameData::kFlagSwipeY)
+    {
+        g_SwipeYPending = true;
+        g_SwipeYDelta = data.swipeYDelta;
+    }
+
+    // Deferred bomb.
+    if (data.flags & TouchFrameData::kFlagBomb)
+    {
+        g_DeferredBombPending = true;
+    }
+
+    // Analog displacement.
+    if (data.flags & TouchFrameData::kFlagAnalog)
+    {
+        g_TouchAnalogInput.x = static_cast<float>(data.analogX);
+        g_TouchAnalogInput.y = static_cast<float>(data.analogY);
+        g_TouchAnalogInput.active = true;
+        g_TouchAnalogInput.mode = AnalogMode::Displacement;
+    }
+}
+
 bool AndroidTouchInput::IsEnabled()
 {
 #ifdef __ANDROID__
@@ -797,6 +904,20 @@ bool AndroidTouchInput::IsEnabled()
 #else
     return THPrac::TH06::THPracIsNewTouchEnabled();
 #endif
+}
+
+void AndroidTouchInput::ClearPendingTouchAfterCapture()
+{
+    g_TapPending = false;
+    g_SwipeXPending = false;
+    g_SwipeYPending = false;
+    g_DeferredBombPending = false;
+    g_TouchAnalogInput = {};
+}
+
+bool AndroidTouchInput::HasPendingTouchData()
+{
+    return g_TapPending || g_SwipeXPending || g_SwipeYPending;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -863,6 +984,51 @@ void AndroidTouchInput::HandleMouseButtonUp(const SDL_MouseButtonEvent &event, i
     SDL_TouchFingerEvent tfinger;
     MouseToFinger(tfinger, kMouseLeftFingerId, event.x, event.y, windowW, windowH);
     HandleFingerUp(tfinger);
+}
+
+void AndroidTouchInput::SetDialogueOverlay(bool active)
+{
+    g_DialogueOverlayActive = active;
+    if (!active)
+    {
+        // Clear any stale tap when dialogue ends to prevent it from leaking
+        // into gameplay or the next menu transition.
+        g_TapPending = false;
+    }
+}
+
+bool AndroidTouchInput::IsAnyFingerHeld(Uint32 minDurationMs)
+{
+    if (!IsEnabled())
+        return false;
+
+    Uint32 now = SDL_GetTicks();
+    for (int i = 0; i < kMaxPointers; i++)
+    {
+        if (!g_Pointers[i].active)
+            continue;
+
+        // 排除被虚拟按钮或菜单按钮占用的手指.
+        if (TouchVirtualButtons::IsTrackedFinger(g_Pointers[i].fingerId))
+            continue;
+        if (MenuTouchButtons::IsTrackedFinger(g_Pointers[i].fingerId))
+            continue;
+
+        // 排除移动手指（gameplay拖拽）.
+        if (g_MoveFingerActive && g_Pointers[i].fingerId == g_MoveFingerId)
+            continue;
+
+        Uint32 duration = now - g_Pointers[i].startTimeMs;
+        if (duration >= minDurationMs)
+            return true;
+    }
+    return false;
+}
+
+void AndroidTouchInput::InjectHeldScancode(SDL_Scancode sc)
+{
+    if (sc > SDL_SCANCODE_UNKNOWN && sc < SDL_NUM_SCANCODES)
+        g_TouchScancodes[sc] = true;
 }
 
 }; // namespace th06

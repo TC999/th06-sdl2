@@ -12,6 +12,7 @@ bool ShouldForceRunInBackground();
 bool ConsumeCloseRequested();
 bool AllowsBackShortcut();
 void UpdateImGui();
+bool IsNetplayDisplacementDisabled();
 std::string LocalizeNetplayStatusText(const std::string &raw);
 std::string LocalizeRelayProbeStatusText(const std::string &raw);
 }; // namespace th06::OnlineMenu

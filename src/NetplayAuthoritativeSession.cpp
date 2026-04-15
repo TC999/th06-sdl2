@@ -1,5 +1,6 @@
 #include "NetplayAuthoritativeSession.hpp"
 
+#include "AndroidTouchInput.hpp"
 #include "AstroBot.hpp"
 #include "NetplayAuthoritativePresentation.hpp"
 #include "NetplayAuthoritativeReplicator.hpp"
@@ -41,6 +42,7 @@ void CaptureAuthoritativeLocalFrame(int frame)
     g_State.localInputs[frame] = localBits;
     g_State.localSeeds[frame] = g_Rng.seed;
     g_State.localCtrls[frame] = localCtrl;
+    g_State.localTouchData[frame] = AndroidTouchInput::CaptureTouchFrameData();
     AuthoritativePresentation::NoteLocalPredictedInput(frame, localInput);
     TraceDiagnostic("authoritative-capture-local-frame", "frame=%d input=%s seed=%u ctrl=%s", frame,
                     FormatInputBits(localInput).c_str(), g_Rng.seed, InGameCtrlToString(localCtrl));

@@ -3,6 +3,7 @@
 #include "AsciiManager.hpp"
 #include "Controller.hpp"
 #include "GameManager.hpp"
+#include "Player.hpp"
 #include "GameErrorContext.hpp"
 #include "GamePaths.hpp"
 #include "GameplayState.hpp"
@@ -858,6 +859,11 @@ void DrawQuickSnapshotOverlay()
         return;
     }
 
+    if (!IsPortableRestoreTrialActive())
+    {
+        return;
+    }
+
     i32 totalLines = 2;
     if (THPrac::TH06::THPracIsDeveloperModeEnabled())
     {
@@ -871,6 +877,26 @@ void DrawQuickSnapshotOverlay()
     }
 
     const i32 baseY = ComputeOverlayBaseY(totalLines);
+
+    // Compute player proximity to overlay region and fade opacity to 10% when close
+    const f32 overlayLeft = (f32)GAME_REGION_LEFT;
+    const f32 overlayTop = (f32)baseY;
+    const f32 overlayRight = overlayLeft + 200.0f; // approximate text width
+    const f32 overlayBottom = (f32)(baseY + totalLines * kOverlayLineHeight);
+    const f32 fadeMargin = 48.0f; // start fading within this distance
+    const f32 px = g_Player.positionCenter.x;
+    const f32 py = g_Player.positionCenter.y;
+    // Distance from player to overlay rect (0 if inside)
+    const f32 dx = (px < overlayLeft) ? (overlayLeft - px) : (px > overlayRight) ? (px - overlayRight) : 0.0f;
+    const f32 dy = (py < overlayTop) ? (overlayTop - py) : (py > overlayBottom) ? (py - overlayBottom) : 0.0f;
+    const f32 dist = std::sqrt(dx * dx + dy * dy);
+    // Lerp alpha: full (0xFF) at fadeMargin distance, 10% (0x1A) at 0 distance
+    const f32 t = (dist >= fadeMargin) ? 1.0f : (dist / fadeMargin);
+    const u8 alpha = (u8)(0x1A + (u8)((0xFF - 0x1A) * t));
+    const D3DCOLOR savedColor = g_AsciiManager.color;
+    // Apply alpha to existing color (preserve RGB, replace alpha channel)
+    g_AsciiManager.SetColor((savedColor & 0x00FFFFFF) | ((D3DCOLOR)alpha << 24));
+
     i32 line = 0;
     D3DXVECTOR3 pos((f32)GAME_REGION_LEFT, (f32)(baseY + (line * kOverlayLineHeight)), 0.0f);
     g_AsciiManager.AddFormatText(&pos, "Save(S)");
@@ -921,6 +947,9 @@ void DrawQuickSnapshotOverlay()
         DrawPortableRestoreStatus(baseY, &line);
         DrawPortableValidationStatus(baseY, &line);
     }
+
+    // Restore original color
+    g_AsciiManager.SetColor(savedColor);
 }
 
 void ResetQuickSnapshotState()

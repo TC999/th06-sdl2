@@ -19,6 +19,7 @@ DIFFABLE_STATIC(u16, g_FocusButtonConflictState)
 
 // ── Analog input state ──────────────────────────────────────────────────────
 static AnalogInput g_AnalogInput = {};
+static AnalogInput g_AnalogInputP2 = {};
 
 
 
@@ -501,6 +502,7 @@ u16 Controller::GetInput(void)
     // Clear analog state at the start of each frame.
     // GetControllerInput() or touch may set it below.
     g_AnalogInput = {};
+    g_AnalogInputP2 = {};
 
     buttons = 0;
     keyboardState = SDL_GetKeyboardState(NULL);
@@ -542,8 +544,11 @@ u16 Controller::GetInput(void)
         buttons |= AndroidTouchInput::GetTouchButtons();
 
         // Touch analog direction overrides joystick analog when active.
+        // In netplay, analog displacement is routed per-player through the
+        // lockstep delay buffer (see Netplay::RouteAnalogInputsToPlayers),
+        // so skip the immediate override here.
         const AnalogInput &touchAnalog = AndroidTouchInput::GetAnalogInput();
-        if (touchAnalog.active)
+        if (touchAnalog.active && !Session::IsRemoteNetplaySession())
         {
             g_AnalogInput = touchAnalog;
         }
@@ -588,6 +593,16 @@ const AnalogInput &Controller::GetAnalogInput(void)
 void Controller::SetAnalogInput(const AnalogInput &input)
 {
     g_AnalogInput = input;
+}
+
+const AnalogInput &Controller::GetAnalogInputP2(void)
+{
+    return g_AnalogInputP2;
+}
+
+void Controller::SetAnalogInputP2(const AnalogInput &input)
+{
+    g_AnalogInputP2 = input;
 }
 
 

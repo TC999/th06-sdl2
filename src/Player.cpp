@@ -15,6 +15,7 @@
 #include "ItemManager.hpp"
 #include "NetplayAuthoritativePresentation.hpp"
 #include "NetplaySession.hpp"
+#include "OnlineMenu.hpp"
 #include "Rng.hpp"
 #include "Session.hpp"
 #include "ScreenEffect.hpp"
@@ -430,6 +431,12 @@ ChainCallbackResult Player::OnUpdate(Player *p)
             p->previousVerticalSpeed = 0.0f;
             if (p->invulnerabilityTimer.AsFrames() >= 30)
             {
+                // thprac: count miss only for real deaths (not deathbombs)
+                // If bombInfo.isInUse, player deathbombed during the respawnTimer window
+                if (!p->bombInfo.isInUse)
+                {
+                    THPrac::TH06::THPracCountMiss();
+                }
                 p->playerState = PLAYER_STATE_SPAWNING;
                 p->positionCenter.x = PlayerSpawnCenterX(p);
                 p->positionCenter.y = g_GameManager.arcadeRegionSize.y - 64.0f;
@@ -1152,8 +1159,10 @@ ZunResult Player::HandlePlayerInputs()
     // while adding proportional speed control for analog inputs.
     // Keyboard input (analog.active == false) is completely unaffected.
     // In Displacement mode the speed tables are bypassed entirely (see below).
-    const AnalogInput &analog = Controller::GetAnalogInput();
-    if (this->playerType == 1 && analog.mode != AnalogMode::Displacement)
+    const AnalogInput &analog = (this->playerType == 1)
+        ? Controller::GetAnalogInput()
+        : Controller::GetAnalogInputP2();
+    if (analog.mode != AnalogMode::Displacement)
     {
         if (analog.active && this->playerDirection != MOVEMENT_NONE)
         {
@@ -1187,11 +1196,15 @@ ZunResult Player::HandlePlayerInputs()
     this->previousVerticalSpeed = verticalSpeed;
 
     // ── Movement ────────────────────────────────────────────────────────
-    if (this->playerType == 1 && analog.mode == AnalogMode::Displacement && analog.active)
+    const bool displacementAllowed = analog.mode == AnalogMode::Displacement && analog.active
+        && !(Session::IsRemoteNetplaySession() && OnlineMenu::IsNetplayDisplacementDisabled());
+    if (displacementAllowed)
     {
-        // Displacement mode (mouse-follow): apply pixel delta directly.
+        // Displacement mode (mouse-follow / touch-drag): apply pixel delta directly.
         // The values are pre-clamped and rounded to integers in
         // AndroidTouchInput, matching the replay i8 encoding exactly.
+        // In netplay, RouteAnalogInputsToPlayers ensures each player reads
+        // the correct analog from the lockstep delay buffer.
         this->positionCenter[0] += analog.x * g_Supervisor.effectiveFramerateMultiplier;
         this->positionCenter[1] += analog.y * g_Supervisor.effectiveFramerateMultiplier;
     }
@@ -1926,9 +1939,6 @@ void Player::Die()
     // thprac: Muteki — skip death entirely
     if (THPrac::TH06::THPracIsMuteki())
         return;
-
-    // thprac: count miss
-    THPrac::TH06::THPracCountMiss();
 
     g_EnemyManager.spellcardInfo.isCapturing = 0;
     g_EffectManager.SpawnParticles(PARTICLE_EFFECT_UNK_12, &this->positionCenter, 1, COLOR_NEONBLUE);

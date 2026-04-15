@@ -102,6 +102,8 @@ bool IsLocalPlayer1();
 bool IsSync();
 bool NeedsRollbackCatchup();
 bool ConsumeFrameStallRequested();
+void ApplyReceivedRemoteTouchData();
+void RouteAnalogInputsToPlayers();
 int GetDelay();
 void SetDelay(int delay);
 void SetPredictionRollbackEnabled(bool enabled);

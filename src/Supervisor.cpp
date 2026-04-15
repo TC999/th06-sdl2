@@ -66,7 +66,21 @@ ChainCallbackResult Supervisor::OnUpdate(Supervisor *s)
         g_SoundPlayer.backgroundMusic->UpdateFadeOut();
     }
     Session::AdvanceFrameInput();
-    AndroidTouchInput::InjectDeferredButtons();
+    if (Session::IsRemoteNetplaySession())
+    {
+        // In netplay, clear the immediate touch state so it doesn't bypass lockstep.
+        // The touch data was already captured into localTouchData[frame] inside
+        // AdvanceFrameInput. ApplyReceivedRemoteTouchData re-applies both local
+        // and remote touch from the delay buffer for deterministic sync.
+        AndroidTouchInput::ClearPendingTouchAfterCapture();
+        Netplay::ApplyReceivedRemoteTouchData();
+        Netplay::RouteAnalogInputsToPlayers();
+        AndroidTouchInput::InjectDeferredButtons();
+    }
+    else
+    {
+        AndroidTouchInput::InjectDeferredButtons();
+    }
     PortableGameplayRestore::TickPortableRestore();
     if (PortableGameplayRestore::ConsumeFrameBreakRequested())
     {

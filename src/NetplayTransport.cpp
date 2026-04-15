@@ -1,5 +1,6 @@
 #include "NetplayInternal.hpp"
 #include "NetplayAuthoritativeTransport.hpp"
+#include "AndroidTouchInput.hpp"
 
 namespace th06::Netplay
 {
@@ -946,6 +947,8 @@ void ClearRuntimeCaches()
     g_State.predictedRemoteCtrls.clear();
     g_State.remoteFramesPendingRollbackCheck.clear();
     g_State.rollbackSnapshots.clear();
+    g_State.localTouchData.clear();
+    g_State.remoteTouchData.clear();
     g_State.pendingRollbackFrame = -1;
     g_State.rollbackActive = false;
     g_State.stallFrameRequested = false;
@@ -1005,6 +1008,7 @@ void ClearRemoteRuntimeCaches()
     g_State.remoteCtrls.clear();
     g_State.predictedRemoteCtrls.clear();
     g_State.remoteFramesPendingRollbackCheck.clear();
+    g_State.remoteTouchData.clear();
     g_State.pendingRollbackFrame = -1;
     g_State.currentCtrl = IGC_NONE;
     g_State.isSync = true;
@@ -1880,6 +1884,7 @@ void StoreRemoteKeyPacket(const Pack &pack, u16 sharedRngSeed, bool captureShare
             g_State.remoteInputs[frame] = actualBits;
             g_State.remoteSeeds[frame] = actualSeed;
             g_State.remoteCtrls[frame] = actualCtrl;
+            g_State.remoteTouchData[frame] = pack.ctrl.touchData[i];
             TraceDiagnostic("recv-key-frame-commit-authoritative", "frame=%d input=%s seed=%u ctrl=%s", frame,
                             FormatInputBits(WriteToInt(actualBits)).c_str(), actualSeed,
                             InGameCtrlToString(actualCtrl));
@@ -1907,6 +1912,7 @@ void StoreRemoteKeyPacket(const Pack &pack, u16 sharedRngSeed, bool captureShare
         g_State.remoteInputs[frame] = pack.ctrl.keys[i];
         g_State.remoteSeeds[frame] = actualSeed;
         g_State.remoteCtrls[frame] = actualCtrl;
+        g_State.remoteTouchData[frame] = pack.ctrl.touchData[i];
 
         if (actualChanged)
         {
@@ -2194,9 +2200,35 @@ void SendKeyPacket(int frame)
 
         const auto ctrlIt = g_State.localCtrls.find(srcFrame);
         pack.ctrl.inGameCtrl[i] = ctrlIt != g_State.localCtrls.end() ? ctrlIt->second : IGC_NONE;
+
+        const auto touchIt = g_State.localTouchData.find(srcFrame);
+        if (touchIt != g_State.localTouchData.end())
+        {
+            pack.ctrl.touchData[i] = touchIt->second;
+        }
+        else
+        {
+            pack.ctrl.touchData[i].Clear();
+        }
     }
     TraceDiagnostic("send-key-packet", "frame=%d window=%s", frame, BuildCtrlPacketWindowSummary(pack.ctrl, 4).c_str());
     SendPacket(pack);
+}
+
+void ApplyRemoteTouchForCurrentFrame(int frame)
+{
+    const auto it = g_State.remoteTouchData.find(frame);
+    if (it == g_State.remoteTouchData.end())
+        return;
+
+    const TouchFrameData &td = it->second;
+    if (td.flags == 0)
+        return;
+
+    AndroidTouchInput::ApplyRemoteTouchFrameData(td);
+    TraceDiagnostic("apply-remote-touch", "frame=%d flags=0x%02x tap=(%.1f,%.1f) swX=%.2f swY=%.2f analog=(%d,%d)",
+                    frame, td.flags, td.tapGameX, td.tapGameY, td.swipeXDelta, td.swipeYDelta,
+                    (int)td.analogX, (int)td.analogY);
 }
 
 

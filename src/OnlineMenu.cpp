@@ -34,6 +34,7 @@ struct State
     int listenPort = kDefaultPort;
     int targetDelay = kDefaultDelay;
     bool authoritativeModeEnabled = false;
+    bool disableNetplayDisplacement = true;
     char hostIp[128] = "::1";
     char relayServer[256] = "";
     char relayRoom[64] = "";
@@ -100,8 +101,22 @@ const char *GetAutoDelayTooltip()
     return Tr("根据当前 RTT 自动估算一次目标延迟。算法使用“半 RTT + 1 帧安全裕量”，只会填入一次，不会持续改动。",
               "Estimate target delay once from the current RTT. Uses \"half RTT + one frame of safety\" and only fills the field once.",
               "現在の RTT から目標遅延を一度だけ自動推定します。\"RTT の半分 + 1 フレームの余裕\" を使い、継続的には変更しません。");
-}
-const char *GetRttLabel() { return "RTT"; }
+}const char *GetDisableDisplacementLabel() { return Tr("禁用触屏位移模式", "Disable touch displacement", "タッチ変位無効"); }
+const char *GetDisableDisplacementTooltip()
+{
+    return Tr("联机中触屏拖拽自机时，使用方向键速度驱动移动而非像素级位移。\n"
+              "位移模式在联机中受到锁步延迟影响，每帧都有可感知的延迟"
+              "（例如 delay=3 时约 50ms），手指拖拽时角色始终落后手指位置。\n"
+              "关闭此选项会启用像素级位移，精度更高但联机体验较差。",
+              "In online mode, touch-drag uses direction-key speed-based movement instead of pixel-level displacement.\n"
+              "Displacement mode suffers from lockstep delay every frame "
+              "(e.g. ~50ms at delay=3), making the character visibly lag behind the finger.\n"
+              "Unchecking this enables pixel-level displacement (more precise but choppy in netplay).",
+              "オンライン対戦時、タッチドラッグ操作を方向キーベースの速度移動にします（ピクセル変位なし）。\n"
+              "変位モードはロックステップ遅延の影響を毎フレーム受け、キャラが指から遅れます"
+              "（例: delay=3 で約 50ms）。\n"
+              "チェックを外すとピクセル変位が有効になります（精度は高いが対戦時にカクつきます）。");
+}const char *GetRttLabel() { return "RTT"; }
 const char *GetStartGameLabel() { return Tr("开始游戏", "Start Game", "ゲーム開始"); }
 const char *GetStartGameLocalLabel() { return Tr("本地开始", "Start Game(local)", "ローカル開始"); }
 const char *GetReturnTitleLabel() { return Tr("返回标题 (X)", "Return to title (X)", "タイトルに戻る (X)"); }
@@ -414,6 +429,10 @@ void LoadConfig()
         {
             std::snprintf(g_State.relayRoom, sizeof(g_State.relayRoom), "%s", value.c_str());
         }
+        else if (key == "disable_netplay_displacement")
+        {
+            g_State.disableNetplayDisplacement = std::atoi(value.c_str()) != 0;
+        }
     }
 
     ClampState();
@@ -447,6 +466,7 @@ void SaveConfig()
     file << "authoritative_mode=0\n";
     file << "relay_server=" << g_State.relayServer << '\n';
     file << "relay_room=" << g_State.relayRoom << '\n';
+    file << "disable_netplay_displacement=" << (g_State.disableNetplayDisplacement ? 1 : 0) << '\n';
 }
 
 const char *GetHostButtonLabel(const Netplay::Snapshot &snapshot)
@@ -484,6 +504,11 @@ std::string LocalizeNetplayStatusText(const std::string &raw)
 std::string LocalizeRelayProbeStatusText(const std::string &raw)
 {
     return LocalizeRelayStatusText(raw);
+}
+
+bool IsNetplayDisplacementDisabled()
+{
+    return g_State.disableNetplayDisplacement;
 }
 
 void Open()
@@ -723,6 +748,19 @@ void UpdateImGui()
     else
     {
         ImGui::Text("%s: --", GetRttLabel());
+    }
+
+    ImGui::TextUnformatted(GetDisableDisplacementLabel());
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+    {
+        ShowWrappedTooltip(GetDisableDisplacementTooltip());
+    }
+    ImGui::SameLine(220.0f);
+    if (ImGui::Checkbox("##online_disable_displacement", &g_State.disableNetplayDisplacement))
+    {
+        g_State.dirty = true;
     }
 
 #if 0

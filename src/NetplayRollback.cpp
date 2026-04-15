@@ -45,6 +45,8 @@ void PruneOldFrameData(int frame)
     g_State.predictedRemoteCtrls.erase(pruneFrame);
     g_State.remoteFramesPendingRollbackCheck.erase(pruneFrame);
     g_State.authoritativeFrameHashes.erase(pruneFrame);
+    g_State.localTouchData.erase(pruneFrame);
+    g_State.remoteTouchData.erase(pruneFrame);
 }
 
 int OldestGameplaySnapshotFrame()
@@ -921,6 +923,7 @@ void HandleDesync(int frame)
         g_State.remoteSeeds.clear();
         g_State.remoteCtrls.clear();
         g_State.predictedRemoteCtrls.clear();
+        g_State.remoteTouchData.clear();
         g_State.pendingRollbackFrame = -1;
         g_State.currentCtrl = IGC_NONE;
         g_State.isSync = true;
@@ -1493,6 +1496,7 @@ void TryReconnect(int frame)
         g_State.remoteSeeds.clear();
         g_State.remoteCtrls.clear();
         g_State.predictedRemoteCtrls.clear();
+        g_State.remoteTouchData.clear();
         g_State.pendingRollbackFrame = -1;
         g_State.currentCtrl = IGC_NONE;
         g_State.isSync = true;
