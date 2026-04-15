@@ -225,7 +225,7 @@ struct ECLHelper {
     template<typename T>
     ECLHelper& operator<<(const T& data) {
         if (mBuffer) {
-            *(T*)(mBuffer + mPos) = data;
+            memcpy(mBuffer + mPos, &data, sizeof(T));
             mPos += sizeof(T);
         }
         return *this;
@@ -237,7 +237,7 @@ struct ECLHelper {
         if (mBuffer) {
             size_t oldPos = mPos;
             mPos = data.first;
-            *(T*)(mBuffer + mPos) = data.second;
+            memcpy(mBuffer + mPos, &data.second, sizeof(T));
             mPos += sizeof(T);
         }
         return *this;
@@ -246,7 +246,7 @@ struct ECLHelper {
     ECLHelper& operator<<(const std::pair<int, T>& data) {
         if (mBuffer) {
             mPos = (size_t)data.first;
-            *(T*)(mBuffer + mPos) = data.second;
+            memcpy(mBuffer + mPos, &data.second, sizeof(T));
             mPos += sizeof(T);
         }
         return *this;

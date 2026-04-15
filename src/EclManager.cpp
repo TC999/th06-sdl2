@@ -76,11 +76,11 @@ ZunResult EclManager::Load(char *eclPath)
         return ZUN_ERROR;
     }
     this->eclFile->timelineOffsets[0] =
-        (EclTimelineInstr *)((int)this->eclFile->timelineOffsets[0] + (int)this->eclFile);
+        (EclTimelineInstr *)((u8 *)this->eclFile + (uintptr_t)this->eclFile->timelineOffsets[0]);
     this->subTable = &this->eclFile->subOffsets[0];
     for (idx = 0; idx < this->eclFile->subCount; idx++)
     {
-        this->subTable[idx] = (EclRawInstr *)((int)this->subTable[idx] + (int)this->eclFile);
+        this->subTable[idx] = (EclRawInstr *)((u8 *)this->eclFile + (uintptr_t)this->subTable[idx]);
     }
     this->timeline = this->eclFile->timelineOffsets[0];
     return ZUN_SUCCESS;

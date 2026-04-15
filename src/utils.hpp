@@ -113,6 +113,11 @@ template <typename T> inline T ReadUnaligned(const void *src)
     return value;
 }
 
+template <typename T> inline void WriteUnaligned(void *dst, T value)
+{
+    memcpy(dst, &value, sizeof(value));
+}
+
 ZunResult CheckForRunningGameInstance(void);
 void DebugPrint(const char *fmt, ...);
 void DebugPrint2(const char *fmt, ...);

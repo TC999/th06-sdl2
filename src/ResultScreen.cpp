@@ -308,7 +308,7 @@ ZunResult ResultScreen::ParseClrd(ScoreDat *scoreDat, Clrd *outClrd)
             outClrd[parsedClrd->characterShotType] = *parsedClrd;
         }
         cursor -= parsedClrd->base.th6kLen;
-        parsedClrd = (Clrd *)((i32)&parsedClrd->base + parsedClrd->base.th6kLen);
+        parsedClrd = (Clrd *)((u8 *)&parsedClrd->base + parsedClrd->base.th6kLen);
     }
     return ZUN_SUCCESS;
 }

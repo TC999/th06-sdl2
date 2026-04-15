@@ -23,11 +23,13 @@
 #include "sdl2_renderer.hpp"
 #include "thprac_th06.h"
 #include <SDL.h>
+#include <stdio.h>
 
 namespace th06
 {
 namespace
 {
+
 bool HasSecondPlayer()
 {
     return Session::IsDualPlayerSession();
@@ -393,7 +395,8 @@ ZunResult GameManager::AddedCallback(GameManager *mgr)
             // Randomize catk content.
             for (catkCursor = 0; catkCursor < sizeof(Catk) / sizeof(u16); catkCursor++)
             {
-                ((u16 *)catk)[catkCursor] = g_Rng.GetRandomU16();
+                u16 rval = g_Rng.GetRandomU16();
+                memcpy((u8 *)catk + catkCursor * sizeof(u16), &rval, sizeof(u16));
             }
             catk->base.magic = CATK_MAGIC;
             catk->base.unkLen = sizeof(Catk);

@@ -378,7 +378,7 @@ void EnemyManager::RunEclTimeline()
         {
             break;
         }
-        this->timelineInstr = (EclTimelineInstr *)((i32)this->timelineInstr + this->timelineInstr->size);
+        this->timelineInstr = (EclTimelineInstr *)((u8 *)this->timelineInstr + this->timelineInstr->size);
     }
     if (!g_Gui.HasCurrentMsgIdx())
     {

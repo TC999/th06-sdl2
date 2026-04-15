@@ -3,6 +3,7 @@
 #include "Supervisor.hpp"
 #include "sdl2_renderer.hpp"
 #include "i18n.hpp"
+#include "utils.hpp"
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -501,11 +502,12 @@ static void RenderGlyphToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
             if (alpha == 0) continue;
 
             // Composite: src-over onto the destination A8R8G8B8 pixel
-            u32 *pixel = (u32 *)(dst + dy * dstPitch + dx * 4);
-            u8 dstA = (*pixel >> 24) & 0xFF;
-            u8 dstR = (*pixel >> 16) & 0xFF;
-            u8 dstG = (*pixel >> 8) & 0xFF;
-            u8 dstB = *pixel & 0xFF;
+            u8 *pixelPtr = dst + dy * dstPitch + dx * 4;
+            u32 pixelVal = utils::ReadUnaligned<u32>(pixelPtr);
+            u8 dstA = (pixelVal >> 24) & 0xFF;
+            u8 dstR = (pixelVal >> 16) & 0xFF;
+            u8 dstG = (pixelVal >> 8) & 0xFF;
+            u8 dstB = pixelVal & 0xFF;
 
             u8 srcA = alpha;
             u8 invA = 255 - srcA;
@@ -514,7 +516,7 @@ static void RenderGlyphToARGB(u8 *dst, i32 dstW, i32 dstH, i32 dstPitch,
             u8 outG = (u8)((cg * srcA + dstG * invA) / 255);
             u8 outB = (u8)((cb * srcA + dstB * invA) / 255);
 
-            *pixel = ((u32)outA << 24) | ((u32)outR << 16) | ((u32)outG << 8) | outB;
+            utils::WriteUnaligned<u32>(pixelPtr, ((u32)outA << 24) | ((u32)outR << 16) | ((u32)outG << 8) | outB);
         }
     }
     free(glyphBitmap);
@@ -834,7 +836,7 @@ static void ConvertSurfaceToRGBA(SoftSurface *surf, u8 *rgbaOut, i32 srcX, i32 s
             }
             if (surf->format == D3DFMT_A8R8G8B8)
             {
-                u32 pixel = ((u32 *)srcRow)[sx];
+                u32 pixel = utils::ReadUnaligned<u32>(srcRow + sx * 4);
                 dstRow[col * 4 + 0] = (pixel >> 16) & 0xFF;
                 dstRow[col * 4 + 1] = (pixel >> 8) & 0xFF;
                 dstRow[col * 4 + 2] = pixel & 0xFF;
@@ -842,7 +844,7 @@ static void ConvertSurfaceToRGBA(SoftSurface *surf, u8 *rgbaOut, i32 srcX, i32 s
             }
             else if (surf->format == D3DFMT_A1R5G5B5)
             {
-                u16 pixel = ((u16 *)srcRow)[sx];
+                u16 pixel = utils::ReadUnaligned<u16>(srcRow + sx * 2);
                 u8 r = (pixel >> 10) & 0x1F;
                 u8 g = (pixel >> 5) & 0x1F;
                 u8 b = pixel & 0x1F;

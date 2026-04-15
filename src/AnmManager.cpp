@@ -383,21 +383,21 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, char *path, i32 spriteIdxOffset)
     u32 *curSpriteOffset = anm->spriteOffsets;
 
     i32 index;
-    AnmRawSprite *rawSprite;
+    AnmRawSprite rawSpriteAligned;
 
     for (index = 0; index < this->anmFiles[anmIdx]->numSprites; index++, curSpriteOffset++)
     {
-        rawSprite = (AnmRawSprite *)((u8 *)anm + *curSpriteOffset);
+        memcpy(&rawSpriteAligned, (u8 *)anm + *curSpriteOffset, sizeof(AnmRawSprite));
 
         AnmLoadedSprite loadedSprite;
         loadedSprite.sourceFileIndex = this->anmFiles[anmIdx]->textureIdx;
-        loadedSprite.startPixelInclusive.x = rawSprite->offset.x;
-        loadedSprite.startPixelInclusive.y = rawSprite->offset.y;
-        loadedSprite.endPixelInclusive.x = rawSprite->offset.x + rawSprite->size.x;
-        loadedSprite.endPixelInclusive.y = rawSprite->offset.y + rawSprite->size.y;
+        loadedSprite.startPixelInclusive.x = rawSpriteAligned.offset.x;
+        loadedSprite.startPixelInclusive.y = rawSpriteAligned.offset.y;
+        loadedSprite.endPixelInclusive.x = rawSpriteAligned.offset.x + rawSpriteAligned.size.x;
+        loadedSprite.endPixelInclusive.y = rawSpriteAligned.offset.y + rawSpriteAligned.size.y;
         loadedSprite.textureWidth = (float)anm->width;
         loadedSprite.textureHeight = (float)anm->height;
-        this->LoadSprite(rawSprite->id + spriteIdxOffset, &loadedSprite);
+        this->LoadSprite(rawSpriteAligned.id + spriteIdxOffset, &loadedSprite);
 
         // Log sprite data for etama3 (anmIdx==6) — items
         if (anmIdx == 6)
@@ -405,11 +405,11 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, char *path, i32 spriteIdxOffset)
             DIAG_LOG_INFO(
                 "LoadAnm[%d] sprite raw_id=%u global_id=%u srcFileIdx=%d "
                 "px=[%.0f,%.0f]-[%.0f,%.0f] texSize=%dx%d",
-                anmIdx, rawSprite->id, rawSprite->id + spriteIdxOffset,
+                anmIdx, rawSpriteAligned.id, rawSpriteAligned.id + spriteIdxOffset,
                 loadedSprite.sourceFileIndex,
-                rawSprite->offset.x, rawSprite->offset.y,
-                rawSprite->offset.x + rawSprite->size.x,
-                rawSprite->offset.y + rawSprite->size.y,
+                rawSpriteAligned.offset.x, rawSpriteAligned.offset.y,
+                rawSpriteAligned.offset.x + rawSpriteAligned.size.x,
+                rawSpriteAligned.offset.y + rawSpriteAligned.size.y,
                 anm->width, anm->height);
         }
     }
@@ -431,7 +431,7 @@ ZunResult AnmManager::LoadAnm(i32 anmIdx, char *path, i32 spriteIdxOffset)
                 index, curSpriteOffset[0], globalIdx, curSpriteOffset[1],
                 (void *)scriptPtr,
                 scriptPtr ? (int)((const u8 *)scriptPtr)[2] : -1,
-                scriptPtr ? (int)((const i16 *)scriptPtr)[0] : -1);
+                scriptPtr ? (int)utils::ReadUnaligned<i16>(scriptPtr) : -1);
         }
     }
 
@@ -445,16 +445,16 @@ void AnmManager::ReleaseAnm(i32 anmIdx)
 {
     if (this->anmFiles[anmIdx] != NULL)
     {
-        i32 *spriteIdx;
+        i32 spriteIdxVal;
         i32 i;
         i32 spriteIdxOffset = this->anmFilesSpriteIndexOffsets[anmIdx];
         u32 *byteOffset = this->anmFiles[anmIdx]->spriteOffsets;
         for (i = 0; i < this->anmFiles[anmIdx]->numSprites; i++, byteOffset++)
         {
-            spriteIdx = (i32 *)((u8 *)this->anmFiles[anmIdx] + *byteOffset);
-            memset(&this->sprites[*spriteIdx + spriteIdxOffset], 0,
-                   sizeof(this->sprites[*spriteIdx + spriteIdxOffset]));
-            this->sprites[*spriteIdx + spriteIdxOffset].sourceFileIndex = -1;
+            spriteIdxVal = utils::ReadUnaligned<i32>((u8 *)this->anmFiles[anmIdx] + *byteOffset);
+            memset(&this->sprites[spriteIdxVal + spriteIdxOffset], 0,
+                   sizeof(this->sprites[spriteIdxVal + spriteIdxOffset]));
+            this->sprites[spriteIdxVal + spriteIdxOffset].sourceFileIndex = -1;
         }
 
         for (i = 0; i < this->anmFiles[anmIdx]->numScripts; i++, byteOffset += 2)

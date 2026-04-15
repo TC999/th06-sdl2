@@ -527,7 +527,7 @@ ZunResult Gui::LoadMsg(char *path)
     for (idx = 0; idx < this->impl->msg.msgFile->numInstrs; idx++)
     {
         this->impl->msg.msgFile->instrs[idx] =
-            (MsgRawInstr *)((i32)this->impl->msg.msgFile->instrs[idx] + (i32)this->impl->msg.msgFile);
+            (MsgRawInstr *)((u8 *)this->impl->msg.msgFile + (uintptr_t)this->impl->msg.msgFile->instrs[idx]);
     }
     return ZUN_SUCCESS;
 }

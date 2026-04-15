@@ -432,12 +432,12 @@ ZunResult Stage::LoadStageData(char *anmpath, char *stdpath)
     }
     this->objectsCount = this->stdData->nbObjects;
     this->quadCount = this->stdData->nbFaces;
-    this->objectInstances = (RawStageObjectInstance *)(this->stdData->facesOffset + (i32)this->stdData);
-    this->beginningOfScript = (RawStageInstr *)(this->stdData->scriptOffset + (i32)this->stdData);
+    this->objectInstances = (RawStageObjectInstance *)((u8 *)this->stdData + this->stdData->facesOffset);
+    this->beginningOfScript = (RawStageInstr *)((u8 *)this->stdData + this->stdData->scriptOffset);
     this->objects = (RawStageObject **)(this->stdData + 1);
     for (idx = 0; idx < this->objectsCount; idx++)
     {
-        this->objects[idx] = (RawStageObject *)((i32)this->objects[idx] + (i32)this->stdData);
+        this->objects[idx] = (RawStageObject *)((u8 *)this->stdData + (uintptr_t)this->objects[idx]);
     }
     sizeVmArr = this->quadCount * sizeof(AnmVm);
     this->quadVms = (AnmVm *)malloc(sizeVmArr);
