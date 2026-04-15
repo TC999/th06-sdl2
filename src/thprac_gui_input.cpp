@@ -186,7 +186,11 @@ int GetChordPressedDuration(int chord)
     SDL_Scancode sc = chord_scancodes[chord];
     if (sc >= numkeys)
         return 0;
-    if (state[sc]) {
+    bool isDown = state[sc] != 0;
+    // 也检查触控 scancode（功能键虚拟按钮）.
+    if (!isDown && th06::AndroidTouchInput::IsEnabled())
+        isDown = th06::AndroidTouchInput::IsTouchScancode(sc);
+    if (isDown) {
         if (s_chord_duration[chord] < 255)
             s_chord_duration[chord]++;
     } else {

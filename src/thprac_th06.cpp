@@ -1853,7 +1853,7 @@ namespace TH06 {
         SINGLETON(TH06InGameInfo)
 
     public:
-        int32_t mMissCount;
+        int32_t mMissCount = 0;
         struct BooksInfo {
             bool is_books;
             int32_t time_books;
@@ -1864,12 +1864,15 @@ namespace TH06 {
 
         void GameStartInit()
         {
-            mMissCount = 0;
             booksInfo.is_books = false;
             booksInfo.time_books = 0;
             booksInfo.is_died = false;
             booksInfo.miss_count = 0;
             booksInfo.bomb_count = 0;
+        }
+        void GameRunInit()
+        {
+            mMissCount = 0;
         }
 
     protected:
@@ -4954,6 +4957,11 @@ namespace TH06 {
     void THPracApplyStageParams()
     {
         TH06InGameInfo::singleton().GameStartInit();
+        // Only reset miss count at the start of a new game run, not on stage transitions
+        if (th06::g_Supervisor.curState != th06::SUPERVISOR_STATE_GAMEMANAGER_REINIT)
+        {
+            TH06InGameInfo::singleton().GameRunInit();
+        }
         g_lock_timer = 0;
         g_last_rep_seed = GM_RngSeed();
 
