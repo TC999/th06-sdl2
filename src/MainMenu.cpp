@@ -433,7 +433,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         THPrac::TH06::THPracResetEndingShortcut();
         MoveCursor(menu, 11);
         // Touch: tap on keyconfig item to select.
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             AndroidTouchInput::TryTouchSelect(&menu->vm[34], 11, menu->cursor);
         }
@@ -660,7 +660,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             }
         }
         // Touch: tap on a difficulty item to select it directly.
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             int diffCount = (g_GameManager.difficulty < 4) ? 4 : 1;
             AnmVm *diffStart = (g_GameManager.difficulty < 4) ? &menu->vm[81] : &menu->vm[85];
@@ -836,14 +836,15 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
             break;
         }
-        // Touch: swipe left/right or tap to select a character.
-        if (AndroidTouchInput::IsEnabled())
+        // Touch: swipe to select a character.
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             // Horizontal swipe → switch character.
+            // 左滑(swipeDX<0)选右边角色, 右滑(swipeDX>0)选左边角色 (类似翻页手势).
             float swipeDX;
             if (AndroidTouchInput::ConsumeSwipeX(swipeDX))
             {
-                int newChar = (swipeDX > 0) ? 1 : 0;
+                int newChar = (swipeDX > 0) ? 0 : 1;
                 if (newChar != menu->cursor)
                 {
                     menu->cursor = newChar;
@@ -866,38 +867,13 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                     }
                 }
             }
-            // Tap on character portrait.
+            // 点击任意位置 → 确认当前角色.
+            // RecognizeTap 中滑动和点击互斥（长距离=swipe，短距离=tap），不会误判.
             float tapX, tapY;
             if (AndroidTouchInput::ConsumeTap(tapX, tapY))
             {
-                // Character portraits are left/right halves of screen.
-                int tappedChar = (tapX >= 320.0f) ? 1 : 0;
-                if (menu->cursor == tappedChar)
-                {
-                    g_CurFrameInput |= TH_BUTTON_SHOOT;
-                    g_LastFrameInput &= ~TH_BUTTON_SHOOT;
-                }
-                else
-                {
-                    menu->cursor = tappedChar;
-                    g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
-                    vmList = &menu->vm[86];
-                    for (i = 0; i < 2; i++, vmList++)
-                    {
-                        if (i == menu->cursor)
-                        {
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
-                            vmList++;
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
-                        }
-                        else
-                        {
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
-                            vmList++;
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
-                        }
-                    }
-                }
+                g_CurFrameInput |= TH_BUTTON_SHOOT;
+                g_LastFrameInput &= ~TH_BUTTON_SHOOT;
             }
         }
         if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
@@ -1000,7 +976,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             break;
         }
         // Touch: tap on a shot type to select it directly.
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             AndroidTouchInput::TryTouchSelect(&menu->vm[92 + g_GameManager.character * 2], 2, menu->cursor);
         }
@@ -1286,14 +1262,15 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                 }
             }
         }
-        // Touch: swipe left/right or tap to select character.
-        if (AndroidTouchInput::IsEnabled())
+        // Touch: swipe to select character.
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             // Horizontal swipe → switch character.
+            // 左滑(swipeDX<0)选右边角色, 右滑(swipeDX>0)选左边角色 (类似翻页手势).
             float swipeDX;
             if (AndroidTouchInput::ConsumeSwipeX(swipeDX))
             {
-                int newChar = (swipeDX > 0) ? 1 : 0;
+                int newChar = (swipeDX > 0) ? 0 : 1;
                 if (newChar != menu->cursor)
                 {
                     menu->cursor = newChar;
@@ -1316,37 +1293,12 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
                     }
                 }
             }
-            // Tap on character portrait.
+            // 点击任意位置 → 确认当前角色.
             float tapX, tapY;
             if (AndroidTouchInput::ConsumeTap(tapX, tapY))
             {
-                int tappedChar = (tapX >= 320.0f) ? 1 : 0;
-                if (menu->cursor == tappedChar)
-                {
-                    g_CurFrameInput |= TH_BUTTON_SHOOT;
-                    g_LastFrameInput &= ~TH_BUTTON_SHOOT;
-                }
-                else
-                {
-                    menu->cursor = tappedChar;
-                    g_SoundPlayer.PlaySoundByIdx(SOUND_MOVE_MENU, 0);
-                    vmList = &menu->vm[86];
-                    for (i = 0; i < 2; i++, vmList++)
-                    {
-                        if (i == menu->cursor)
-                        {
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
-                            vmList++;
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 9 : 10;
-                        }
-                        else
-                        {
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
-                            vmList++;
-                            vmList->pendingInterrupt = (tappedChar == 0) ? 12 : 11;
-                        }
-                    }
-                }
+                g_CurFrameInput |= TH_BUTTON_SHOOT;
+                g_LastFrameInput &= ~TH_BUTTON_SHOOT;
             }
         }
     here2:
@@ -1495,7 +1447,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
             break;
         }
         // Touch: tap on shot type to select.
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             AndroidTouchInput::TryTouchSelect(&menu->vm[92 + g_GameManager.character2 * 2], 2, menu->cursor);
         }
@@ -1599,7 +1551,7 @@ ChainCallbackResult MainMenu::OnUpdate(MainMenu *menu)
         }
         // Touch: tap on practice stage text row.
         // ChoosePracticeLevel draws "STAGE N ..." at (320, 200 + stage*24).
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             float gx, gy;
             if (AndroidTouchInput::ConsumeTap(gx, gy))
@@ -1887,7 +1839,7 @@ ZunBool MainMenu::WeirdSecondInputCheck()
     }
 
     // Touch: tap anywhere on the opening screen to enter main menu.
-    if (AndroidTouchInput::IsEnabled())
+    if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
     {
         float gx, gy;
         if (AndroidTouchInput::ConsumeTap(gx, gy))
@@ -1957,10 +1909,18 @@ ZunResult MainMenu::DrawStartMenu(void)
     if (this->stateTimer >= 0x14)
     {
         // Touch: tap on a main menu item to select it directly.
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
+            int prevCursor = this->cursor;
             AndroidTouchInput::TryTouchSelect(this->vm, 8, this->cursor);
             AndroidTouchInput::TryTouchSelectRect(440.0f, 394.0f, 560.0f, 420.0f, 8, this->cursor);
+            // Extra(item 1) 未解锁时不允许通过触摸选中，与方向键逻辑一致.
+            if (this->cursor == 1 && !g_GameManager.HasReachedMaxClears(0, 0) &&
+                !g_GameManager.HasReachedMaxClears(0, 1) && !g_GameManager.HasReachedMaxClears(1, 0) &&
+                !g_GameManager.HasReachedMaxClears(1, 1))
+            {
+                this->cursor = prevCursor;
+            }
         }
         if (WAS_PRESSED(TH_BUTTON_SELECTMENU))
         {
@@ -2246,7 +2206,7 @@ i32 MainMenu::ReplayHandling()
             MoveCursor(this, this->replayFilesNum);
             this->chosenReplay = this->cursor;
             // Touch: tap on a replay file to select it (wide rect hit area).
-            if (AndroidTouchInput::IsEnabled())
+            if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
             {
                 float tapX, tapY;
                 if (AndroidTouchInput::ConsumeTap(tapX, tapY))
@@ -2356,7 +2316,7 @@ i32 MainMenu::ReplayHandling()
             }
         }
         // Touch: tap on a replay stage row (vm[115..121]).
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             float gx, gy;
             if (AndroidTouchInput::ConsumeTap(gx, gy))
@@ -2655,7 +2615,7 @@ u32 MainMenu::OnUpdateOptionsMenu()
     {
         // Touch: tap on an option item to move cursor (first tap) or confirm (second tap on same item).
         // Also tap sub-items (value selectors) directly when cursor is on the correct row.
-        if (AndroidTouchInput::IsEnabled())
+        if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
         {
             float gx, gy;
             if (AndroidTouchInput::ConsumeTap(gx, gy))

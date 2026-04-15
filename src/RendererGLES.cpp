@@ -7,6 +7,7 @@
 #include "AnmManager.hpp"
 #include "Supervisor.hpp"
 #include "TouchVirtualButtons.hpp"
+#include "MenuTouchButtons.hpp"
 #include "thprac_gui_integration.h"
 #include "gles_shaders.h"
 #include <SDL_image.h>
@@ -2060,8 +2061,12 @@ void RendererGLES::TakeScreenshot(u32 dstTex, i32 left, i32 top, i32 width, i32 
 
 void RendererGLES::DrawScreenSpaceButtons()
 {
-    TouchButtonInfo buttons[4];
-    int count = TouchVirtualButtons::GetButtonInfo(buttons, 4);
+    // Collect buttons from both gameplay and menu virtual button systems.
+    // Gameplay has up to 7 buttons (4 left + 3 right function keys).
+    // Menu has up to 2 buttons. Total max = 9.
+    TouchButtonInfo buttons[12];
+    int count = TouchVirtualButtons::GetButtonInfo(buttons, 7);
+    count += MenuTouchButtons::GetButtonInfo(buttons + count, 5);
     if (count == 0)
         return;
 
@@ -2123,13 +2128,29 @@ void RendererGLES::DrawScreenSpaceButtons()
 
     for (int i = 0; i < count; i++)
     {
-        // Map game coords → screen coords
+        // Map game coords → screen coords.
+        //   Y: straightforward proportional mapping into the viewport.
+        //   X: depends on the button's anchor (which pillarbox it lives on).
         float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
         float sr = buttons[i].gameRadius * yScale;
-        // Button right edge touches game viewport left edge
-        float sx = (float)offsetX - sr;
-        if (sx < sr)
-            sx = sr;
+
+        float sx;
+        if (buttons[i].anchor == ScreenAnchor::RightPillar)
+        {
+            // Right pillarbox: button left edge touches game viewport right edge.
+            //   sx = (rw - offsetX) + sr
+            // This mirrors the left-pillarbox formula across the viewport center.
+            sx = (float)(rw - offsetX) + sr;
+            if (sx > (float)rw - sr)
+                sx = (float)rw - sr;
+        }
+        else
+        {
+            // Left pillarbox (default): button right edge touches game viewport left edge.
+            sx = (float)offsetX - sr;
+            if (sx < sr)
+                sx = sr;
+        }
 
         // --- Filled circle (horizontal-band triangle strip) ---
         {
@@ -2206,8 +2227,19 @@ void RendererGLES::DrawScreenSpaceButtons()
 
             float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
             float sr = buttons[i].gameRadius * yScale;
-            float sx = (float)offsetX - sr;
-            if (sx < sr) sx = sr;
+
+            // Recompute sx for text placement, matching the circle positioning.
+            float sx;
+            if (buttons[i].anchor == ScreenAnchor::RightPillar)
+            {
+                sx = (float)(rw - offsetX) + sr;
+                if (sx > (float)rw - sr) sx = (float)rw - sr;
+            }
+            else
+            {
+                sx = (float)offsetX - sr;
+                if (sx < sr) sx = sr;
+            }
 
             float charW = 14.0f * buttons[i].textScale * yScale;
             float charH = 16.0f * buttons[i].textScale * yScale;

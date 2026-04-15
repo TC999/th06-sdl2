@@ -8,6 +8,16 @@
 namespace th06
 {
 
+// Which pillarbox (or screen edge) a touch button is anchored to.
+// The renderer uses this to compute the button's screen-space X position:
+//   LeftPillar  → button right edge touches game viewport left edge
+//   RightPillar → button left edge touches game viewport right edge
+enum class ScreenAnchor
+{
+    LeftPillar,
+    RightPillar,
+};
+
 // Info struct for screen-space overlay rendering.
 struct TouchButtonInfo
 {
@@ -18,6 +28,7 @@ struct TouchButtonInfo
     const char *label;
     float textScale;
     bool held;           // currently pressed
+    ScreenAnchor anchor; // which pillarbox to render on
 };
 
 // Simple virtual button overlay for touch input.
@@ -48,6 +59,9 @@ bool ShouldShow();
 
 // Reset all button state.
 void Reset();
+
+// Returns true if the given finger is currently held by a virtual button.
+bool IsTrackedFinger(SDL_FingerID fingerId);
 
 }; // namespace TouchVirtualButtons
 }; // namespace th06

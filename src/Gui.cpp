@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "AnmManager.hpp"
+#include "AndroidTouchInput.hpp"
 #include "AsciiManager.hpp"
 #include "Chain.hpp"
 #include "ChainPriorities.hpp"
@@ -598,8 +599,43 @@ ZunResult GuiImpl::RunMsg()
 
     if (this->msg.currentMsgIdx < 0)
     {
+        AndroidTouchInput::SetDialogueOverlay(false);
         return ZUN_ERROR;
     }
+
+    // ── 对话框触摸处理 ──────────────────────────────────────────────────
+    // 对话框区域范围（游戏坐标 640x480 空间）：
+    //   DrawDialogue 中对话框顶点:
+    //     左X = arcadeRegionTopLeftPos.x + (arcadeRegionSize.x - 256) / 2 - 16
+    //     右X = 左X + 256 + 32
+    //     顶Y = 384,  底Y = 432
+    //   标准值: 左=80, 右=368, 顶=384, 底=432
+    //   这里使用稍大的触摸区域以便于手指点击.
+    AndroidTouchInput::SetDialogueOverlay(true);
+    if (AndroidTouchInput::IsEnabled() || AndroidTouchInput::HasPendingTouchData())
+    {
+        // 对话框触摸区域（比实际渲染区域更大，便于手指操作）.
+        constexpr float kDlgLeft   = 32.0f;   // 游戏区域左边界
+        constexpr float kDlgRight  = 416.0f;  // 游戏区域右边界
+        constexpr float kDlgTop    = 350.0f;  // 稍高于对话框顶部(384)
+        constexpr float kDlgBottom = 450.0f;  // 稍低于对话框底部(432)
+
+        // 点击对话框区域 → 注入 Z（推进对话）.
+        float tapX, tapY;
+        if (AndroidTouchInput::ConsumeTap(tapX, tapY))
+        {
+            if (tapX >= kDlgLeft && tapX <= kDlgRight &&
+                tapY >= kDlgTop  && tapY <= kDlgBottom)
+            {
+                g_CurFrameInput |= TH_BUTTON_SHOOT;
+                g_LastFrameInput &= ~TH_BUTTON_SHOOT;
+            }
+        }
+
+        // 长按屏幕 → 快进对话已移至 AndroidTouchInput::Update()，
+        // 通过 g_TouchButtonsCur |= TH_BUTTON_SKIP 走锁步同步。
+    }
+
     if (this->msg.ignoreWaitCounter > 0)
     {
         this->msg.ignoreWaitCounter--;
@@ -616,6 +652,7 @@ ZunResult GuiImpl::RunMsg()
         {
         case MSG_OPCODE_MSGDELETE:
             this->msg.currentMsgIdx = 0xffffffff;
+            AndroidTouchInput::SetDialogueOverlay(false);
             return ZUN_ERROR;
         case MSG_OPCODE_PORTRAITANMSCRIPT:
         {

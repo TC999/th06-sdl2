@@ -30,13 +30,16 @@ struct VirtualButtonDef
     float centerY;          // game Y coordinate (also maps to screen Y)
     float radius;           // visual radius in game coordinates
     float hitRadius;        // touch hit radius
-    u16 buttonFlag;         // TouhouButton flag
+    u16 buttonFlag;         // TouhouButton flag (0 if scancode-only)
+    SDL_Scancode scancode;  // scancode to inject when held (SDL_SCANCODE_UNKNOWN = none)
+    ScreenAnchor anchor;    // which pillarbox this button lives in
     D3DCOLOR fillColor;     // normal fill (ARGB, semi-transparent white)
     D3DCOLOR fillPressed;   // pressed fill (higher alpha)
     D3DCOLOR borderColor;   // border ring color
     const char *label;      // text label
     float textScale;        // text scale
     bool isToggle;          // true = toggle mode (tap on/off), false = hold mode
+    bool alwaysVisible;     // true = show in ALL scenes (menu + gameplay)
 };
 
 // centerX is set to -radius so the hit-test center matches the visual
@@ -49,18 +52,30 @@ struct VirtualButtonDef
 // a typical 2400×1080 phone, causing taps on the left half of the visible
 // circle to miss.
 static const VirtualButtonDef kButtons[] = {
+    // ── 左侧黑边: 游戏操作按钮 (LeftPillar) ──
     // btn_ESC (menu/pause) — hold mode
-    { -24.0f,  46.0f, 24.0f, 32.0f, TH_BUTTON_MENU,
-       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "ESC", 1.0f, false },
+    { -24.0f,  46.0f, 24.0f, 32.0f, TH_BUTTON_MENU, SDL_SCANCODE_UNKNOWN, ScreenAnchor::LeftPillar,
+       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "ESC", 1.0f, false, false },
     // btn_Z (shoot) — toggle mode: tap to start shooting, tap again to stop
-    { -28.0f, 222.0f, 28.0f, 36.0f, TH_BUTTON_SHOOT,
-       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "Z",   1.6f, true  },
+    { -28.0f, 222.0f, 28.0f, 36.0f, TH_BUTTON_SHOOT, SDL_SCANCODE_UNKNOWN, ScreenAnchor::LeftPillar,
+       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "Z",   1.6f, true,  false },
     // btn_S (focus/slow) — toggle mode: tap to enable slow, tap again to disable
-    { -28.0f, 302.0f, 28.0f, 36.0f, TH_BUTTON_FOCUS,
-       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "S",   1.6f, true  },
+    { -28.0f, 302.0f, 28.0f, 36.0f, TH_BUTTON_FOCUS, SDL_SCANCODE_UNKNOWN, ScreenAnchor::LeftPillar,
+       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "S",   1.6f, true,  false },
     // btn_X (bomb) — hold mode
-    { -28.0f, 382.0f, 28.0f, 36.0f, TH_BUTTON_BOMB,
-       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "X",   1.6f, false },
+    { -28.0f, 382.0f, 28.0f, 36.0f, TH_BUTTON_BOMB, SDL_SCANCODE_UNKNOWN, ScreenAnchor::LeftPillar,
+       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "X",   1.6f, false, false },
+
+    // ── 右侧黑边: 常驻功能键 (RightPillar, alwaysVisible=true) ──
+    // btn_~ (tilde/grave) — hold mode, 输出 scancode
+    { 660.0f,  80.0f, 20.0f, 28.0f, 0, SDL_SCANCODE_GRAVE, ScreenAnchor::RightPillar,
+       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "~",   1.4f, false, true },
+    // btn_F11 — hold mode, 输出 scancode
+    { 660.0f, 140.0f, 20.0f, 28.0f, 0, SDL_SCANCODE_F11, ScreenAnchor::RightPillar,
+       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "F11", 0.85f, false, true },
+    // btn_Backspace (←) — hold mode, 输出 scancode
+    { 660.0f, 200.0f, 20.0f, 28.0f, 0, SDL_SCANCODE_BACKSPACE, ScreenAnchor::RightPillar,
+       0x60FFFFFF, 0x98FFFFFF, 0xB0FFFFFF, "BS",  1.0f, false, true },
 };
 
 static constexpr int kButtonCount = sizeof(kButtons) / sizeof(kButtons[0]);
@@ -92,11 +107,16 @@ void TouchVirtualButtons::Reset()
 
 bool TouchVirtualButtons::HandleFingerDown(SDL_FingerID fingerId, float gameX, float gameY)
 {
-    if (!ShouldShow())
-        return false;
+    bool gameplayVisible = ShouldShow();
 
     for (int i = 0; i < kButtonCount; i++)
     {
+        // 非 alwaysVisible 按钮只在 gameplay 时可用.
+        if (!kButtons[i].alwaysVisible && !gameplayVisible)
+            continue;
+        // alwaysVisible 按钮需要 IsEnabled() 检查.
+        if (kButtons[i].alwaysVisible && !AndroidTouchInput::IsEnabled())
+            continue;
         float dx = gameX - kButtons[i].centerX;
         float dy = gameY - kButtons[i].centerY;
         float dist = std::sqrt(dx * dx + dy * dy);
@@ -145,31 +165,38 @@ bool TouchVirtualButtons::HandleFingerUp(SDL_FingerID fingerId)
 
 u16 TouchVirtualButtons::GetButtonFlags()
 {
-    // Pause/retry menu: block output but PRESERVE toggle state.
-    // This check must come BEFORE ShouldShow() because there is a 1-frame
-    // lag where isInMenu is still 1 (gameplay) after isInRetryMenu becomes 1
-    // (due to chain priority: Supervisor(0) reads input before GameManager(4)
-    // updates isInMenu). Without this early check, the SHOOT toggle leaks
-    // into g_CurFrameInput on that frame.
-    if (g_GameManager.isInRetryMenu || g_GameManager.isInGameMenu)
-        return 0;
+    // Pause/retry menu: block gameplay button output but PRESERVE toggle state.
+    // alwaysVisible buttons still output their scancodes.
+    bool blockGameplay = g_GameManager.isInRetryMenu || g_GameManager.isInGameMenu;
 
-    if (!ShouldShow())
+    if (!ShouldShow() && !blockGameplay)
     {
-        // Other non-gameplay states (title, main menu): fully reset
+        // Not in gameplay and not in pause menu: reset gameplay buttons,
+        // but keep alwaysVisible buttons active.
         for (int i = 0; i < kButtonCount; i++)
         {
-            g_Held[i] = false;
-            g_HeldFinger[i] = -1;
+            if (!kButtons[i].alwaysVisible)
+            {
+                g_Held[i] = false;
+                g_HeldFinger[i] = -1;
+            }
         }
-        return 0;
     }
 
     u16 flags = 0;
     for (int i = 0; i < kButtonCount; i++)
     {
-        if (g_Held[i])
-            flags |= kButtons[i].buttonFlag;
+        if (!g_Held[i])
+            continue;
+
+        // Gameplay buttons are blocked during pause/retry and non-gameplay.
+        if (!kButtons[i].alwaysVisible && (blockGameplay || !ShouldShow()))
+            continue;
+
+        flags |= kButtons[i].buttonFlag;
+        // 功能键: 通过 scancode 而非 TouhouButton flag 输出.
+        if (kButtons[i].scancode != SDL_SCANCODE_UNKNOWN)
+            AndroidTouchInput::InjectHeldScancode(kButtons[i].scancode);
     }
     return flags;
 }
@@ -193,21 +220,42 @@ bool TouchVirtualButtons::ShouldShow()
 
 int TouchVirtualButtons::GetButtonInfo(TouchButtonInfo *out, int maxCount)
 {
-    if (!ShouldShow())
+    bool gameplayVisible = ShouldShow();
+    bool touchEnabled = AndroidTouchInput::IsEnabled();
+    if (!gameplayVisible && !touchEnabled)
         return 0;
 
-    int count = kButtonCount < maxCount ? kButtonCount : maxCount;
-    for (int i = 0; i < count; i++)
+    int count = 0;
+    for (int i = 0; i < kButtonCount && count < maxCount; i++)
     {
-        out[i].gameY      = kButtons[i].centerY;
-        out[i].gameRadius = kButtons[i].radius;
-        out[i].fillColor  = g_Held[i] ? kButtons[i].fillPressed : kButtons[i].fillColor;
-        out[i].borderColor = kButtons[i].borderColor;
-        out[i].label      = kButtons[i].label;
-        out[i].textScale  = kButtons[i].textScale;
-        out[i].held       = g_Held[i];
+        // 非 alwaysVisible 按钮只在 gameplay 时显示.
+        if (!kButtons[i].alwaysVisible && !gameplayVisible)
+            continue;
+        // alwaysVisible 按钮在触控启用时始终显示.
+        if (kButtons[i].alwaysVisible && !touchEnabled)
+            continue;
+
+        out[count].gameY       = kButtons[i].centerY;
+        out[count].gameRadius  = kButtons[i].radius;
+        out[count].fillColor   = g_Held[i] ? kButtons[i].fillPressed : kButtons[i].fillColor;
+        out[count].borderColor = kButtons[i].borderColor;
+        out[count].label       = kButtons[i].label;
+        out[count].textScale   = kButtons[i].textScale;
+        out[count].held        = g_Held[i];
+        out[count].anchor      = kButtons[i].anchor;
+        count++;
     }
     return count;
+}
+
+bool TouchVirtualButtons::IsTrackedFinger(SDL_FingerID fingerId)
+{
+    for (int i = 0; i < kButtonCount; i++)
+    {
+        if (g_Held[i] && g_HeldFinger[i] == fingerId)
+            return true;
+    }
+    return false;
 }
 
 } // namespace th06
