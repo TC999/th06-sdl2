@@ -74,6 +74,7 @@ set(TH06_GAME_SOURCES
     ${TH06_ROOT}/src/main.cpp
     ${TH06_ROOT}/src/AndroidTouchInput.cpp
     ${TH06_ROOT}/src/TouchVirtualButtons.cpp
+    ${TH06_ROOT}/src/MenuTouchButtons.cpp
     ${TH06_ROOT}/src/AnmManager.cpp
     ${TH06_ROOT}/src/AsciiManager.cpp
     ${TH06_ROOT}/src/AstroBot.cpp
