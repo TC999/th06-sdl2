@@ -6,6 +6,8 @@ layout(push_constant) uniform PC {
     vec2 invScreen;  // 1/screenW, 1/screenH for ortho mapping
     vec2 _pad;
     mat4 mvp;        // unused for 2D; layout fixed for shader-stage-compat
+    vec4 fogColor;   // unused by 2D no-tex path; layout-shared with textured frag
+    vec4 fogParams;
 } pc;
 
 layout(location = 0) in vec4 in_pos;     // (x, y, z, rhw) — screen pixels

@@ -40,10 +40,13 @@ inline void ColorToFloat4(D3DCOLOR c, float out[4]) {
 }
 
 // Push constant block — must match GLSL `layout(push_constant) uniform PC` in all vertex shaders.
+// Total = 8 + 8 + 64 + 16 + 16 = 112 bytes (within Vulkan-guaranteed 128-byte minimum).
 struct PushConstants {
     float invScreen[2];   // 1/screenWidth, 1/screenHeight (used by xyzrwh paths)
     float _pad[2];
     float mvp[16];        // column-major in shader; we feed row-major D3D bytes -> implicit transpose
+    float fogColor[4];    // RGBA, all 0..1
+    float fogParams[4];   // [0]=start, [1]=end, [2]=enabled (1.0 = on, 0.0 = off), [3]=pad
 };
 
 inline void Mat4Mul_RowMajor(const float* a, const float* b, float* out) {
@@ -161,9 +164,9 @@ bool RendererVulkan::initLayoutsAndPool() {
     dslci.pBindings    = &bind;
     TH_VK_CHECK(vkCreateDescriptorSetLayout(dev, &dslci, nullptr, &descLayoutTex_));
 
-    // Push constant range: vertex stage
+    // Push constant range: vertex stage (mvp/invScreen) + fragment stage (fog)
     VkPushConstantRange pcr = {};
-    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pcr.offset     = 0;
     pcr.size       = sizeof(PushConstants);
 
@@ -427,7 +430,9 @@ void RendererVulkan::SetTextureStageSelectDiffuse()      { currentTexture   = 0;
 void RendererVulkan::SetTextureStageModulateTexture()    { /* SetTexture(prev) restores the binding; pipeline colorOp picks Modulate via currentColorOp. */ }
 void RendererVulkan::SetFog(i32 e, D3DCOLOR c, f32 s, f32 z) {
     fogEnabled = e; fogColor = c; fogStart = s; fogEnd = z;
-    // Phase 2: fog not implemented in shaders. Recorded for parity inspection only.
+    // Linear D3DFOGMODE_LINEAR fog: drawCommon pushes these into PushConstants
+    // and f_textured.frag applies `mix(fogColor, base, clamp((end - viewZ)/(end - start)))`.
+    // Gated to depthTest=true draws so 2D paths (xyzrwh, w=1) never trigger it.
 }
 
 // --- Transforms ---
@@ -503,13 +508,27 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
                                 pipelineLayoutTex_, 0, 1, &ds, 0, nullptr);
     }
 
-    // 4. Push constants (invScreen + mvp).
+    // 4. Push constants (invScreen + mvp + fog).
     PushConstants pc{};
     pc.invScreen[0] = (screenWidth  > 0) ? 1.0f / float(screenWidth)  : 0.0f;
     pc.invScreen[1] = (screenHeight > 0) ? 1.0f / float(screenHeight) : 0.0f;
     std::memcpy(pc.mvp, mvpMat_, sizeof(pc.mvp));
+    // Fog only applies to 3D draws (depthTest=true); 2D screen-space draws disable it
+    // unconditionally even if SetFog(1) was called earlier (matches GL discipline:
+    // TH06 only invokes SetFog before stage 3D background, and fog has no meaningful
+    // viewZ for pre-projected xyzrwh verts).
+    const bool fogOn = depthTest && (fogEnabled != 0);
+    pc.fogColor[0]  = fogOn ? D3DCOLOR_R(fogColor) / 255.0f : 0.0f;
+    pc.fogColor[1]  = fogOn ? D3DCOLOR_G(fogColor) / 255.0f : 0.0f;
+    pc.fogColor[2]  = fogOn ? D3DCOLOR_B(fogColor) / 255.0f : 0.0f;
+    pc.fogColor[3]  = fogOn ? D3DCOLOR_A(fogColor) / 255.0f : 0.0f;
+    pc.fogParams[0] = fogOn ? fogStart : 0.0f;
+    pc.fogParams[1] = fogOn ? fogEnd   : 1.0f;
+    pc.fogParams[2] = fogOn ? 1.0f     : 0.0f;
+    pc.fogParams[3] = 0.0f;
     VkPipelineLayout layout = hasTexture ? pipelineLayoutTex_ : pipelineLayoutNoTex_;
-    vkCmdPushConstants(frame.cmd, layout, VK_SHADER_STAGE_VERTEX_BIT,
+    vkCmdPushConstants(frame.cmd, layout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pc);
 
     // 5. Bind vertex buffer + draw.
