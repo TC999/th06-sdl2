@@ -116,18 +116,17 @@ int main(int argc, char *argv[])
 {
     i32 renderResult = 0;
 
-    // Phase 5a (ADR-008): parse --backend before any SDL/window init.
+    // Phase 5b (ADR-008/010): parse --backend before any SDL/window init.
+    // --backend=vulkan now actually creates RendererVulkan + SDL_WINDOW_VULKAN.
+    // thprac (ImGui OpenGL2/3 backend) is auto-disabled on Vulkan path until
+    // Phase 5b.2 vendors imgui_impl_vulkan.
     th06::g_SelectedBackend = th06::SelectBackendFromCommandLine(argc, argv);
     if (th06::g_SelectedBackend == th06::BackendKind::Vulkan)
     {
         std::fprintf(stderr,
-            "[main] --backend=vulkan selected. NOTE (Phase 5a): the Vulkan\n"
-            "       backend is wired through IRenderer abstraction but\n"
-            "       full GameWindow integration (SDL_WINDOW_VULKAN flag,\n"
-            "       skipping SDL_GL_CreateContext, ImGui Vulkan backend)\n"
-            "       is deferred to Phase 5b. For now, falling back to GL.\n"
-            "       Use tools/vk_smoketest.exe to exercise the Vulkan path.\n");
-        th06::g_SelectedBackend = th06::BackendKind::GL;
+            "[main] --backend=vulkan selected (Phase 5b.1).\n"
+            "       NOTE: thprac UI overlay disabled until imgui_impl_vulkan\n"
+            "             is vendored (Phase 5b.2).\n");
     }
 
 #ifdef _WIN32
@@ -227,12 +226,16 @@ stop:
     g_AnmManager = NULL;
 
     // Clean up GL resources while the context is still valid.
-    THPrac::THPracGuiShutdown();
+    // Phase 5b: skip ImGui shutdown + SDL_GL_DeleteContext on Vulkan path.
+    if (!th06::IsUsingVulkan())
+    {
+        THPrac::THPracGuiShutdown();
+    }
     {
         SDL_GLContext ctx = g_Renderer ? g_Renderer->glContext : nullptr;
         if (g_Renderer)
             g_Renderer->Release();
-        if (ctx)
+        if (ctx && !th06::IsUsingVulkan())
             SDL_GL_DeleteContext(ctx);
     }
 

@@ -555,4 +555,21 @@ if(TH06_USE_VULKAN)
     target_compile_definitions(vk_smoketest PRIVATE
         "TH06_VK_SHADER_DIR=\"${TH06_VK_SHADER_OUT_DIR}\""
     )
+
+    # --- 6. Phase 5b: link Vulkan sources into main th06 game target so
+    # `--backend=vulkan` actually creates RendererVulkan at runtime.
+    target_sources(th06 PRIVATE ${TH06_VULKAN_SOURCES})
+    target_include_directories(th06 PRIVATE
+        ${Vulkan_INCLUDE_DIR}
+        ${TH06_VULKAN_VMA_DIR}
+        ${TH06_VOLK_DIR}
+    )
+    target_compile_definitions(th06 PRIVATE
+        TH06_USE_VULKAN=1
+        VK_NO_PROTOTYPES=1
+    )
+    add_dependencies(th06 th06_vk_shaders)
+    target_compile_definitions(th06 PRIVATE
+        "TH06_VK_SHADER_DIR=\"${TH06_VK_SHADER_OUT_DIR}\""
+    )
 endif()

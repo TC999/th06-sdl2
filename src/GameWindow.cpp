@@ -485,12 +485,20 @@ void GameWindow::CreateGameWindow(void *unused)
     g_GameWindow.lastActiveAppValue = 0;
     g_GameWindow.isAppActive = 0;
 
-    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    // Phase 5b (ADR-008/010): use SDL_WINDOW_VULKAN for Vulkan backend; skip
+    // GL attribute setup and SDL_GL_CreateContext below.
+    const bool useVulkan = IsUsingVulkan();
+    const u32 backendFlag = useVulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL;
+
+    if (!useVulkan)
+    {
+        SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    }
 
 #if defined(TH06_USE_GLES)
 #ifdef __ANDROID__
@@ -510,7 +518,7 @@ void GameWindow::CreateGameWindow(void *unused)
 #ifdef __ANDROID__
     // On Android, SDL manages the window via SDLActivity.
     // Use SDL_WINDOW_FULLSCREEN to let SDL handle the native surface.
-    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN;
+    windowFlags = backendFlag | SDL_WINDOW_FULLSCREEN;
     g_GameWindow.sdlWindow = SDL_CreateWindow(
         "Touhou 06", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         0, 0, windowFlags);
@@ -524,14 +532,14 @@ void GameWindow::CreateGameWindow(void *unused)
         // and block third-party overlay windows.
         SDL_DisplayMode dm;
         SDL_GetDesktopDisplayMode(0, &dm);
-        windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_BORDERLESS;
+        windowFlags = backendFlag | SDL_WINDOW_SHOWN | SDL_WINDOW_BORDERLESS;
         g_GameWindow.sdlWindow = SDL_CreateWindow(
             "Touhou 06", 0, 0,
             dm.w + 1, dm.h, windowFlags);
     }
     else
     {
-        windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN;
+        windowFlags = backendFlag | SDL_WINDOW_SHOWN;
         g_GameWindow.sdlWindow = SDL_CreateWindow(
             "Touhou 06", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT, windowFlags);
@@ -686,27 +694,50 @@ i32 GameWindow::InitD3dRendering(void)
         g_GameWindow.screenHeight = 0;
     }
 
-    SDL_GLContext glCtx = SDL_GL_CreateContext(g_GameWindow.sdlWindow);
-    if (glCtx == NULL)
+    SDL_GLContext glCtx = NULL;
+    if (!IsUsingVulkan())
     {
-        GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_D3D_INIT_FAILED);
-        return 1;
+        glCtx = SDL_GL_CreateContext(g_GameWindow.sdlWindow);
+        if (glCtx == NULL)
+        {
+            GameErrorContext::Fatal(&g_GameErrorContext, TH_ERR_D3D_INIT_FAILED);
+            return 1;
+        }
+
+        const int preferredSwapInterval = GetPreferredSwapInterval(g_Supervisor.cfg.windowed != 0);
+        SDL_GL_SetSwapInterval(preferredSwapInterval);
+        g_Supervisor.vsyncEnabled = preferredSwapInterval > 0 ? 1 : 0;
+    }
+    else
+    {
+        // Vulkan: vsync controlled by VK_PRESENT_MODE_FIFO_RELAXED in RendererVulkan.
+        g_Supervisor.vsyncEnabled = 1;
     }
 
-    const int preferredSwapInterval = GetPreferredSwapInterval(g_Supervisor.cfg.windowed != 0);
-    SDL_GL_SetSwapInterval(preferredSwapInterval);
-    g_Supervisor.vsyncEnabled = preferredSwapInterval > 0 ? 1 : 0;
-
-    // Select renderer based on persisted config (unk[0]: 0=GLES, 1=GL)
+    // Select renderer based on Phase 5b CLI selection (g_SelectedBackend),
+    // falling back to legacy persisted config (cfg.unk[0]) only when CLI absent.
 #ifdef __ANDROID__
     g_Renderer = GetRendererGLES();
 #else
-    g_Renderer = (g_Supervisor.cfg.unk[0] == 1) ? GetRendererGL() : GetRendererGLES();
+    switch (g_SelectedBackend)
+    {
+        case BackendKind::Vulkan: g_Renderer = GetRendererVulkan(); break;
+        case BackendKind::GLES:   g_Renderer = GetRendererGLES();   break;
+        case BackendKind::GL:
+        default:
+            g_Renderer = (g_Supervisor.cfg.unk[0] == 1) ? GetRendererGL() : GetRendererGLES();
+            break;
+    }
 #endif
     g_Renderer->Init(g_GameWindow.sdlWindow, glCtx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
     UpdateWindowTitle();
 
-    THPrac::THPracGuiInit(g_GameWindow.sdlWindow, glCtx);
+    // Phase 5b.1: ImGui SDL2 backend currently requires GL context. Skip thprac
+    // UI init on Vulkan path until imgui_impl_vulkan is vendored (Phase 5b.2).
+    if (!IsUsingVulkan())
+    {
+        THPrac::THPracGuiInit(g_GameWindow.sdlWindow, glCtx);
+    }
 
     g_Supervisor.lockableBackbuffer = 1;
     g_Supervisor.hasD3dHardwareVertexProcessing = 1;
@@ -769,8 +800,22 @@ bool IsUsingGLES()
     return g_Renderer == GetRendererGLES();
 }
 
+bool IsUsingVulkan()
+{
+#ifdef __ANDROID__
+    return false;
+#else
+    return g_SelectedBackend == BackendKind::Vulkan;
+#endif
+}
+
 void UpdateWindowTitle()
 {
+    if (IsUsingVulkan())
+    {
+        SDL_SetWindowTitle(g_GameWindow.sdlWindow, "Touhou 06 [Vulkan]");
+        return;
+    }
     const char *glVer = (const char *)glGetString(GL_VERSION);
     const char *glRen = (const char *)glGetString(GL_RENDERER);
     const char *backendName = IsUsingGLES() ? "GLES (Shader)" : "GL (Fixed-Function)";
@@ -784,6 +829,19 @@ void UpdateWindowTitle()
 
 void SwitchRenderer(bool useGLES)
 {
+    // Phase 5b (ADR-008): runtime hot-switch is GL/GLES only. Vulkan is
+    // start-time-selected; switching to/from Vulkan requires full resource
+    // teardown + ImGui backend swap (not supported in 5b.1).
+    if (IsUsingVulkan())
+    {
+        static bool warned = false;
+        if (!warned) {
+            std::fprintf(stderr,
+                "[GameWindow] SwitchRenderer ignored: Vulkan backend cannot hot-switch.\n");
+            warned = true;
+        }
+        return;
+    }
 #ifdef __ANDROID__
     IRenderer *newRenderer = GetRendererGLES();
 #else

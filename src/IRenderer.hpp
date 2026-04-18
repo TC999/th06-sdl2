@@ -128,6 +128,8 @@ extern BackendKind g_SelectedBackend;
 
 // Returns true if the current renderer is RendererGLES.
 bool IsUsingGLES();
+// Returns true if the currently selected backend is Vulkan (Phase 5b).
+bool IsUsingVulkan();
 
 // Hot-switch the active renderer (GLES = shader-based, GL = fixed-function).
 // Reinitializes the new backend, preserving the GL context and all textures.
