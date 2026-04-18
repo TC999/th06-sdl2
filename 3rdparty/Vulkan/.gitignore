@@ -1,0 +1,6 @@
+# Allow the hand-generated 32-bit import library to be tracked.
+# Ignore intermediate build products from the dumpbin / lib /def: workflow.
+*.def
+*.exp
+*.exports.txt
+!.gitignore
