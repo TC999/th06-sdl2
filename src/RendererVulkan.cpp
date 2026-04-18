@@ -170,6 +170,20 @@ bool RendererVulkan::initLayoutsAndPool() {
     pcr.offset     = 0;
     pcr.size       = sizeof(PushConstants);
 
+    // Sanity-check: PushConstants (currently 112 B = invScreen+pad+mvp+fog) must fit
+    // within the device's reported limit. Vulkan guarantees ≥128 B everywhere, but a
+    // future PushConstants growth could break on a tightly-bounded driver — fail fast
+    // here rather than mysteriously corrupt state at vkCmdPushConstants time.
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(ctx_->physicalDevice(), &props);
+        if (sizeof(PushConstants) > props.limits.maxPushConstantsSize) {
+            std::fprintf(stderr, "[VK] FATAL: PushConstants=%zu B exceeds device limit %u B\n",
+                         sizeof(PushConstants), props.limits.maxPushConstantsSize);
+            return false;
+        }
+    }
+
     // Pipeline layout (no texture)
     VkPipelineLayoutCreateInfo plci_no = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci_no.pushConstantRangeCount = 1;
