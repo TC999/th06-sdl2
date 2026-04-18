@@ -406,6 +406,7 @@ void GameWindow::Present()
     if (!runHeadlessWhenInactive)
     {
         g_Renderer->EndFrame();
+        g_Renderer->Present(); // Phase 5a (ADR-008): explicit present after submit.
 
  #ifndef __ANDROID__
         if (g_GameWindow.screenWidth != 0)

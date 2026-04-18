@@ -110,6 +110,7 @@ int main(int argc, char** argv) {
         renderer.CopySurfaceToScreen(surfTex, kSurfW, kSurfH, 32, 32);                              // overload (5)
         renderer.CopySurfaceRectToScreen(surfTex, 0, 0, 32, 32, 160, 32, kSurfW, kSurfH);           // rect overload
         renderer.EndFrame();
+        renderer.Present();
 
         // After EndFrame: TakeScreenshot from swapchain into shotTex (between-frames OK)
         renderer.TakeScreenshot(shotTex, 0, 0, width, height);
@@ -119,6 +120,7 @@ int main(int argc, char** argv) {
         renderer.Clear(0xFF202020u, 1, 1);
         renderer.CopySurfaceToScreen(shotTex, width, height, 8, 8);              // overload (5)
         renderer.EndFrame();
+        renderer.Present();
 
         renderer.DeleteTexture(surfTex);
         renderer.DeleteTexture(shotTex);
@@ -217,6 +219,7 @@ int main(int argc, char** argv) {
         }
 
         renderer.EndFrame();
+        renderer.Present();
         SDL_Delay(8);  // 约 120 FPS 上限
     }
 

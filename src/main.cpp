@@ -2,6 +2,7 @@
 #include <SDL.h>
 #include <float.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "AnmManager.hpp"
 #include "Chain.hpp"
@@ -27,6 +28,53 @@
 #include "utils.hpp"
 
 using namespace th06;
+
+namespace th06 {
+
+#ifdef __ANDROID__
+BackendKind g_SelectedBackend = BackendKind::GLES;
+#else
+BackendKind g_SelectedBackend = BackendKind::GL;
+#endif
+
+// Parse `--backend={gl|gles|vulkan}` (or `--backend gl` form). Returns the
+// requested backend, or platform default if argument absent / malformed.
+// Phase 5a (ADR-008): single CLI knob, no config-file fallback yet.
+BackendKind SelectBackendFromCommandLine(int argc, char *argv[])
+{
+#ifdef __ANDROID__
+    BackendKind result = BackendKind::GLES;
+#else
+    BackendKind result = BackendKind::GL;
+#endif
+    for (int i = 1; i < argc; ++i)
+    {
+        const char *a = argv[i];
+        if (a == nullptr) continue;
+        const char *value = nullptr;
+        if (std::strncmp(a, "--backend=", 10) == 0)
+        {
+            value = a + 10;
+        }
+        else if (std::strcmp(a, "--backend") == 0 && (i + 1) < argc)
+        {
+            value = argv[++i];
+        }
+        if (value == nullptr) continue;
+
+        if (SDL_strcasecmp(value, "gl") == 0)            result = BackendKind::GL;
+        else if (SDL_strcasecmp(value, "gles") == 0)     result = BackendKind::GLES;
+        else if (SDL_strcasecmp(value, "vulkan") == 0)   result = BackendKind::Vulkan;
+        else if (SDL_strcasecmp(value, "vk") == 0)       result = BackendKind::Vulkan;
+        else
+        {
+            std::fprintf(stderr, "[main] Unknown --backend=%s; using default.\n", value);
+        }
+    }
+    return result;
+}
+
+} // namespace th06
 
 namespace
 {
@@ -67,6 +115,20 @@ bool PollManualDumpHotkey()
 int main(int argc, char *argv[])
 {
     i32 renderResult = 0;
+
+    // Phase 5a (ADR-008): parse --backend before any SDL/window init.
+    th06::g_SelectedBackend = th06::SelectBackendFromCommandLine(argc, argv);
+    if (th06::g_SelectedBackend == th06::BackendKind::Vulkan)
+    {
+        std::fprintf(stderr,
+            "[main] --backend=vulkan selected. NOTE (Phase 5a): the Vulkan\n"
+            "       backend is wired through IRenderer abstraction but\n"
+            "       full GameWindow integration (SDL_WINDOW_VULKAN flag,\n"
+            "       skipping SDL_GL_CreateContext, ImGui Vulkan backend)\n"
+            "       is deferred to Phase 5b. For now, falling back to GL.\n"
+            "       Use tools/vk_smoketest.exe to exercise the Vulkan path.\n");
+        th06::g_SelectedBackend = th06::BackendKind::GL;
+    }
 
 #ifdef _WIN32
     timeBeginPeriod(1);

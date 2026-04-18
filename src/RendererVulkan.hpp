@@ -47,6 +47,7 @@ public:
     void EndScene() override;
     void BeginFrame() override;
     void EndFrame() override;
+    void Present() override;
 
     // --- Clear / Viewport ---
     void Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) override;

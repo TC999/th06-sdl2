@@ -1267,4 +1267,12 @@ void RendererGL::EndFrame()
     }
 }
 
+void RendererGL::Present()
+{
+    // Phase 5a (ADR-008): SDL_GL_SwapWindow already runs inside EndFrame()
+    // as part of the BlitFBO -> Swap -> BlitFBO stale-frame mitigation
+    // sandwich (see EndFrame body). Refactoring it out would break that
+    // mitigation, so Present() is an explicit no-op here.
+}
+
 } // namespace th06

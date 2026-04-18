@@ -30,6 +30,12 @@ struct IRenderer
     virtual void EndScene() = 0;
     virtual void BeginFrame() = 0;
     virtual void EndFrame() = 0;
+    // Present the completed frame to the display.
+    // GL/GLES: SDL_GL_SwapWindow currently lives inside EndFrame() for the
+    //   FBO-blit stale-frame sandwich, so Present() is an explicit no-op.
+    // Vulkan: vkQueuePresentKHR (separated from EndFrame submit).
+    // Phase 5a (ADR-008): pure virtual + explicit per-backend override.
+    virtual void Present() = 0;
 
     // --- Clear / Viewport ---
     virtual void Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) = 0;
@@ -106,11 +112,19 @@ struct IRenderer
 // Actual backend is selected at initialization time and can be switched at runtime.
 extern IRenderer *g_Renderer;
 
-// Access the two static renderer instances.
+// Access the static renderer instances.
 #ifndef __ANDROID__
 IRenderer *GetRendererGL();
+IRenderer *GetRendererVulkan();
 #endif
 IRenderer *GetRendererGLES();
+
+// Backend selection (Phase 5a / ADR-008).
+enum class BackendKind { GL, GLES, Vulkan };
+// Parse `--backend={gl|gles|vulkan}` from argv. Default = GL on desktop, GLES on Android.
+BackendKind SelectBackendFromCommandLine(int argc, char *argv[]);
+// Globally selected backend (set by main.cpp before GameWindow init).
+extern BackendKind g_SelectedBackend;
 
 // Returns true if the current renderer is RendererGLES.
 bool IsUsingGLES();

@@ -72,6 +72,7 @@ struct RendererGL : public IRenderer
     void EndScene() override;
     void BeginFrame() override;
     void EndFrame() override;
+    void Present() override;
 
     void Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) override;
     void SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ = 0.0f, f32 maxZ = 1.0f) override;

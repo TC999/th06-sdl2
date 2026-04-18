@@ -370,6 +370,16 @@ void RendererVulkan::EndFrame() {
     si.pSignalSemaphores    = &frame.renderDone;
     TH_VK_CHECK(vkQueueSubmit(ctx_->graphicsQueue(), 1, &si, frame.inFlight));
 
+    // Note: vkQueuePresentKHR moved to Present() per Phase 5a (ADR-008).
+    // EndFrame submits the command buffer; Present() pushes the swapchain image.
+    frameStarted_ = false;
+}
+
+void RendererVulkan::Present() {
+    if (!initialized_) return;
+
+    auto& frame = frames_->current();
+
     VkSwapchainKHR swapHandles[1] = { swap_->handle() };
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
@@ -386,7 +396,6 @@ void RendererVulkan::EndFrame() {
 
     frames_->advance();
     ++frameCounter_;
-    frameStarted_ = false;
 }
 
 void RendererVulkan::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) {
@@ -1068,5 +1077,11 @@ int RendererVulkan::Phase3StressTest(int n, std::FILE* log)
     LOG("[stress] DONE errors=%d\n", errors);
     return errors;
 }
+
+// ----------------------------------------------------------------------------
+// Phase 5a (ADR-008): static factory to mirror GetRendererGL/GLES.
+// ----------------------------------------------------------------------------
+static RendererVulkan s_RendererVulkan;
+IRenderer *GetRendererVulkan() { return &s_RendererVulkan; }
 
 }  // namespace th06

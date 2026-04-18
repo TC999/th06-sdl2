@@ -2426,6 +2426,14 @@ void RendererGLES::EndFrame()
     }
 }
 
+void RendererGLES::Present()
+{
+    // Phase 5a (ADR-008): SDL_GL_SwapWindow runs inside EndFrame() above
+    // (both FBO and non-FBO branches). Present() is an explicit no-op so
+    // the IRenderer abstraction is satisfied without disturbing the
+    // existing GLES frame-end semantics.
+}
+
 } // namespace th06
 
 #if defined(TH06_USE_GLES)
