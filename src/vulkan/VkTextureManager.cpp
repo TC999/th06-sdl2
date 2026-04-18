@@ -14,16 +14,27 @@ VkTextureManager::~VkTextureManager() {}
 bool VkTextureManager::Init(VkContext& ctx, VkDescriptorSetLayout texLayout) {
     layout_ = texLayout;
 
-    // Shared sampler.
-    VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    sci.magFilter    = VK_FILTER_NEAREST;
-    sci.minFilter    = VK_FILTER_NEAREST;
-    sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sci.maxLod       = 0.0f;
-    TH_VK_CHECK(vkCreateSampler(ctx.device(), &sci, nullptr, &sampler_));
+    // Two shared samplers — match desktop RendererGL (sdl2_renderer.cpp:103-115):
+    //   ApplySamplerFor2D() = NEAREST/NEAREST/REPEAT (sprites, HUD, anm)
+    //   ApplySamplerFor3D() = LINEAR /LINEAR /REPEAT (stage backgrounds, 3D meshes)
+    // GL Init defaults wrap to REPEAT (line 167-168), so REPEAT is mandatory: any
+    // texture sampled with UV outside [0,1] (scrolling skybox, fog tile) breaks
+    // under CLAMP_TO_EDGE. drawCommon picks per-draw based on vertexLayout.
+    VkSamplerCreateInfo sciN = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sciN.magFilter    = VK_FILTER_NEAREST;
+    sciN.minFilter    = VK_FILTER_NEAREST;
+    sciN.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sciN.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sciN.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sciN.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sciN.maxLod       = 0.0f;
+    TH_VK_CHECK(vkCreateSampler(ctx.device(), &sciN, nullptr, &samplerNearest_));
+
+    VkSamplerCreateInfo sciL = sciN;
+    sciL.magFilter    = VK_FILTER_LINEAR;
+    sciL.minFilter    = VK_FILTER_LINEAR;
+    sciL.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    TH_VK_CHECK(vkCreateSampler(ctx.device(), &sciL, nullptr, &samplerLinear_));
 
     // Transient command pool for staging uploads.
     VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -53,10 +64,12 @@ void VkTextureManager::Shutdown(VkContext& ctx) {
     poolUsed_ = 0;
 
     if (cmdPool_) vkDestroyCommandPool(dev, cmdPool_, nullptr);
-    if (sampler_) vkDestroySampler(dev, sampler_, nullptr);
-    cmdPool_ = VK_NULL_HANDLE;
-    sampler_ = VK_NULL_HANDLE;
-    layout_  = VK_NULL_HANDLE;
+    if (samplerNearest_) vkDestroySampler(dev, samplerNearest_, nullptr);
+    if (samplerLinear_)  vkDestroySampler(dev, samplerLinear_,  nullptr);
+    cmdPool_        = VK_NULL_HANDLE;
+    samplerNearest_ = VK_NULL_HANDLE;
+    samplerLinear_  = VK_NULL_HANDLE;
+    layout_         = VK_NULL_HANDLE;
 }
 
 bool VkTextureManager::growPool(VkContext& ctx) {
@@ -137,18 +150,31 @@ bool VkTextureManager::createImageAndView(VkContext& ctx, int w, int h, Entry& o
 }
 
 void VkTextureManager::writeDescriptor(VkContext& ctx, Entry& e) {
-    VkDescriptorImageInfo dii = {};
-    dii.sampler     = sampler_;
-    dii.imageView   = e.view;
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // Write both descriptor sets — one for NEAREST sampler, one for LINEAR.
+    VkDescriptorImageInfo diiN = {};
+    diiN.sampler     = samplerNearest_;
+    diiN.imageView   = e.view;
+    diiN.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    w.dstSet          = e.descSet;
-    w.dstBinding      = 0;
-    w.descriptorCount = 1;
-    w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w.pImageInfo      = &dii;
-    vkUpdateDescriptorSets(ctx.device(), 1, &w, 0, nullptr);
+    VkDescriptorImageInfo diiL = {};
+    diiL.sampler     = samplerLinear_;
+    diiL.imageView   = e.view;
+    diiL.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet w[2] = {};
+    w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[0].dstSet          = e.descSetNearest;
+    w[0].dstBinding      = 0;
+    w[0].descriptorCount = 1;
+    w[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[0].pImageInfo      = &diiN;
+    w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w[1].dstSet          = e.descSetLinear;
+    w[1].dstBinding      = 0;
+    w[1].descriptorCount = 1;
+    w[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[1].pImageInfo      = &diiL;
+    vkUpdateDescriptorSets(ctx.device(), 2, w, 0, nullptr);
 }
 
 bool VkTextureManager::uploadRect(VkContext& ctx, Entry& e,
@@ -180,6 +206,17 @@ bool VkTextureManager::uploadRect(VkContext& ctx, Entry& e,
         }
         if (rgba) {
             std::memcpy(info.pMappedData, rgba, byteCount);
+            {
+                static int s = 0;
+                if (s < 8 && w > 100 && h > 100) {
+                    const uint8_t* p = (const uint8_t*)info.pMappedData;
+                    std::fprintf(stderr, "[VkTex upload] w=%d h=%d bytes=%llu mapped[0..16]=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        w, h, (unsigned long long)byteCount,
+                        p[0],p[1],p[2],p[3], p[4],p[5],p[6],p[7],
+                        p[8],p[9],p[10],p[11], p[12],p[13],p[14],p[15]);
+                    ++s;
+                }
+            }
         } else {
             std::memset(info.pMappedData, 0, byteCount);
         }
@@ -251,13 +288,17 @@ uint32_t VkTextureManager::CreateFromRgba(VkContext& ctx, int w, int h, const ui
     if (w <= 0 || h <= 0) return 0;
     Entry e;
     if (!createImageAndView(ctx, w, h, e)) return 0;
-    if (!allocDescriptorSet(ctx, &e.descSet)) {
+    if (!allocDescriptorSet(ctx, &e.descSetNearest)) {
+        vkDestroyImageView(ctx.device(), e.view, nullptr);
+        vmaDestroyImage(ctx.allocator(), e.image, e.alloc);
+        return 0;
+    }
+    if (!allocDescriptorSet(ctx, &e.descSetLinear)) {
         vkDestroyImageView(ctx.device(), e.view, nullptr);
         vmaDestroyImage(ctx.allocator(), e.image, e.alloc);
         return 0;
     }
     if (!uploadRect(ctx, e, 0, 0, w, h, rgba)) {
-        // descSet leaks back to pool but is fine; pool freed at shutdown.
         vkDestroyImageView(ctx.device(), e.view, nullptr);
         vmaDestroyImage(ctx.allocator(), e.image, e.alloc);
         return 0;
@@ -293,10 +334,10 @@ bool VkTextureManager::UpdateSubImage(VkContext& ctx, uint32_t id,
     return uploadRect(ctx, it->second, x, y, w, h, rgba);
 }
 
-VkDescriptorSet VkTextureManager::GetDescriptorSet(uint32_t id) const {
+VkDescriptorSet VkTextureManager::GetDescriptorSet(uint32_t id, bool useLinear) const {
     auto it = entries_.find(id);
     if (it == entries_.end()) return VK_NULL_HANDLE;
-    return it->second.descSet;
+    return useLinear ? it->second.descSetLinear : it->second.descSetNearest;
 }
 
 VkImage VkTextureManager::GetImage(uint32_t id) const {

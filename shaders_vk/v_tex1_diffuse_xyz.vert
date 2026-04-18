@@ -19,6 +19,7 @@ layout(location = 2) out float v_viewZ;
 
 void main() {
     gl_Position = pc.mvp * vec4(in_pos, 1.0);
+    gl_Position.y = -gl_Position.y;  // Vulkan NDC Y-down vs GL/D3D Y-up
     v_color = in_color;
     v_uv    = in_uv;
     // For D3D-style perspective MVP, clip.w == view-space Z (depth from camera, positive).

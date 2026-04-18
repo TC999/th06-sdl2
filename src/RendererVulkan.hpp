@@ -158,6 +158,20 @@ private:
 
     // Cached extra state
     uint8_t  depthFuncAlways_   = 0;   // 0 = LEQUAL, 1 = ALWAYS
+
+    // D3D8 viewport depth-range partitioning (commit 682146c): 3D BG writes [0.5,1.0],
+    // sprites write [0.0,0.5], LEQUAL guarantees sprites in front. Vulkan SetViewport
+    // must propagate these to VkViewport.minDepth/maxDepth.
+    float    viewportMinZ_      = 0.0f;
+    float    viewportMaxZ_      = 1.0f;
+
+    // D3D8 texture-stage colorOp = SELECTARG2(diffuse): renderer-side override that
+    // forces sampling defaultTex_ (1x1 white) without clobbering currentTexture.
+    // Critical: AnmManager caches its own currentTexture and only re-binds on
+    // *different* sourceFileIndex; if we zeroed renderer's currentTexture here,
+    // subsequent ANM draws of the same sprite would silently render as solid
+    // colored blocks (sampling white * diffuse). See bug 2026-04-18.
+    bool     textureStageDiffuseOnly_ = false;
 };
 
 }  // namespace th06

@@ -24,6 +24,7 @@
 #include "thprac_res.h"
 #include "thprac_th06.h"
 #include "thprac_bridge.h"
+#include "thprac_gui_integration.h"
 #include "Gui.hpp"
 #include "EclManager.hpp"
 #include "AnmManager.hpp"
@@ -4956,6 +4957,11 @@ namespace TH06 {
 
     void THPracApplyStageParams()
     {
+        // Vulkan backend (Phase 5b.1) skips THPracGuiInit; bail before constructing
+        // any GameGuiWnd-derived singleton (those call ImGui::GetIO() in their ctors,
+        // which asserts when no ImGui context exists).
+        if (!THPrac::THPracGuiIsReady())
+            return;
         TH06InGameInfo::singleton().GameStartInit();
         // Only reset miss count at the start of a new game run, not on stage transitions
         if (th06::g_Supervisor.curState != th06::SUPERVISOR_STATE_GAMEMANAGER_REINIT)

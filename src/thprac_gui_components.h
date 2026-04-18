@@ -48,6 +48,15 @@ namespace Gui {
         };
         GameGuiWnd() noexcept
         {
+            // Vulkan backend (Phase 5b.1) skips THPracGuiInit; thprac singletons may
+            // still be constructed via inline accessors (e.g. THPracIsTimeLock ->
+            // THOverlay::singleton()). Bail before touching ImGui to avoid GetIO()
+            // asserting on missing context. Defaults below are sufficient since the
+            // Vulkan path never enters the UI render code path.
+            if (ImGui::GetCurrentContext() == nullptr) {
+                mLocale = (locale_t)-1;
+                return;
+            }
             ImGuiIO& io = ImGui::GetIO();
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 

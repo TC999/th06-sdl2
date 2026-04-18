@@ -612,15 +612,15 @@ void GameWindow_ProcessEvents()
             Controller::ResetInputState();
             break;
         case SDL_FINGERDOWN:
-            if (!ImGui::GetIO().WantCaptureMouse)
+            if (!THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
                 AndroidTouchInput::HandleFingerDown(event.tfinger);
             break;
         case SDL_FINGERMOTION:
-            if (!ImGui::GetIO().WantCaptureMouse)
+            if (!THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
                 AndroidTouchInput::HandleFingerMotion(event.tfinger);
             break;
         case SDL_FINGERUP:
-            if (!ImGui::GetIO().WantCaptureMouse)
+            if (!THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
                 AndroidTouchInput::HandleFingerUp(event.tfinger);
             break;
 #ifndef __ANDROID__
@@ -629,7 +629,7 @@ void GameWindow_ProcessEvents()
             {
                 // Right-click (game back/cancel) always goes through, bypassing ImGui.
                 // Left-click respects ImGui capture for thprac UI interaction.
-                if (event.button.button == SDL_BUTTON_RIGHT || !ImGui::GetIO().WantCaptureMouse)
+                if (event.button.button == SDL_BUTTON_RIGHT || !THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
                 {
                     int w, h;
                     SDL_GetWindowSize(g_GameWindow.sdlWindow, &w, &h);
@@ -642,7 +642,7 @@ void GameWindow_ProcessEvents()
             {
                 // Always process during left-button drag (prevents lost updates).
                 // Otherwise respect ImGui capture.
-                if ((event.motion.state & SDL_BUTTON_LMASK) || !ImGui::GetIO().WantCaptureMouse)
+                if ((event.motion.state & SDL_BUTTON_LMASK) || !THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
                 {
                     int w, h;
                     SDL_GetWindowSize(g_GameWindow.sdlWindow, &w, &h);
@@ -732,9 +732,15 @@ i32 GameWindow::InitD3dRendering(void)
     g_Renderer->Init(g_GameWindow.sdlWindow, glCtx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
     UpdateWindowTitle();
 
-    // Phase 5b.1: ImGui SDL2 backend currently requires GL context. Skip thprac
-    // UI init on Vulkan path until imgui_impl_vulkan is vendored (Phase 5b.2).
-    if (!IsUsingVulkan())
+    // Phase 5b.1: ImGui SDL2 backend currently requires GL context. Vulkan path
+    // uses a headless ImGui (context only, no render backend) so thprac singletons
+    // can construct without crashing on ImGui::GetIO(). Real Vulkan UI rendering
+    // arrives in Phase 5b.2 with imgui_impl_vulkan.
+    if (IsUsingVulkan())
+    {
+        THPrac::THPracGuiInitHeadless(g_GameWindow.sdlWindow);
+    }
+    else
     {
         THPrac::THPracGuiInit(g_GameWindow.sdlWindow, glCtx);
     }

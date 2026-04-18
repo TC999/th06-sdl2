@@ -38,6 +38,14 @@ void main() {
         baseColor = v_color * t;
     }
 
+    // Alpha test: matches RendererGL Init (sdl2_renderer.cpp:148):
+    //   glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GEQUAL, 4.0/255.0);
+    // GLES emulates with `discard` (gles_shaders.h:104). TH06 leaves alpha test
+    // permanently enabled; threshold 4/255 kills sub-pixel sprite-edge fringes.
+    if (baseColor.a < (4.0 / 255.0)) {
+        discard;
+    }
+
     if (pc.fogParams.z >= 0.5) {
         // GL_LINEAR / D3DFOGMODE_LINEAR: f = (end - viewZ) / (end - start), clamp 0..1.
         // f = 1 at viewZ <= start (no fog), f = 0 at viewZ >= end (full fog).

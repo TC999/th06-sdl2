@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 
 #ifndef TH06_VK_SHADER_DIR
 #define TH06_VK_SHADER_DIR "shaders_vk"
@@ -311,13 +312,17 @@ void RendererVulkan::BeginFrame() {
 
     uploadHeap_->BeginFrame(uint32_t(frameCounter_));
 
-    // Begin render pass. LOAD_OP_CLEAR uses the values we provide here; subsequent in-pass
-    // Clear() calls override via vkCmdClearAttachments.
+    // Begin render pass. Fix 17: color attachment is now LOAD_OP_LOAD on a
+    // persistent OFFSCREEN image (FBO equivalent of GL backend), so HUD/UI
+    // draws survive across frames. clearVals[0] is unused for color (LOAD_OP_LOAD
+    // ignores it) but kept for the depth attachment which still uses LOAD_OP_CLEAR.
+    // Game-issued Clear() calls go through in-pass vkCmdClearAttachments which
+    // respects scissor/viewport rect.
     VkClearValue clearVals[2] = {};
-    clearVals[0].color.float32[0] = clearColor_[0];
-    clearVals[0].color.float32[1] = clearColor_[1];
-    clearVals[0].color.float32[2] = clearColor_[2];
-    clearVals[0].color.float32[3] = clearColor_[3];
+    clearVals[0].color.float32[0] = 0.0f;
+    clearVals[0].color.float32[1] = 0.0f;
+    clearVals[0].color.float32[2] = 0.0f;
+    clearVals[0].color.float32[3] = 1.0f;
     clearVals[1].depthStencil.depth   = 1.0f;
     clearVals[1].depthStencil.stencil = 0;
 
@@ -331,18 +336,44 @@ void RendererVulkan::BeginFrame() {
     vkCmdBeginRenderPass(frame.cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
     inRenderPass_ = true;
 
-    // Set viewport + scissor (dynamic)
-    VkViewport vp = {};
-    vp.x        = float(viewportX);
-    vp.y        = float(viewportY);
-    vp.width    = float(viewportW > 0 ? viewportW : int(ext.width));
-    vp.height   = float(viewportH > 0 ? viewportH : int(ext.height));
-    vp.minDepth = 0.0f;
-    vp.maxDepth = 1.0f;
-    VkRect2D sc = {};
-    sc.extent   = ext;
-    vkCmdSetViewport(frame.cmd, 0, 1, &vp);
-    vkCmdSetScissor (frame.cmd, 0, 1, &sc);
+    // Set viewport + scissor (dynamic).
+    // Letterbox: game logical resolution is screenWidth x screenHeight (640x480),
+    // swapchain is full window. Compute scaled centered region preserving aspect.
+    // SetViewport() below uses the same mapping for game-driven viewport changes.
+    {
+        const float gameW = float(screenWidth  > 0 ? screenWidth  : int(ext.width));
+        const float gameH = float(screenHeight > 0 ? screenHeight : int(ext.height));
+        const float scale = std::min(float(ext.width) / gameW, float(ext.height) / gameH);
+        const float scaledW = gameW * scale;
+        const float scaledH = gameH * scale;
+        const float offsetX = (float(ext.width)  - scaledW) * 0.5f;
+        const float offsetY = (float(ext.height) - scaledH) * 0.5f;
+        const int   gvX = (viewportW > 0) ? viewportX : 0;
+        const int   gvY = (viewportW > 0) ? viewportY : 0;
+        const int   gvW = (viewportW > 0) ? viewportW : int(gameW);
+        const int   gvH = (viewportH > 0) ? viewportH : int(gameH);
+        VkViewport vp = {};
+        vp.x        = offsetX + float(gvX) * scale;
+        vp.y        = offsetY + float(gvY) * scale;
+        vp.width    = float(gvW) * scale;
+        vp.height   = float(gvH) * scale;
+        vp.minDepth = viewportMinZ_;
+        vp.maxDepth = viewportMaxZ_;
+        // Fix 18: pixel-aligned scissor (round nearest) to avoid 1-px leak/clip
+        // on letterbox sub-pixel boundaries. Truncating vp.x or vp.width drops
+        // up to one pixel; bottom row of playfield could leak/show stale pixels.
+        const int32_t  sx0 = int32_t(std::lround(vp.x));
+        const int32_t  sy0 = int32_t(std::lround(vp.y));
+        const int32_t  sx1 = int32_t(std::lround(vp.x + vp.width));
+        const int32_t  sy1 = int32_t(std::lround(vp.y + vp.height));
+        VkRect2D sc = {};
+        sc.offset.x      = sx0;
+        sc.offset.y      = sy0;
+        sc.extent.width  = uint32_t(sx1 - sx0);
+        sc.extent.height = uint32_t(sy1 - sy0);
+        vkCmdSetViewport(frame.cmd, 0, 1, &vp);
+        vkCmdSetScissor (frame.cmd, 0, 1, &sc);
+    }
 
     frameStarted_ = true;
 }
@@ -355,6 +386,81 @@ void RendererVulkan::EndFrame() {
     if (inRenderPass_) {
         vkCmdEndRenderPass(frame.cmd);
         inRenderPass_ = false;
+    }
+
+    // Fix 17: Blit persistent offscreen color image to acquired swapchain image,
+    // then transition swap image to PRESENT_SRC_KHR. Offscreen color image stays
+    // in COLOR_ATTACHMENT_OPTIMAL after the renderpass; we transition it to
+    // TRANSFER_SRC_OPTIMAL for the blit and back to COLOR_ATTACHMENT_OPTIMAL.
+    {
+        VkImage offscreen = renderTarget_->colorImage();
+        VkImage swapImg   = swap_->image(currentSwapImage_);
+        VkExtent2D ext    = renderTarget_->extent();
+        VkImageSubresourceRange colorRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        // Barriers: offscreen COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL
+        //           swap     UNDEFINED                 -> TRANSFER_DST_OPTIMAL
+        VkImageMemoryBarrier preBlit[2] = {};
+        preBlit[0].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        preBlit[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        preBlit[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        preBlit[0].oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        preBlit[0].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        preBlit[0].srcQueueFamilyIndex = preBlit[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preBlit[0].image            = offscreen;
+        preBlit[0].subresourceRange = colorRange;
+
+        preBlit[1].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        preBlit[1].srcAccessMask = 0;
+        preBlit[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        preBlit[1].oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
+        preBlit[1].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        preBlit[1].srcQueueFamilyIndex = preBlit[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        preBlit[1].image            = swapImg;
+        preBlit[1].subresourceRange = colorRange;
+
+        vkCmdPipelineBarrier(frame.cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 2, preBlit);
+
+        // Same-size 1:1 copy (offscreen and swap have identical extent).
+        VkImageCopy copy = {};
+        copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.extent         = { ext.width, ext.height, 1 };
+        vkCmdCopyImage(frame.cmd,
+            offscreen, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            swapImg,   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &copy);
+
+        // Barriers: swap     TRANSFER_DST_OPTIMAL -> PRESENT_SRC_KHR
+        //           offscreen TRANSFER_SRC_OPTIMAL -> COLOR_ATTACHMENT_OPTIMAL
+        VkImageMemoryBarrier postBlit[2] = {};
+        postBlit[0].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        postBlit[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        postBlit[0].dstAccessMask = 0;
+        postBlit[0].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        postBlit[0].newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        postBlit[0].srcQueueFamilyIndex = postBlit[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        postBlit[0].image            = swapImg;
+        postBlit[0].subresourceRange = colorRange;
+
+        postBlit[1].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        postBlit[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        postBlit[1].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
+                                  | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        postBlit[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        postBlit[1].newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        postBlit[1].srcQueueFamilyIndex = postBlit[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        postBlit[1].image            = offscreen;
+        postBlit[1].subresourceRange = colorRange;
+
+        vkCmdPipelineBarrier(frame.cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+            | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 2, postBlit);
     }
 
     TH_VK_CHECK(vkEndCommandBuffer(frame.cmd));
@@ -399,7 +505,13 @@ void RendererVulkan::Present() {
 }
 
 void RendererVulkan::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) {
-    ColorToFloat4(color, clearColor_);   // remembered for next BeginFrame
+    // Only remember color when caller actually wants color cleared. Storing it
+    // unconditionally bleeds the value into next frame's render-pass LOAD_OP_CLEAR
+    // (which ignores scissor and paints the whole attachment). GameManager.cpp:229
+    // calls Clear(skyFog.color, 0, 1) every frame for depth-only — without this
+    // gate, the HUD/letterbox area would get repainted with the stage sky color
+    // at the start of every frame.
+    if (clearColor) ColorToFloat4(color, clearColor_);
     if (!initialized_ || !frameStarted_ || !inRenderPass_) return;
     if (!clearColor && !clearDepth)      return;
 
@@ -423,20 +535,84 @@ void RendererVulkan::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) {
         atts[attCount].clearValue.depthStencil.stencil = 0;
         ++attCount;
     }
+    // Match RendererGL::Clear (sdl2_renderer.cpp:344-356): glClear is bounded by
+    // glScissor (which is permanently enabled). When game calls Clear() after
+    // SetViewport(playfield), GL only clears the playfield. Vulkan's vkCmdClearAttachments
+    // takes an explicit rect that must mirror the current viewport — using full extent
+    // here would wipe the HUD/letterbox area with the stage sky color.
     VkClearRect rect = {};
-    rect.rect.extent = ext;
+    if (viewportW > 0 && viewportH > 0) {
+        const float gameW = float(screenWidth  > 0 ? screenWidth  : int(ext.width));
+        const float gameH = float(screenHeight > 0 ? screenHeight : int(ext.height));
+        const float scale = std::min(float(ext.width) / gameW, float(ext.height) / gameH);
+        const float scaledW = gameW * scale;
+        const float scaledH = gameH * scale;
+        const float offsetX = (float(ext.width)  - scaledW) * 0.5f;
+        const float offsetY = (float(ext.height) - scaledH) * 0.5f;
+        // Fix 18: pixel-aligned (round nearest) so clear rect matches scissor exactly.
+        const float gx0 = offsetX + float(viewportX) * scale;
+        const float gy0 = offsetY + float(viewportY) * scale;
+        const float gx1 = gx0 + float(viewportW) * scale;
+        const float gy1 = gy0 + float(viewportH) * scale;
+        const int32_t ix0 = int32_t(std::lround(gx0));
+        const int32_t iy0 = int32_t(std::lround(gy0));
+        const int32_t ix1 = int32_t(std::lround(gx1));
+        const int32_t iy1 = int32_t(std::lround(gy1));
+        rect.rect.offset.x      = ix0;
+        rect.rect.offset.y      = iy0;
+        rect.rect.extent.width  = uint32_t(ix1 - ix0);
+        rect.rect.extent.height = uint32_t(iy1 - iy0);
+    } else {
+        rect.rect.extent = ext;
+    }
     rect.layerCount  = 1;
     vkCmdClearAttachments(frame.cmd, attCount, atts, 1, &rect);
 }
 
-void RendererVulkan::SetViewport(i32 x, i32 y, i32 w, i32 h, f32, f32) {
+void RendererVulkan::SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ, f32 maxZ) {
+    {
+        static int s = 0;
+        if (s < 32) {
+            std::fprintf(stderr, "[Vk SetVP] x=%d y=%d w=%d h=%d minZ=%.3f maxZ=%.3f (frameStarted=%d inRP=%d)\n",
+                x, y, w, h, minZ, maxZ, frameStarted_?1:0, inRenderPass_?1:0);
+            ++s;
+        }
+    }
     viewportX = x; viewportY = y; viewportW = w; viewportH = h;
+    viewportMinZ_ = minZ; viewportMaxZ_ = maxZ;
     if (frameStarted_ && inRenderPass_) {
+        // Apply same letterbox mapping as BeginFrame.
+        VkExtent2D ext = renderTarget_->extent();
+        const float gameW = float(screenWidth  > 0 ? screenWidth  : int(ext.width));
+        const float gameH = float(screenHeight > 0 ? screenHeight : int(ext.height));
+        const float scale = std::min(float(ext.width) / gameW, float(ext.height) / gameH);
+        const float scaledW = gameW * scale;
+        const float scaledH = gameH * scale;
+        const float offsetX = (float(ext.width)  - scaledW) * 0.5f;
+        const float offsetY = (float(ext.height) - scaledH) * 0.5f;
         VkViewport vp = {};
-        vp.x = float(x); vp.y = float(y);
-        vp.width = float(w); vp.height = float(h);
-        vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+        vp.x        = offsetX + float(x) * scale;
+        vp.y        = offsetY + float(y) * scale;
+        vp.width    = float(w) * scale;
+        vp.height   = float(h) * scale;
+        vp.minDepth = minZ; vp.maxDepth = maxZ;  // D3D8 depth-range partitioning (commit 682146c)
         vkCmdSetViewport(frames_->current().cmd, 0, 1, &vp);
+        // Match RendererGL::SetViewport (sdl2_renderer.cpp:367-368): scissor follows
+        // viewport rect 1:1. D3D8 implicitly clips to viewport, GL emulates with
+        // glScissor; without this, 3D background draws after a 2D layer (Fix 11
+        // restore) leak into the HUD panel area.
+        // Fix 18: pixel-aligned scissor (round nearest) — truncating vp.x/width
+        // drops up to one pixel on sub-pixel letterbox boundaries.
+        const int32_t  sx0 = int32_t(std::lround(vp.x));
+        const int32_t  sy0 = int32_t(std::lround(vp.y));
+        const int32_t  sx1 = int32_t(std::lround(vp.x + vp.width));
+        const int32_t  sy1 = int32_t(std::lround(vp.y + vp.height));
+        VkRect2D sc = {};
+        sc.offset.x      = sx0;
+        sc.offset.y      = sy0;
+        sc.extent.width  = uint32_t(sx1 - sx0);
+        sc.extent.height = uint32_t(sy1 - sy0);
+        vkCmdSetScissor(frames_->current().cmd, 0, 1, &sc);
     }
 }
 
@@ -449,8 +625,13 @@ void RendererVulkan::SetZWriteDisable(u8 d)              { currentZWriteDisable 
 void RendererVulkan::SetDepthFunc(i32 alwaysPass)        { depthFuncAlways_ = alwaysPass ? 1 : 0; }
 void RendererVulkan::SetDestBlendInvSrcAlpha()           { currentBlendMode = 0; /* alpha (matches GL: glBlendFunc SRC_ALPHA, ONE_MINUS_SRC_ALPHA) */ }
 void RendererVulkan::SetDestBlendOne()                   { currentBlendMode = 1; /* additive (matches GL: glBlendFunc SRC_ALPHA, ONE) */ }
-void RendererVulkan::SetTextureStageSelectDiffuse()      { currentTexture   = 0; /* mirrors RendererGL: zeroing currentTexture forces drawCommon to fallback to defaultTex_ (1x1 white), so untextured draws sample white and pure diffuse passes through. */ }
-void RendererVulkan::SetTextureStageModulateTexture()    { /* SetTexture(prev) restores the binding; pipeline colorOp picks Modulate via currentColorOp. */ }
+// D3DTSS_COLOROP = SELECTARG2(diffuse): force sampling defaultTex_ (1x1 white)
+// at draw time, but DO NOT zero currentTexture. AnmManager caches its own
+// currentTexture and only re-binds on a different sourceFileIndex; clobbering
+// renderer's currentTexture would desync that cache and cause subsequent
+// same-sprite draws to render as solid colored blocks (white * diffuse).
+void RendererVulkan::SetTextureStageSelectDiffuse()      { textureStageDiffuseOnly_ = true; }
+void RendererVulkan::SetTextureStageModulateTexture()    { textureStageDiffuseOnly_ = false; }
 void RendererVulkan::SetFog(i32 e, D3DCOLOR c, f32 s, f32 z) {
     fogEnabled = e; fogColor = c; fogStart = s; fogEnd = z;
     // Linear D3DFOGMODE_LINEAR fog: drawCommon pushes these into PushConstants
@@ -524,8 +705,15 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
     // 3. Bind pipeline + (optional) descriptor set.
     vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     if (hasTexture) {
-        VkDescriptorSet ds = textureMgr_ ? textureMgr_->GetDescriptorSet(currentTexture)
-                                         : VK_NULL_HANDLE;
+        // SelectDiffuse stage forces white sample so vertex diffuse passes through
+        // unmodulated; do NOT consult currentTexture (kept intact for AnmManager cache).
+        // Sampler choice mirrors RendererGL ApplySamplerFor2D / ApplySamplerFor3D:
+        // 2D layouts (XYZRHW: 0/1/2) use NEAREST; 3D layouts (XYZ: 3/4) use LINEAR.
+        const bool useLinearSampler = (vertexLayoutEnum == 3 || vertexLayoutEnum == 4);
+        VkDescriptorSet ds = VK_NULL_HANDLE;
+        if (!textureStageDiffuseOnly_ && textureMgr_) {
+            ds = textureMgr_->GetDescriptorSet(currentTexture, useLinearSampler);
+        }
         if (ds == VK_NULL_HANDLE) ds = defaultTex_->descriptorSet();
         vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayoutTex_, 0, 1, &ds, 0, nullptr);
@@ -554,9 +742,142 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pc);
 
-    // 5. Bind vertex buffer + draw.
+    // 5. For 2D (XYZRHW) layouts: D3D8 bypasses viewport transform on pre-projected
+    //    verts but clips to viewport rect. GLES emulates this by force-setting
+    //    glViewport to fullscreen + keeping scissor at viewport rect (commit 364a9ce).
+    //    Vulkan 2D shader assumes fullscreen viewport (pos * invScreen * 2 - 1), so
+    //    when game's logical viewport is the playfield (32,16,384,448), 2D draws come
+    //    out scaled/offset wrong. Force viewport=letterbox-fullscreen + scissor=current
+    //    viewport rect for 2D, then restore for any subsequent 3D.
+    const bool is2DLayout = (vertexLayoutEnum == 0 || vertexLayoutEnum == 1 || vertexLayoutEnum == 2);
+    if (is2DLayout && viewportW > 0 && viewportH > 0) {
+        VkExtent2D extL = renderTarget_->extent();
+        const float gW = float(screenWidth  > 0 ? screenWidth  : int(extL.width));
+        const float gH = float(screenHeight > 0 ? screenHeight : int(extL.height));
+        const float sc = std::min(float(extL.width) / gW, float(extL.height) / gH);
+        const float sW = gW * sc;
+        const float sH = gH * sc;
+        const float oX = (float(extL.width)  - sW) * 0.5f;
+        const float oY = (float(extL.height) - sH) * 0.5f;
+        VkViewport vp2 = {};
+        vp2.x = oX; vp2.y = oY; vp2.width = sW; vp2.height = sH;
+        vp2.minDepth = viewportMinZ_; vp2.maxDepth = viewportMaxZ_;
+        // Fix 18: pixel-aligned scissor (round nearest end-points).
+        const float gx0 = oX + float(viewportX) * sc;
+        const float gy0 = oY + float(viewportY) * sc;
+        const float gx1 = gx0 + float(viewportW) * sc;
+        const float gy1 = gy0 + float(viewportH) * sc;
+        const int32_t ix0 = int32_t(std::lround(gx0));
+        const int32_t iy0 = int32_t(std::lround(gy0));
+        const int32_t ix1 = int32_t(std::lround(gx1));
+        const int32_t iy1 = int32_t(std::lround(gy1));
+        VkRect2D sc2 = {};
+        sc2.offset.x      = ix0;
+        sc2.offset.y      = iy0;
+        sc2.extent.width  = uint32_t(ix1 - ix0);
+        sc2.extent.height = uint32_t(iy1 - iy0);
+        vkCmdSetViewport(frame.cmd, 0, 1, &vp2);
+        vkCmdSetScissor (frame.cmd, 0, 1, &sc2);
+    }
+
+    // 6. Bind vertex buffer + draw.
     vkCmdBindVertexBuffers(frame.cmd, 0, 1, &vbBuf, &vbOff);
     vkCmdDraw(frame.cmd, uint32_t(count), 1, 0, 0);
+
+    // 7. Restore game-logical viewport for any subsequent 3D draws.
+    if (is2DLayout && viewportW > 0 && viewportH > 0) {
+        VkExtent2D extR = renderTarget_->extent();
+        const float gW = float(screenWidth  > 0 ? screenWidth  : int(extR.width));
+        const float gH = float(screenHeight > 0 ? screenHeight : int(extR.height));
+        const float sc = std::min(float(extR.width) / gW, float(extR.height) / gH);
+        const float sW = gW * sc;
+        const float sH = gH * sc;
+        const float oX = (float(extR.width)  - sW) * 0.5f;
+        const float oY = (float(extR.height) - sH) * 0.5f;
+        VkViewport vp3 = {};
+        vp3.x = oX + float(viewportX) * sc;
+        vp3.y = oY + float(viewportY) * sc;
+        vp3.width  = float(viewportW) * sc;
+        vp3.height = float(viewportH) * sc;
+        vp3.minDepth = viewportMinZ_; vp3.maxDepth = viewportMaxZ_;
+        vkCmdSetViewport(frame.cmd, 0, 1, &vp3);
+        // Scissor restored to game viewport rect (NOT full letterbox) — D3D8/GL
+        // semantics: scissor follows viewport. Fix 18: pixel-aligned via lround.
+        const int32_t rx0 = int32_t(std::lround(vp3.x));
+        const int32_t ry0 = int32_t(std::lround(vp3.y));
+        const int32_t rx1 = int32_t(std::lround(vp3.x + vp3.width));
+        const int32_t ry1 = int32_t(std::lround(vp3.y + vp3.height));
+        VkRect2D sc3 = {};
+        sc3.offset.x      = rx0;
+        sc3.offset.y      = ry0;
+        sc3.extent.width  = uint32_t(rx1 - rx0);
+        sc3.extent.height = uint32_t(ry1 - ry0);
+        vkCmdSetScissor(frame.cmd, 0, 1, &sc3);
+    }
+
+    // ---- Diagnostic: dump textured draws across early frames + all 3D-path draws ----
+    {
+        static int s_diagDrawCount  = 0;
+        static int s_diagPrevFrame  = -1;
+        static int s_diagL3Count    = 0;
+        static int s_diagL4Count    = 0;
+        const int  kMaxPerFrame  = 6;
+        const int  kMaxFrames    = 6;
+        const int  kMax3DDumps   = 12;
+        const bool isNewFrame    = s_diagPrevFrame != int(frameCounter_);
+        const bool wantThisDraw  = hasTexture && (
+            (vertexLayoutEnum == 3 && s_diagL3Count < kMax3DDumps) ||
+            (vertexLayoutEnum == 4 && s_diagL4Count < kMax3DDumps) ||
+            (int(frameCounter_) < kMaxFrames && (isNewFrame || s_diagDrawCount < kMaxPerFrame)));
+        if (wantThisDraw) {
+            if (isNewFrame) {
+                s_diagPrevFrame  = int(frameCounter_);
+                s_diagDrawCount  = 0;
+                std::fprintf(stderr,
+                    "[Vk DIAG] ===== frame=%d =====\n", int(frameCounter_));
+            }
+            if (vertexLayoutEnum == 3) ++s_diagL3Count;
+            if (vertexLayoutEnum == 4) ++s_diagL4Count;
+            VkDescriptorSet diagDs = (hasTexture && textureMgr_) ? textureMgr_->GetDescriptorSet(currentTexture) : VK_NULL_HANDLE;
+            std::fprintf(stderr,
+                "[Vk DIAG] f%d d#%d L=%d t=%d dep=%d zw=%d bl=%d co=%d "
+                "tex=%u ds=0x%llx s=%u n=%d invScr=%.5f,%.5f sc=%dx%d\n",
+                int(frameCounter_), int(s_diagDrawCount), int(vertexLayoutEnum),
+                int(topologyEnum), int(depthTest ? 1 : 0), int(currentZWriteDisable ? 0 : 1),
+                int(key.blendMode), int(key.colorOp),
+                unsigned(currentTexture),
+                static_cast<unsigned long long>((uint64_t)diagDs),
+                unsigned(vertexStride), int(count),
+                double(pc.invScreen[0]), double(pc.invScreen[1]),
+                int(screenWidth), int(screenHeight));
+            const uint8_t* p = static_cast<const uint8_t*>(verts);
+            const int dumpVerts = std::min(count, 4);
+            for (int vi = 0; vi < dumpVerts; ++vi) {
+                const uint8_t* pv = p + vi * vertexStride;
+                auto fAtV = [&](uint32_t off) { float v; std::memcpy(&v, pv + off, 4); return v; };
+                auto u32AtV = [&](uint32_t off) { uint32_t v; std::memcpy(&v, pv + off, 4); return v; };
+                switch (vertexLayoutEnum) {
+                case 1:
+                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.4f,%.4f) uv=(%.4f,%.4f)\n",
+                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)), double(fAtV(12)),
+                        double(fAtV(16)), double(fAtV(20))); break;
+                case 2:
+                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.4f,%.4f) diff=0x%08x uv=(%.4f,%.4f)\n",
+                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)), double(fAtV(12)),
+                        unsigned(u32AtV(16)), double(fAtV(20)), double(fAtV(24))); break;
+                case 3:
+                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.2f) diff=0x%08x uv=(%.4f,%.4f)\n",
+                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)),
+                        unsigned(u32AtV(12)), double(fAtV(16)), double(fAtV(20))); break;
+                case 4:
+                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.2f) uv=(%.4f,%.4f)\n",
+                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)),
+                        double(fAtV(12)), double(fAtV(16))); break;
+                }
+            }
+            ++s_diagDrawCount;
+        }
+    }
     return true;
 }
 
@@ -615,6 +936,16 @@ u32  RendererVulkan::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOL
     SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_ABGR8888, 0);
     SDL_FreeSurface(surface);
     if (!rgba) return 0;
+    {
+        static int seen2 = 0;
+        if (seen2 < 8) {
+            std::fprintf(stderr, "[Vk LoadTex] w=%d h=%d pitch=%d ck=0x%x fmt=0x%x bpp=%d\n",
+                rgba->w, rgba->h, rgba->pitch, (unsigned)colorKey,
+                rgba->format ? rgba->format->format : 0u,
+                rgba->format ? rgba->format->BitsPerPixel : 0);
+            ++seen2;
+        }
+    }
 
     // Apply color key (D3D8 semantics: matching pixels become alpha=0; others alpha=255).
     if (colorKey != 0) {
@@ -623,19 +954,37 @@ u32  RendererVulkan::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOL
         const u8 ckB = u8((colorKey      ) & 0xFF);
         SDL_LockSurface(rgba);
         u8 *pixels = static_cast<u8*>(rgba->pixels);
-        // ABGR8888 layout: byte order is R,G,B,A in memory.
-        const i32 pixelCount = rgba->w * rgba->h;
-        for (i32 i = 0; i < pixelCount; ++i) {
-            u8 *p = pixels + i * 4;
-            if (p[0] == ckR && p[1] == ckG && p[2] == ckB) p[3] = 0;
-            else                                            p[3] = 255;
+        // ABGR8888 layout: byte order is R,G,B,A in memory. Honor row pitch since
+        // SDL surfaces may be padded for SIMD alignment (pitch >= w*4).
+        for (i32 y = 0; y < rgba->h; ++y) {
+            u8* row = pixels + size_t(y) * size_t(rgba->pitch);
+            for (i32 x = 0; x < rgba->w; ++x) {
+                u8 *p = row + x * 4;
+                if (p[0] == ckR && p[1] == ckG && p[2] == ckB) p[3] = 0;
+                else                                            p[3] = 255;
+            }
         }
         SDL_UnlockSurface(rgba);
     }
 
     SDL_LockSurface(rgba);
-    u32 id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h,
+    // VkTextureManager expects tightly packed rows (bufferRowLength=0). Repack if SDL
+    // gave us padded rows.
+    u32 id = 0;
+    const int rowBytes = rgba->w * 4;
+    if (rgba->pitch == rowBytes) {
+        id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h,
                                          static_cast<const u8*>(rgba->pixels));
+    } else {
+        std::vector<u8> packed(size_t(rowBytes) * size_t(rgba->h));
+        const u8* src = static_cast<const u8*>(rgba->pixels);
+        for (i32 y = 0; y < rgba->h; ++y) {
+            std::memcpy(packed.data() + size_t(y) * rowBytes,
+                        src + size_t(y) * size_t(rgba->pitch),
+                        rowBytes);
+        }
+        id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h, packed.data());
+    }
     SDL_UnlockSurface(rgba);
 
     if (outWidth)  *outWidth  = rgba->w;
@@ -725,9 +1074,38 @@ u32 RendererVulkan::LoadSurfaceFromFile(const u8 *data, i32 dataLen, i32 *outW, 
     SDL_Surface* rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
     SDL_FreeSurface(surf);
     if (!rgba) return 0;
+    {
+        static int seen = 0;
+        if (seen < 8) {
+            const u8* px = (const u8*)rgba->pixels;
+            std::fprintf(stderr, "[Vk LoadSurface] w=%d h=%d pitch=%d fmt=0x%x bpp=%d px[0..16]=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                rgba->w, rgba->h, rgba->pitch,
+                rgba->format ? rgba->format->format : 0u,
+                rgba->format ? rgba->format->BitsPerPixel : 0,
+                px[0],px[1],px[2],px[3], px[4],px[5],px[6],px[7],
+                px[8],px[9],px[10],px[11], px[12],px[13],px[14],px[15]);
+            ++seen;
+        }
+    }
     SDL_LockSurface(rgba);
-    u32 id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h,
+    u32 id = 0;
+    const int rowBytes = rgba->w * 4;
+    if (rgba->pitch == rowBytes) {
+        id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h,
                                          (const uint8_t*)rgba->pixels);
+    } else {
+        // SDL surface row pitch may exceed w*4 (alignment padding). VkTextureManager
+        // assumes tightly packed source — repack to avoid horizontal-shear artifacts
+        // (each row progressively offset, producing visible "barcode" stripes).
+        std::vector<uint8_t> packed(size_t(rowBytes) * size_t(rgba->h));
+        const uint8_t* src = static_cast<const uint8_t*>(rgba->pixels);
+        for (i32 y = 0; y < rgba->h; ++y) {
+            std::memcpy(packed.data() + size_t(y) * rowBytes,
+                        src + size_t(y) * size_t(rgba->pitch),
+                        rowBytes);
+        }
+        id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h, packed.data());
+    }
     SDL_UnlockSurface(rgba);
     if (id != 0) {
         if (outW) *outW = rgba->w;

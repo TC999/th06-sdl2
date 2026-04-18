@@ -3,7 +3,8 @@
 //
 // Design (per PLAN Phase 3 Done When):
 //   - All allocations via VMA (block allocator amortizes VkDeviceMemory across many textures)
-//   - Single shared sampler (nearest, clamp) — TH06 sprites are point-sampled
+//   - Two shared samplers (NEAREST/REPEAT for 2D sprites, LINEAR/REPEAT for 3D backgrounds);
+//     each Entry holds two descriptor sets so drawCommon can pick per-draw without rewrites.
 //   - Shared descriptor pool sized for many sets (1024 default; transparent realloc on overflow)
 //   - All textures are VK_FORMAT_R8G8B8A8_UNORM (TH06 only uses RGBA32 after SDL conversion)
 //   - Upload via transient staging buffer (vmaCreateBuffer HOST_VISIBLE) → vkCmdCopyBufferToImage
@@ -48,8 +49,10 @@ public:
                         int x, int y, int w, int h, const uint8_t* rgba);
 
     // Look up the descriptor set bound for shader access (combined image+sampler).
+    // useLinear=true → LINEAR/REPEAT (matches RendererGL ApplySamplerFor3D);
+    // useLinear=false → NEAREST/REPEAT (matches RendererGL ApplySamplerFor2D).
     // Returns VK_NULL_HANDLE if id is unknown.
-    VkDescriptorSet GetDescriptorSet(uint32_t id) const;
+    VkDescriptorSet GetDescriptorSet(uint32_t id, bool useLinear = false) const;
 
     // Look up the underlying VkImage (e.g. for readback). Returns VK_NULL_HANDLE if unknown.
     VkImage GetImage(uint32_t id) const;
@@ -62,12 +65,13 @@ public:
 
 private:
     struct Entry {
-        VkImage         image    = VK_NULL_HANDLE;
-        VmaAllocation   alloc    = VK_NULL_HANDLE;
-        VkImageView     view     = VK_NULL_HANDLE;
-        VkDescriptorSet descSet  = VK_NULL_HANDLE;
-        int             width    = 0;
-        int             height   = 0;
+        VkImage         image          = VK_NULL_HANDLE;
+        VmaAllocation   alloc          = VK_NULL_HANDLE;
+        VkImageView     view           = VK_NULL_HANDLE;
+        VkDescriptorSet descSetNearest = VK_NULL_HANDLE;  // NEAREST/REPEAT (2D sprites, GL ApplySamplerFor2D)
+        VkDescriptorSet descSetLinear  = VK_NULL_HANDLE;  // LINEAR/REPEAT  (3D backgrounds, GL ApplySamplerFor3D)
+        int             width          = 0;
+        int             height         = 0;
     };
 
     bool growPool(VkContext& ctx);
@@ -76,9 +80,10 @@ private:
     bool uploadRect(VkContext& ctx, Entry& e, int x, int y, int w, int h, const uint8_t* rgba);
     void writeDescriptor(VkContext& ctx, Entry& e);
 
-    VkDescriptorSetLayout layout_   = VK_NULL_HANDLE;
-    VkSampler             sampler_  = VK_NULL_HANDLE;
-    VkCommandPool         cmdPool_  = VK_NULL_HANDLE;
+    VkDescriptorSetLayout layout_         = VK_NULL_HANDLE;
+    VkSampler             samplerNearest_ = VK_NULL_HANDLE;
+    VkSampler             samplerLinear_  = VK_NULL_HANDLE;
+    VkCommandPool         cmdPool_        = VK_NULL_HANDLE;
 
     // Pools grow on overflow (chain). Each pool holds kSetsPerPool sets.
     static constexpr uint32_t kSetsPerPool = 1024;

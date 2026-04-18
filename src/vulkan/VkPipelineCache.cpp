@@ -45,7 +45,7 @@ VertexFormatDesc GetVertexFormat(VertexLayout vl) {
     case VertexLayout::Tex1Xyzrwh:
         d.stride = 24;
         d.attrs[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0  };  // pos
-        d.attrs[1] = { 2, 0, VK_FORMAT_R32G32_SFLOAT,       16 };  // uv (location 2 — color skipped)
+        d.attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,       16 };  // uv (shader: location=1)
         d.attrCount = 2;
         break;
     case VertexLayout::Tex1DiffuseXyzrwh:
@@ -65,7 +65,7 @@ VertexFormatDesc GetVertexFormat(VertexLayout vl) {
     case VertexLayout::RenderVertexInfoXyz:
         d.stride = 20;
         d.attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT,    0  };  // pos
-        d.attrs[1] = { 2, 0, VK_FORMAT_R32G32_SFLOAT,       12 };  // uv
+        d.attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,       12 };  // uv (shader: location=1)
         d.attrCount = 2;
         break;
     default:

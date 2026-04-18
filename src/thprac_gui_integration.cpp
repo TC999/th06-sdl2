@@ -21,6 +21,7 @@ extern void TH06Init();
 extern void TH06Reset();
 
 static bool s_initialized = false;
+static bool s_headless    = false;  // true => no rendering backend; skip Update/Render
 
 void THPracGuiInit(SDL_Window* window, void* glContext)
 {
@@ -136,22 +137,50 @@ void THPracGuiInit(SDL_Window* window, void* glContext)
 
 void THPracGuiProcessEvent(SDL_Event* event)
 {
-    if (s_initialized)
+    if (s_initialized && !s_headless)
         ImGui_ImplSDL2_ProcessEvent(event);
 }
 
 void THPracGuiUpdate()
 {
-    if (!s_initialized)
+    if (!s_initialized || s_headless)
         return;
     TH06::THPracUpdate();
 }
 
 void THPracGuiRender()
 {
-    if (!s_initialized)
+    if (!s_initialized || s_headless)
         return;
     TH06::THPracRender();
+}
+
+void THPracGuiInitHeadless(SDL_Window* window)
+{
+    if (s_initialized)
+        return;
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(640.0f, 480.0f);
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    // Default font is enough; thprac singletons only query glyph ranges, never render.
+    io.Fonts->AddFontDefault();
+    io.Fonts->Build();
+
+    SetGuiWindow(window);
+
+    // Construct all thprac singletons (THOverlay, GameGuiWnd subclasses) so the
+    // game-thread inline accessors (THPracIsTimeLock etc.) don't crash.
+    TH06Init();
+
+    s_headless    = true;
+    s_initialized = true;
 }
 
 bool THPracGuiIsReady()
