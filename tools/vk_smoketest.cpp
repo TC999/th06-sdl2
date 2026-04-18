@@ -25,11 +25,12 @@ static int ParseInt(const char* s, int defv) {
 }
 
 int main(int argc, char** argv) {
-    int  frames   = 120;
-    int  width    = 640;
-    int  height   = 480;
-    bool windowed = false;
-    int  stressN  = 0;     // Phase 3: --stress=N runs Phase3StressTest then exits
+    int  frames    = 120;
+    int  width     = 640;
+    int  height    = 480;
+    bool windowed  = false;
+    int  stressN   = 0;
+    bool phase4Demo= false;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -37,9 +38,10 @@ int main(int argc, char** argv) {
         else if (std::strncmp(a, "--width=",  8) == 0)   width  = ParseInt(a + 8, width);
         else if (std::strncmp(a, "--height=", 9) == 0)   height = ParseInt(a + 9, height);
         else if (std::strncmp(a, "--stress=", 9) == 0)   stressN= ParseInt(a + 9, 100);
+        else if (std::strcmp(a, "--phase4-demo") == 0)   phase4Demo = true;
         else if (std::strcmp(a, "--windowed") == 0)      windowed = true;
         else if (std::strcmp(a, "--help") == 0) {
-            std::printf("Usage: vk_smoketest [--frames=N] [--width=W] [--height=H] [--windowed] [--stress=N]\n");
+            std::printf("Usage: vk_smoketest [--frames=N] [--width=W] [--height=H] [--windowed] [--stress=N] [--phase4-demo]\n");
             return 0;
         }
     }
@@ -80,6 +82,49 @@ int main(int argc, char** argv) {
         SDL_Quit();
         std::fprintf(stderr, "[vk_smoketest] Stress test exit=%d\n", errors);
         return errors;
+    }
+
+    // Phase 4: --phase4-demo exercises CopySurfaceToScreen + TakeScreenshot path then exits.
+    if (phase4Demo) {
+        std::fprintf(stderr, "[vk_smoketest] Phase 4 demo: CopySurfaceToScreen + TakeScreenshot\n");
+        const int kSurfW = 64, kSurfH = 64;
+        Uint32 surfTex = renderer.CreateEmptyTexture(kSurfW, kSurfH);
+        Uint32 shotTex = renderer.CreateEmptyTexture(width, height);
+        if (surfTex == 0 || shotTex == 0) {
+            std::fprintf(stderr, "[phase4-demo] CreateEmptyTexture failed (surf=%u shot=%u)\n",
+                         unsigned(surfTex), unsigned(shotTex));
+            renderer.Release(); SDL_DestroyWindow(win); SDL_Quit();
+            return 4;
+        }
+        // Fill surface tex with solid red (ABGR8888 memory order = R,G,B,A bytes)
+        std::vector<unsigned char> surfPix(kSurfW * kSurfH * 4);
+        for (int i = 0; i < kSurfW * kSurfH; ++i) {
+            surfPix[i*4+0] = 0xFF; surfPix[i*4+1] = 0x00;
+            surfPix[i*4+2] = 0x00; surfPix[i*4+3] = 0xFF;
+        }
+        renderer.UpdateTextureSubImage(surfTex, 0, 0, kSurfW, kSurfH, surfPix.data());
+
+        // Frame 0: Clear blue, blit surface at (32,32), CopySurfaceRectToScreen at (160,32,32x32)
+        renderer.BeginFrame();
+        renderer.Clear(0xFF0000FFu /*ARGB blue*/, 1, 1);
+        renderer.CopySurfaceToScreen(surfTex, kSurfW, kSurfH, 32, 32);                              // overload (5)
+        renderer.CopySurfaceRectToScreen(surfTex, 0, 0, 32, 32, 160, 32, kSurfW, kSurfH);           // rect overload
+        renderer.EndFrame();
+
+        // After EndFrame: TakeScreenshot from swapchain into shotTex (between-frames OK)
+        renderer.TakeScreenshot(shotTex, 0, 0, width, height);
+
+        // Frame 1: blit shotTex at (8,8) to visualize captured screen-in-screen
+        renderer.BeginFrame();
+        renderer.Clear(0xFF202020u, 1, 1);
+        renderer.CopySurfaceToScreen(shotTex, width, height, 8, 8);              // overload (5)
+        renderer.EndFrame();
+
+        renderer.DeleteTexture(surfTex);
+        renderer.DeleteTexture(shotTex);
+        renderer.Release(); SDL_DestroyWindow(win); SDL_Quit();
+        std::fprintf(stderr, "[vk_smoketest] Phase 4 demo done.\n");
+        return 0;
     }
 
     // Phase 3: build a 64x64 RGBA texture via CreateEmptyTexture + UpdateTextureSubImage,

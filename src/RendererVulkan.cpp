@@ -544,10 +544,17 @@ void RendererVulkan::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count
     drawCommon(4, 0, /*hasTex*/true, /*depth*/true, verts, count, sizeof(RenderVertexInfo));
 }
 
-// --- Texture / surface (Phase 3 — real impl for tex API; surfaces still Phase-4 stubs) ---
-#define TH_VK_PHASE4_NOOP(name) \
-    do { static bool warned=false; if(!warned){ warned=true; \
-        std::fprintf(stderr,"[VK] %s: Phase-4 stub (no-op)\n", name);} } while(0)
+// --- Texture / surface (Phase 3 — real tex API; Phase 4 — surface ops + screenshot) ---
+
+// File-internal helper used by Phase 3 stress + Phase 4 CopyAlphaChannel/TakeScreenshot.
+// Reads the full RGBA contents of `img` (w x h, format must be R8G8B8A8_UNORM-compatible)
+// into `dst`. `srcLayout` is the image's current layout (so the first barrier transitions
+// from it to TRANSFER_SRC_OPTIMAL); `restoreLayout` is what to leave it in afterward.
+// Synchronous (vkQueueWaitIdle).
+static bool RV_ReadbackImageRgba(vk::VkContext& ctx, VkImage img, int w, int h,
+                                 uint8_t* dst, size_t dstBytes,
+                                 VkImageLayout srcLayout,
+                                 VkImageLayout restoreLayout);
 
 u32  RendererVulkan::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR colorKey,
                                              i32 *outWidth, i32 *outHeight) {
@@ -605,7 +612,56 @@ void RendererVulkan::DeleteTexture(u32 tex) {
     textureMgr_->Delete(*ctx_, tex);
 }
 
-void RendererVulkan::CopyAlphaChannel(u32, const u8 *, i32, i32, i32)                 { TH_VK_PHASE4_NOOP("CopyAlphaChannel"); }
+void RendererVulkan::CopyAlphaChannel(u32 dstTex, const u8 *srcData, i32 dataLen,
+                                      i32 width, i32 height) {
+    if (!initialized_ || !textureMgr_ || dstTex == 0 || !srcData || dataLen <= 0) return;
+
+    int dstW = 0, dstH = 0;
+    if (!textureMgr_->GetSize(dstTex, &dstW, &dstH)) return;
+    if (width  <= 0) width  = dstW;
+    if (height <= 0) height = dstH;
+    if (dstW <= 0 || dstH <= 0) return;
+
+    // 1. Decode source via SDL_image to ABGR8888 (memory order R,G,B,A — matches Vulkan
+    //    R8G8B8A8_UNORM exactly, same convention as CreateTextureFromMemory).
+    SDL_RWops* rw = SDL_RWFromConstMem(srcData, dataLen);
+    if (!rw) return;
+    SDL_Surface* src = IMG_Load_RW(rw, 1);
+    if (!src) return;
+    SDL_Surface* srcRgba = SDL_ConvertSurfaceFormat(src, SDL_PIXELFORMAT_ABGR8888, 0);
+    SDL_FreeSurface(src);
+    if (!srcRgba) return;
+
+    // 2. Read back current dst contents (full image).
+    VkImage dstImg = textureMgr_->GetImage(dstTex);
+    const size_t dstBytes = size_t(dstW) * size_t(dstH) * 4u;
+    std::vector<uint8_t> dstPixels(dstBytes);
+    if (!RV_ReadbackImageRgba(*ctx_, dstImg, dstW, dstH,
+                              dstPixels.data(), dstBytes,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
+        SDL_FreeSurface(srcRgba);
+        return;
+    }
+
+    // 3. Copy src.B -> dst.A (matches RendererGL semantics; SDL ABGR8888 byte order = RGBA so
+    //    src[x*4+0] = R; we want B = src[x*4+2]).
+    const int copyW = std::min(srcRgba->w, width);
+    const int copyH = std::min(srcRgba->h, height);
+    SDL_LockSurface(srcRgba);
+    for (int y = 0; y < copyH; ++y) {
+        const uint8_t* sp = (const uint8_t*)srcRgba->pixels + size_t(y) * srcRgba->pitch;
+        uint8_t*       dp = dstPixels.data() + size_t(y) * size_t(width) * 4u;
+        for (int x = 0; x < copyW; ++x) {
+            dp[x * 4 + 3] = sp[x * 4 + 2];  // B -> A
+        }
+    }
+    SDL_UnlockSurface(srcRgba);
+    SDL_FreeSurface(srcRgba);
+
+    // 4. Write back full image.
+    textureMgr_->UpdateSubImage(*ctx_, dstTex, 0, 0, dstW, dstH, dstPixels.data());
+}
 
 void RendererVulkan::UpdateTextureSubImage(u32 tex, i32 x, i32 y, i32 w, i32 h,
                                            const u8 *rgbaPixels) {
@@ -613,32 +669,176 @@ void RendererVulkan::UpdateTextureSubImage(u32 tex, i32 x, i32 y, i32 w, i32 h,
     textureMgr_->UpdateSubImage(*ctx_, tex, x, y, w, h, rgbaPixels);
 }
 
-u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, i32 *outW, i32 *outH)              { TH_VK_PHASE4_NOOP("LoadSurfaceFromFile/2"); if(outW)*outW=1; if(outH)*outH=1; return 1; }
-u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, D3DXIMAGE_INFO *)                  { TH_VK_PHASE4_NOOP("LoadSurfaceFromFile/3"); return 1; }
-void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)        { TH_VK_PHASE4_NOOP("CopySurfaceToScreen/9"); }
-void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32)                            { TH_VK_PHASE4_NOOP("CopySurfaceToScreen/5"); }
-void RendererVulkan::CopySurfaceRectToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)    { TH_VK_PHASE4_NOOP("CopySurfaceRectToScreen"); }
-void RendererVulkan::TakeScreenshot(u32, i32, i32, i32, i32)                                 { TH_VK_PHASE4_NOOP("TakeScreenshot"); }
+// --- Phase 4: Surface load (alias to texture create — surfaces and textures share backing) ---
 
-#undef TH_VK_PHASE4_NOOP
+u32 RendererVulkan::LoadSurfaceFromFile(const u8 *data, i32 dataLen, i32 *outW, i32 *outH) {
+    // Same as CreateTextureFromMemory minus the colorKey alpha-mask pass.
+    if (outW) *outW = 0;
+    if (outH) *outH = 0;
+    if (!initialized_ || !textureMgr_ || !data || dataLen <= 0) return 0;
+    SDL_RWops* rw = SDL_RWFromConstMem(data, dataLen);
+    if (!rw) return 0;
+    SDL_Surface* surf = IMG_Load_RW(rw, 1);
+    if (!surf) return 0;
+    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
+    SDL_FreeSurface(surf);
+    if (!rgba) return 0;
+    SDL_LockSurface(rgba);
+    u32 id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h,
+                                         (const uint8_t*)rgba->pixels);
+    SDL_UnlockSurface(rgba);
+    if (id != 0) {
+        if (outW) *outW = rgba->w;
+        if (outH) *outH = rgba->h;
+    }
+    SDL_FreeSurface(rgba);
+    return id;
+}
+
+u32 RendererVulkan::LoadSurfaceFromFile(const u8 *data, i32 dataLen, D3DXIMAGE_INFO *info) {
+    i32 w = 0, h = 0;
+    u32 id = LoadSurfaceFromFile(data, dataLen, &w, &h);
+    if (info) {
+        info->Width  = u32(w);
+        info->Height = u32(h);
+    }
+    return id;
+}
+
+// --- Phase 4: Surface blit to backbuffer (textured triangle strip with BLEND_ALPHA) ---
+
+void RendererVulkan::CopySurfaceToScreen(u32 surfaceTex, i32 srcX, i32 srcY,
+                                         i32 dstX, i32 dstY, i32 w, i32 h,
+                                         i32 texW, i32 texH) {
+    if (!initialized_ || !textureMgr_ || surfaceTex == 0) return;
+    if (texW <= 0 || texH <= 0) return;
+    const i32 drawW = (w > 0) ? w : texW;
+    const i32 drawH = (h > 0) ? h : texH;
+    const f32 u0 = f32(srcX) / f32(texW);
+    const f32 v0 = f32(srcY) / f32(texH);
+    const f32 u1 = f32(srcX + drawW) / f32(texW);
+    const f32 v1 = f32(srcY + drawH) / f32(texH);
+
+    // Save / set / restore state. Equivalent to GL's BLEND_MODE_ALPHA + colorOp 0 + tex bind.
+    const u8  prevBlend = currentBlendMode;
+    const u8  prevOp    = currentColorOp;
+    const u32 prevTex   = currentTexture;
+    SetBlendMode(0);   // 0 = Alpha (ADR-007)
+    SetColorOp(0);     // 0 = Modulate
+    SetTexture(surfaceTex);
+
+    VertexTex1DiffuseXyzrwh quad[4]{};
+    auto setV = [&](int i, f32 x, f32 y, f32 u, f32 v) {
+        quad[i].position.x   = x;       quad[i].position.y   = y;
+        quad[i].position.z   = 0.0f;    quad[i].position.w   = 1.0f;
+        quad[i].diffuse      = 0xFFFFFFFFu;
+        quad[i].textureUV.x  = u;       quad[i].textureUV.y  = v;
+    };
+    setV(0, f32(dstX),         f32(dstY),         u0, v0);
+    setV(1, f32(dstX + drawW), f32(dstY),         u1, v0);
+    setV(2, f32(dstX),         f32(dstY + drawH), u0, v1);
+    setV(3, f32(dstX + drawW), f32(dstY + drawH), u1, v1);
+    DrawTriangleStripTextured(quad, 4);
+
+    SetTexture(prevTex);
+    SetColorOp(prevOp);
+    SetBlendMode(prevBlend);
+}
+
+void RendererVulkan::CopySurfaceToScreen(u32 surfaceTex, i32 texW, i32 texH,
+                                         i32 dstX, i32 dstY) {
+    CopySurfaceToScreen(surfaceTex, 0, 0, dstX, dstY, texW, texH, texW, texH);
+}
+
+void RendererVulkan::CopySurfaceRectToScreen(u32 surfaceTex, i32 srcX, i32 srcY,
+                                             i32 srcW, i32 srcH,
+                                             i32 dstX, i32 dstY,
+                                             i32 texW, i32 texH) {
+    // GL semantics: drawW == srcW, drawH == srcH.
+    CopySurfaceToScreen(surfaceTex, srcX, srcY, dstX, dstY, srcW, srcH, texW, texH);
+}
+
+// --- Phase 4: Screenshot (swapchain image -> RGBA, BGRA->RGBA swap, into dst tex) ---
+//
+// Timing assumption (Phase 4): callable BETWEEN frames (after EndFrame, before next
+// BeginFrame). When integrated into the live game loop in Phase 5, the GameWindow caller
+// site sits inside the active render pass — at that point this function will need to
+// suspend/resume the render pass. For the standalone smoketest the between-frames path
+// is sufficient and exercises the readback machinery.
+void RendererVulkan::TakeScreenshot(u32 dstTex, i32 left, i32 top, i32 width, i32 height) {
+    if (!initialized_ || !textureMgr_ || dstTex == 0 || !ctx_ || !swap_) return;
+    if (width <= 0 || height <= 0) return;
+
+    int dstW = 0, dstH = 0;
+    if (!textureMgr_->GetSize(dstTex, &dstW, &dstH)) return;
+    if (width > dstW)  width  = dstW;
+    if (height > dstH) height = dstH;
+
+    if (frameStarted_ || inRenderPass_) {
+        std::fprintf(stderr, "[VK] TakeScreenshot called mid-frame — Phase 5 will handle suspend/resume; skipping.\n");
+        return;
+    }
+
+    // Make sure the previous present is fully done (sledgehammer: vkQueueWaitIdle).
+    vkQueueWaitIdle(ctx_->graphicsQueue());
+
+    const VkExtent2D extent = swap_->extent();
+    if (uint32_t(left + width)  > extent.width || left < 0) return;
+    if (uint32_t(top  + height) > extent.height || top  < 0) return;
+
+    // Read full screenshot region from the most-recently-presented swap image.
+    // After present, layout is PRESENT_SRC_KHR. Restore to PRESENT_SRC_KHR after read.
+    const size_t bytes = size_t(width) * size_t(height) * 4u;
+    std::vector<uint8_t> bgra(bytes);
+    VkImage swapImg = swap_->image(currentSwapImage_);
+    if (!swapImg) return;
+
+    // ReadbackImageRgba reads the FULL image. We want only a subregion. Workaround: read
+    // a temporary image-sized buffer, then crop. Acceptable for screenshot path (rare,
+    // non-hot). Alternative: parameterize ReadbackImageRgba with a region — Phase 5+.
+    std::vector<uint8_t> full(size_t(extent.width) * size_t(extent.height) * 4u);
+    if (!RV_ReadbackImageRgba(*ctx_, swapImg,
+                              int(extent.width), int(extent.height),
+                              full.data(), full.size(),
+                              VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                              VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)) {
+        return;
+    }
+
+    // Crop + BGRA → RGBA swap (swapchain format=44 = VK_FORMAT_B8G8R8A8_UNORM).
+    std::vector<uint8_t> rgba(bytes);
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* srcRow = full.data() + (size_t(top + y) * extent.width + left) * 4u;
+        uint8_t*       dstRow = rgba.data() + size_t(y) * size_t(width) * 4u;
+        for (int x = 0; x < width; ++x) {
+            dstRow[x * 4 + 0] = srcRow[x * 4 + 2];  // R <- B
+            dstRow[x * 4 + 1] = srcRow[x * 4 + 1];  // G
+            dstRow[x * 4 + 2] = srcRow[x * 4 + 0];  // B <- R
+            dstRow[x * 4 + 3] = srcRow[x * 4 + 3];  // A
+        }
+    }
+
+    // Write into dst tex via UpdateSubImage (covers full dst if width/height match).
+    textureMgr_->UpdateSubImage(*ctx_, dstTex, 0, 0, width, height, rgba.data());
+}
 
 // ============================================================================
-// Phase 3 stress / verification harness (called by vk_smoketest --stress=N)
+// File-internal helpers (used by Phase 3 stress + Phase 4 surface ops).
 // ============================================================================
-namespace {
 
 // Read back a texture's full RGBA contents into `dst` (size = w*h*4 bytes).
-// Issues a one-shot cmd buffer: SHADER_READ_ONLY_OPTIMAL → TRANSFER_SRC_OPTIMAL,
+// Issues a one-shot cmd buffer: srcLayout → TRANSFER_SRC_OPTIMAL,
 // vkCmdCopyImageToBuffer into a transient HOST_VISIBLE staging buffer, then
-// transitions back to SHADER_READ_ONLY_OPTIMAL. Synchronous (vkQueueWaitIdle).
-bool ReadbackImageRgba(vk::VkContext& ctx, VkImage image, int w, int h,
-                       uint8_t* dst, size_t dstBytes)
+// transitions back to restoreLayout. Synchronous (vkQueueWaitIdle).
+static bool RV_ReadbackImageRgba(vk::VkContext& ctx, VkImage image, int w, int h,
+                                 uint8_t* dst, size_t dstBytes,
+                                 VkImageLayout srcLayout,
+                                 VkImageLayout restoreLayout)
 {
     if (!image || w <= 0 || h <= 0) return false;
     const VkDeviceSize bytes = VkDeviceSize(w) * VkDeviceSize(h) * 4u;
     if (dstBytes < bytes) return false;
 
-    // Transient cmd pool (avoid coupling with VkTextureManager's pool).
     VkCommandPool pool = VK_NULL_HANDLE;
     {
         VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -680,7 +880,7 @@ bool ReadbackImageRgba(vk::VkContext& ctx, VkImage image, int w, int h,
     vkBeginCommandBuffer(cb, &bbi);
 
     VkImageMemoryBarrier toSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    toSrc.oldLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toSrc.oldLayout           = srcLayout;
     toSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -688,9 +888,11 @@ bool ReadbackImageRgba(vk::VkContext& ctx, VkImage image, int w, int h,
     toSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     toSrc.subresourceRange.levelCount = 1;
     toSrc.subresourceRange.layerCount = 1;
-    toSrc.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toSrc.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_SHADER_READ_BIT
+                        | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    vkCmdPipelineBarrier(cb,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &toSrc);
 
@@ -701,14 +903,15 @@ bool ReadbackImageRgba(vk::VkContext& ctx, VkImage image, int w, int h,
     vkCmdCopyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            staging, 1, &region);
 
-    VkImageMemoryBarrier toShader = toSrc;
-    toShader.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toShader.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    toShader.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &toShader);
+    VkImageMemoryBarrier toRestore = toSrc;
+    toRestore.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toRestore.newLayout     = restoreLayout;
+    toRestore.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toRestore.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cb,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toRestore);
 
     vkEndCommandBuffer(cb);
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -724,8 +927,6 @@ bool ReadbackImageRgba(vk::VkContext& ctx, VkImage image, int w, int h,
     vkDestroyCommandPool(ctx.device(), pool, nullptr);  // frees cb
     return true;
 }
-
-}  // namespace
 
 int RendererVulkan::Phase3StressTest(int n, std::FILE* log)
 {
@@ -801,7 +1002,9 @@ int RendererVulkan::Phase3StressTest(int n, std::FILE* log)
         int w = 0, h = 0; textureMgr_->GetSize(ids[i], &w, &h);
         const size_t bytes = size_t(w) * size_t(h) * 4u;
         std::vector<uint8_t> back(bytes, 0xCD);
-        if (!ReadbackImageRgba(*ctx_, img, w, h, back.data(), bytes)) {
+        if (!RV_ReadbackImageRgba(*ctx_, img, w, h, back.data(), bytes,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
             LOG("[stress] FAIL: readback i=%d\n", i); ++errors; continue;
         }
         if (std::memcmp(back.data(), patterns[size_t(i)].data(), bytes) != 0) {
