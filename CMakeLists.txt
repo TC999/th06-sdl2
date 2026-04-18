@@ -467,6 +467,9 @@ if(TH06_USE_VULKAN)
         ${CMAKE_SOURCE_DIR}/src/vulkan/VkRenderTarget.cpp
         ${CMAKE_SOURCE_DIR}/src/vulkan/VkPipelineCache.cpp
         ${CMAKE_SOURCE_DIR}/src/vulkan/VkResources.cpp
+        # Phase 3 additions:
+        ${CMAKE_SOURCE_DIR}/src/vulkan/VmaUsage.cpp
+        ${CMAKE_SOURCE_DIR}/src/vulkan/VkTextureManager.cpp
         ${TH06_VOLK_DIR}/volk.c
     )
 
@@ -485,10 +488,10 @@ if(TH06_USE_VULKAN)
     target_link_libraries(vk_smoketest PRIVATE
         SDL2::SDL2main
         SDL2::SDL2
+        SDL2_image::SDL2_image    # Phase 3: CreateTextureFromMemory uses IMG_Load_RW
     )
     target_compile_definitions(vk_smoketest PRIVATE
         TH06_USE_VULKAN=1
-        TH06_VULKAN_SKIP_VMA=1   # Phase 1 不实例化 VMA；Phase 3 移除
         VK_NO_PROTOTYPES=1       # 强制全面走 volk 函数指针，避免 link 时跳到未定义的 stdcall 原型
     )
     if(MSVC)
@@ -502,6 +505,12 @@ if(TH06_USE_VULKAN)
                 "${SDL2_DIR}/lib/${SDL2_ARCH}/SDL2.dll"
                 $<TARGET_FILE_DIR:vk_smoketest>
             COMMENT "复制 SDL2.dll 到 vk_smoketest 输出目录"
+        )
+        add_custom_command(TARGET vk_smoketest POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${SDL2_IMAGE_DIR}/lib/${SDL2_ARCH}/SDL2_image.dll"
+                $<TARGET_FILE_DIR:vk_smoketest>
+            COMMENT "复制 SDL2_image.dll 到 vk_smoketest 输出目录 (Phase 3)"
         )
     endif()
     message(STATUS "TH06_USE_VULKAN: vk_smoketest target enabled")

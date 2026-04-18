@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Phase 2 — see VkRenderTarget.hpp for the design + memory allocation carve-out note.
+// Phase 3 — see VkRenderTarget.hpp for the design. All depth memory now via VMA.
 #include "VkRenderTarget.hpp"
 
 #include "VkContext.hpp"
@@ -14,21 +14,6 @@ VkRenderTarget::~VkRenderTarget() {
     // on normal shutdown order, so just no-op.
 }
 
-uint32_t FindMemoryTypeIndex(VkPhysicalDevice phys,
-                             uint32_t typeBits,
-                             VkMemoryPropertyFlags required) {
-    VkPhysicalDeviceMemoryProperties props;
-    vkGetPhysicalDeviceMemoryProperties(phys, &props);
-    for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-        const bool typeOk = (typeBits & (1u << i)) != 0;
-        const bool propOk = (props.memoryTypes[i].propertyFlags & required) == required;
-        if (typeOk && propOk) {
-            return i;
-        }
-    }
-    return UINT32_MAX;
-}
-
 bool VkRenderTarget::Create(VkContext& ctx, const VkSwapchain& swap) {
     extent_ = swap.extent();
     if (!createRenderPass(ctx, swap.imageFormat())) return false;
@@ -40,15 +25,19 @@ bool VkRenderTarget::Create(VkContext& ctx, const VkSwapchain& swap) {
 void VkRenderTarget::Destroy(VkContext& ctx) {
     VkDevice dev = ctx.device();
     if (dev == VK_NULL_HANDLE) return;
+    VmaAllocator alloc = ctx.allocator();
 
     for (auto fb : framebuffers_) if (fb)  vkDestroyFramebuffer(dev, fb, nullptr);
     for (auto v  : depthViews_)   if (v)   vkDestroyImageView(dev, v, nullptr);
-    for (auto i  : depthImages_)  if (i)   vkDestroyImage(dev, i, nullptr);
-    for (auto m  : depthMemories_)if (m)   vkFreeMemory(dev, m, nullptr);
+    for (size_t i = 0; i < depthImages_.size(); ++i) {
+        if (depthImages_[i] && alloc) {
+            vmaDestroyImage(alloc, depthImages_[i], depthAllocs_[i]);
+        }
+    }
     framebuffers_.clear();
     depthViews_.clear();
     depthImages_.clear();
-    depthMemories_.clear();
+    depthAllocs_.clear();
 
     if (renderPass_) {
         vkDestroyRenderPass(dev, renderPass_, nullptr);
@@ -121,7 +110,7 @@ bool VkRenderTarget::createRenderPass(VkContext& ctx, VkFormat colorFormat) {
 
 bool VkRenderTarget::createDepthResources(VkContext& ctx, VkExtent2D extent, uint32_t count) {
     depthImages_.resize(count, VK_NULL_HANDLE);
-    depthMemories_.resize(count, VK_NULL_HANDLE);
+    depthAllocs_.resize(count, VK_NULL_HANDLE);
     depthViews_.resize(count, VK_NULL_HANDLE);
 
     for (uint32_t i = 0; i < count; ++i) {
@@ -136,24 +125,17 @@ bool VkRenderTarget::createDepthResources(VkContext& ctx, VkExtent2D extent, uin
         ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
         ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        TH_VK_CHECK(vkCreateImage(ctx.device(), &ici, nullptr, &depthImages_[i]));
 
-        VkMemoryRequirements req;
-        vkGetImageMemoryRequirements(ctx.device(), depthImages_[i], &req);
-        uint32_t typeIdx = FindMemoryTypeIndex(ctx.physicalDevice(),
-                                               req.memoryTypeBits,
-                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (typeIdx == UINT32_MAX) {
-            std::fprintf(stderr, "[VkRenderTarget] no DEVICE_LOCAL memory type for depth\n");
+        VmaAllocationCreateInfo aci{};
+        aci.usage         = VMA_MEMORY_USAGE_AUTO;
+        aci.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+        VkResult r = vmaCreateImage(ctx.allocator(), &ici, &aci,
+                                    &depthImages_[i], &depthAllocs_[i], nullptr);
+        if (r != VK_SUCCESS) {
+            std::fprintf(stderr, "[VkRenderTarget] vmaCreateImage(depth) -> %d\n", int(r));
             return false;
         }
-
-        VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = req.size;
-        mai.memoryTypeIndex = typeIdx;
-        // PHASE 2 CARVE-OUT: bare vkAllocateMemory until VMA lands in Phase 3.
-        TH_VK_CHECK(vkAllocateMemory(ctx.device(), &mai, nullptr, &depthMemories_[i]));
-        TH_VK_CHECK(vkBindImageMemory(ctx.device(), depthImages_[i], depthMemories_[i], 0));
 
         VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         ivci.image    = depthImages_[i];

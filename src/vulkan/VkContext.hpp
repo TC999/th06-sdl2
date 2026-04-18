@@ -4,6 +4,7 @@
 #pragma once
 
 #include <volk.h>
+#include "VmaUsage.hpp"
 #include <SDL_video.h>
 #include <cstdint>
 
@@ -50,14 +51,15 @@ public:
     uint32_t         graphicsQueueFamily() const { return graphicsQueueFamily_; }
     bool             validationActive() const { return validationActive_; }
 
-    // VMA 在 Phase 3 真正使用，Phase 1 仅占位。
-    // VmaAllocator allocator() const { return allocator_; }
+    // Phase 3 — single VMA allocator shared by render-target depth, upload heap and texture mgr.
+    VmaAllocator     allocator()      const { return allocator_; }
 
 private:
     bool createInstance(const VkContextCreateInfo& info);
     bool createSurface(SDL_Window* window);
     bool pickPhysicalDevice();
     bool createDeviceAndQueue();
+    bool createAllocator();
     void setupDebugMessenger();
 
     VkInstance               instance_              = VK_NULL_HANDLE;
@@ -69,6 +71,7 @@ private:
     uint32_t                 graphicsQueueFamily_   = UINT32_MAX;
     bool                     validationActive_      = false;
     bool                     debugUtilsLoaded_      = false;
+    VmaAllocator             allocator_             = VK_NULL_HANDLE;
 };
 
 }  // namespace th06::vk

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Phase 2 — see VkResources.hpp for design.
+// Phase 3 — see VkResources.hpp for design. All allocations via VMA (no carve-out).
 #include "VkResources.hpp"
 
 #include "VkContext.hpp"
-#include "VkRenderTarget.hpp"  // FindMemoryTypeIndex
 
 #include <cstdio>
 #include <cstring>
@@ -18,46 +17,39 @@ namespace th06::vk {
 VkUploadHeap::~VkUploadHeap() {}
 
 bool VkUploadHeap::Init(VkContext& ctx) {
+    VmaAllocator allocator = ctx.allocator();
     for (uint32_t i = 0; i < kFramesInFlight; ++i) {
         VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bci.size        = kBytesPerFrame;
         bci.usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        TH_VK_CHECK(vkCreateBuffer(ctx.device(), &bci, nullptr, &frames_[i].buffer));
 
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(ctx.device(), frames_[i].buffer, &req);
-        uint32_t typeIdx = FindMemoryTypeIndex(ctx.physicalDevice(),
-                                               req.memoryTypeBits,
-                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (typeIdx == UINT32_MAX) {
-            std::fprintf(stderr, "[VkUploadHeap] no HOST_VISIBLE|COHERENT memory\n");
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+        // Persistently mapped, sequential-write host upload.
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                  | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo info{};
+        VkResult r = vmaCreateBuffer(allocator, &bci, &aci,
+                                     &frames_[i].buffer, &frames_[i].alloc, &info);
+        if (r != VK_SUCCESS) {
+            std::fprintf(stderr, "[VkUploadHeap] vmaCreateBuffer -> %d\n", int(r));
             return false;
         }
-        VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = req.size;
-        mai.memoryTypeIndex = typeIdx;
-        // PHASE 2 CARVE-OUT: bare vkAllocateMemory — see VkRenderTarget.hpp note.
-        TH_VK_CHECK(vkAllocateMemory(ctx.device(), &mai, nullptr, &frames_[i].memory));
-        TH_VK_CHECK(vkBindBufferMemory(ctx.device(), frames_[i].buffer, frames_[i].memory, 0));
-        TH_VK_CHECK(vkMapMemory(ctx.device(), frames_[i].memory, 0, VK_WHOLE_SIZE, 0,
-                                &frames_[i].mapped));
+        frames_[i].mapped = info.pMappedData;
         frames_[i].offset = 0;
     }
     return true;
 }
 
 void VkUploadHeap::Shutdown(VkContext& ctx) {
-    VkDevice dev = ctx.device();
-    if (dev == VK_NULL_HANDLE) return;
+    VmaAllocator allocator = ctx.allocator();
+    if (allocator == VK_NULL_HANDLE) return;
     for (uint32_t i = 0; i < kFramesInFlight; ++i) {
-        if (frames_[i].mapped) {
-            vkUnmapMemory(dev, frames_[i].memory);
-            frames_[i].mapped = nullptr;
+        if (frames_[i].buffer && frames_[i].alloc) {
+            vmaDestroyBuffer(allocator, frames_[i].buffer, frames_[i].alloc);
         }
-        if (frames_[i].buffer) vkDestroyBuffer(dev, frames_[i].buffer, nullptr);
-        if (frames_[i].memory) vkFreeMemory(dev, frames_[i].memory, nullptr);
         frames_[i] = {};
     }
 }
@@ -99,8 +91,8 @@ VkDefaultTexture::~VkDefaultTexture() {}
 bool VkDefaultTexture::Init(VkContext& ctx,
                             VkDescriptorPool      pool,
                             VkDescriptorSetLayout texLayout) {
-    VkDevice dev  = ctx.device();
-    VkPhysicalDevice phys = ctx.physicalDevice();
+    VkDevice         dev   = ctx.device();
+    VmaAllocator     alloc = ctx.allocator();
 
     // Image: 1x1 R8G8B8A8 UNORM, sampled.
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
@@ -114,31 +106,28 @@ bool VkDefaultTexture::Init(VkContext& ctx,
     ici.usage       = VK_IMAGE_USAGE_SAMPLED_BIT;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    TH_VK_CHECK(vkCreateImage(dev, &ici, nullptr, &image_));
 
-    VkMemoryRequirements req;
-    vkGetImageMemoryRequirements(dev, image_, &req);
-    uint32_t typeIdx = FindMemoryTypeIndex(phys, req.memoryTypeBits,
-                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (typeIdx == UINT32_MAX) return false;
+    VmaAllocationCreateInfo vaci{};
+    vaci.usage = VMA_MEMORY_USAGE_AUTO;
+    vaci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+               | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    vaci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 
-    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize  = req.size;
-    mai.memoryTypeIndex = typeIdx;
-    // PHASE 2 CARVE-OUT.
-    TH_VK_CHECK(vkAllocateMemory(dev, &mai, nullptr, &memory_));
-    TH_VK_CHECK(vkBindImageMemory(dev, image_, memory_, 0));
+    VmaAllocationInfo ainfo{};
+    VkResult r = vmaCreateImage(alloc, &ici, &vaci, &image_, &alloc_, &ainfo);
+    if (r != VK_SUCCESS) {
+        std::fprintf(stderr, "[VkDefaultTexture] vmaCreateImage -> %d\n", int(r));
+        return false;
+    }
 
-    // Write 0xFFFFFFFF.
-    void* mapped = nullptr;
-    TH_VK_CHECK(vkMapMemory(dev, memory_, 0, VK_WHOLE_SIZE, 0, &mapped));
+    // Write 0xFFFFFFFF directly into the mapped linear image.
     VkSubresourceLayout subLayout;
     VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
     vkGetImageSubresourceLayout(dev, image_, &sub, &subLayout);
-    uint32_t* px = reinterpret_cast<uint32_t*>(static_cast<char*>(mapped) + subLayout.offset);
+    uint32_t* px = reinterpret_cast<uint32_t*>(
+        static_cast<char*>(ainfo.pMappedData) + subLayout.offset);
     *px = 0xFFFFFFFFu;
-    vkUnmapMemory(dev, memory_);
+    vmaFlushAllocation(alloc, alloc_, 0, VK_WHOLE_SIZE);
 
     // Transition PREINITIALIZED -> SHADER_READ_ONLY_OPTIMAL via a one-shot cmd buffer.
     VkCommandPool tmpPool = VK_NULL_HANDLE;
@@ -227,16 +216,18 @@ bool VkDefaultTexture::Init(VkContext& ctx,
 }
 
 void VkDefaultTexture::Shutdown(VkContext& ctx) {
-    VkDevice dev = ctx.device();
+    VkDevice     dev   = ctx.device();
+    VmaAllocator alloc = ctx.allocator();
     if (dev == VK_NULL_HANDLE) return;
     if (sampler_) vkDestroySampler(dev, sampler_, nullptr);
     if (view_)    vkDestroyImageView(dev, view_, nullptr);
-    if (image_)   vkDestroyImage(dev, image_, nullptr);
-    if (memory_)  vkFreeMemory(dev, memory_, nullptr);
+    if (image_ && alloc_ && alloc) {
+        vmaDestroyImage(alloc, image_, alloc_);
+    }
     sampler_ = VK_NULL_HANDLE;
     view_    = VK_NULL_HANDLE;
     image_   = VK_NULL_HANDLE;
-    memory_  = VK_NULL_HANDLE;
+    alloc_   = VK_NULL_HANDLE;
     descSet_ = VK_NULL_HANDLE;  // freed with pool
 }
 

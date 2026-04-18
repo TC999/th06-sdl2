@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 using th06::RendererVulkan;
 using th06::VertexDiffuseXyzrwh;
@@ -68,6 +69,30 @@ int main(int argc, char** argv) {
         // Init 内部失败时不会 crash，但 window 仍为 win。这里靠日志。
     }
 
+    // Phase 3: build a 64x64 RGBA texture via CreateEmptyTexture + UpdateTextureSubImage,
+    // demonstrating the new VMA-backed texture path. Pattern is a 4-color quadrant gradient.
+    const int kTexW = 64, kTexH = 64;
+    Uint32 texId = renderer.CreateEmptyTexture(kTexW, kTexH);
+    if (texId != 0) {
+        std::vector<unsigned char> pixels(kTexW * kTexH * 4);
+        for (int y = 0; y < kTexH; ++y) {
+            for (int x = 0; x < kTexW; ++x) {
+                unsigned char* p = pixels.data() + (y * kTexW + x) * 4;
+                bool right = x >= kTexW / 2;
+                bool down  = y >= kTexH / 2;
+                p[0] = right ? 0xFF : 0x00;          // R
+                p[1] = down  ? 0xFF : 0x00;          // G
+                p[2] = (right ^ down) ? 0xFF : 0x00; // B
+                p[3] = 0xFF;                         // A
+            }
+        }
+        renderer.UpdateTextureSubImage(texId, 0, 0, kTexW, kTexH, pixels.data());
+        std::fprintf(stderr, "[vk_smoketest] Phase 3 textured quad enabled (id=%u, %dx%d)\n",
+                     unsigned(texId), kTexW, kTexH);
+    } else {
+        std::fprintf(stderr, "[vk_smoketest] CreateEmptyTexture failed; textured pass skipped\n");
+    }
+
     std::fprintf(stderr, "[vk_smoketest] Running %d frames at %dx%d...\n",
                  frames, width, height);
 
@@ -109,10 +134,35 @@ int main(int argc, char** argv) {
         quad[3].diffuse  = 0xFFFFFFFFu;  // white
         renderer.DrawTriangleStrip(quad, 4);
 
+        // Phase 3: textured quad in lower-right corner using DrawTriangleStripTextured.
+        // Verifies real texture binding (vs Phase 2's 1x1 white default).
+        if (texId != 0) {
+            renderer.SetTexture(texId);
+            renderer.SetColorOp(0);  // MODULATE: tex * diffuse
+            float tx = float(width)  - 80.0f;
+            float ty = float(height) - 80.0f;
+            float ts = 64.0f;
+            th06::VertexTex1DiffuseXyzrwh tquad[4];
+            tquad[0].position = D3DXVECTOR4(tx,      ty,      0.5f, 1.0f);
+            tquad[0].diffuse  = 0xFFFFFFFFu;
+            tquad[0].textureUV= D3DXVECTOR2(0.0f, 0.0f);
+            tquad[1].position = D3DXVECTOR4(tx + ts, ty,      0.5f, 1.0f);
+            tquad[1].diffuse  = 0xFFFFFFFFu;
+            tquad[1].textureUV= D3DXVECTOR2(1.0f, 0.0f);
+            tquad[2].position = D3DXVECTOR4(tx,      ty + ts, 0.5f, 1.0f);
+            tquad[2].diffuse  = 0xFFFFFFFFu;
+            tquad[2].textureUV= D3DXVECTOR2(0.0f, 1.0f);
+            tquad[3].position = D3DXVECTOR4(tx + ts, ty + ts, 0.5f, 1.0f);
+            tquad[3].diffuse  = 0xFFFFFFFFu;
+            tquad[3].textureUV= D3DXVECTOR2(1.0f, 1.0f);
+            renderer.DrawTriangleStripTextured(tquad, 4);
+        }
+
         renderer.EndFrame();
         SDL_Delay(8);  // 约 120 FPS 上限
     }
 
+    if (texId != 0) renderer.DeleteTexture(texId);
     renderer.Release();
     SDL_DestroyWindow(win);
     SDL_Quit();

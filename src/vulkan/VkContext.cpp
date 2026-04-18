@@ -94,12 +94,17 @@ bool VkContext::Init(const VkContextCreateInfo& info) {
     if (!createSurface(info.window))  return false;
     if (!pickPhysicalDevice())        return false;
     if (!createDeviceAndQueue())      return false;
+    if (!createAllocator())           return false;
     return true;
 }
 
 void VkContext::Shutdown() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
+        if (allocator_ != VK_NULL_HANDLE) {
+            vmaDestroyAllocator(allocator_);
+            allocator_ = VK_NULL_HANDLE;
+        }
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
     }
@@ -300,6 +305,29 @@ bool VkContext::createDeviceAndQueue() {
     // volk: switch to device-level dispatch table (faster than instance-level for device fns).
     volkLoadDevice(device_);
     vkGetDeviceQueue(device_, graphicsQueueFamily_, 0, &graphicsQueue_);
+    return true;
+}
+
+bool VkContext::createAllocator() {
+    // Use volk's dispatch tables. With VMA_DYNAMIC_VULKAN_FUNCTIONS=1 we MUST supply at least
+    // vkGetInstanceProcAddr + vkGetDeviceProcAddr; VMA pulls everything else from there.
+    VmaVulkanFunctions vfn{};
+    vfn.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vfn.vkGetDeviceProcAddr   = vkGetDeviceProcAddr;
+
+    VmaAllocatorCreateInfo aci{};
+    aci.vulkanApiVersion = VK_API_VERSION_1_1;
+    aci.physicalDevice   = physicalDevice_;
+    aci.device           = device_;
+    aci.instance         = instance_;
+    aci.pVulkanFunctions = &vfn;
+
+    VkResult r = vmaCreateAllocator(&aci, &allocator_);
+    if (r != VK_SUCCESS) {
+        std::fprintf(stderr, "[VK] vmaCreateAllocator -> %s\n", VkResultToString(r));
+        allocator_ = VK_NULL_HANDLE;
+        return false;
+    }
     return true;
 }
 

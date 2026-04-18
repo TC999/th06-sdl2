@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
-// Phase 2 — IRenderer over Vulkan with full draw-path support.
+// Phase 3 — IRenderer over Vulkan with full draw-path support + real texture manager.
 //
-// Phase-2 scope (per PLAN):
-//   - 7 Draw* methods implemented (color & textured, 2D & 3D, strip & fan)
-//   - 1x1 white default texture as placeholder for textured paths until Phase 3
+// Phase-3 scope (per PLAN):
+//   - 7 Draw* methods (color & textured, 2D & 3D, strip & fan)
+//   - VMA-backed VkTextureManager: CreateFromMemory / CreateEmpty / Delete / UpdateSubImage
+//   - 1x1 white default texture is now ONLY the fallback when SetTexture(0)/unknown id
 //   - L1 (IRenderer state) -> L2 (VkPipelineKey) -> VkPipelineCache
-//   - per-frame vertex upload heap (host-coherent ring), one render pass + depth
+//   - per-frame vertex upload heap (VMA host-coherent ring), one render pass + depth (VMA)
 //   - SPV loaded from TH06_VK_SHADER_DIR (set by CMake)
 //
-// Phase-3 will replace: default tex with real texture mgr, raw vkAllocateMemory with VMA.
-// Phase-4 adds ImGui pass + sRGB.
+// Phase-4 will add: ImGui pass, sRGB, surface ops (LoadSurfaceFromFile, CopySurface*, TakeScreenshot).
 #pragma once
 
 #include "IRenderer.hpp"
@@ -26,6 +26,7 @@ class VkRenderTarget;
 class PipelineCache;
 class VkUploadHeap;
 class VkDefaultTexture;
+class VkTextureManager;
 }
 
 namespace th06 {
@@ -116,6 +117,7 @@ private:
     std::unique_ptr<vk::PipelineCache>     pipelineCache_;
     std::unique_ptr<vk::VkUploadHeap>      uploadHeap_;
     std::unique_ptr<vk::VkDefaultTexture>  defaultTex_;
+    std::unique_ptr<vk::VkTextureManager>  textureMgr_;
 
     // Pipeline layouts (owned)
     VkDescriptorSetLayout descLayoutTex_         = VK_NULL_HANDLE;  // set 0 binding 0 = sampler2D

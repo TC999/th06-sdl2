@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: MIT
-// Phase 2 — bundled Vulkan-side resources kept outside the renderpass / pipeline cache:
+// Phase 3 — bundled Vulkan-side resources kept outside the renderpass / pipeline cache:
 //
-//   1. VkUploadHeap         per-frame host-visible vertex staging ring buffer
-//   2. VkDefaultTexture     1x1 white image + sampler + descriptor set (textured-path placeholder
-//                           until Phase 3 wires real texture upload)
+//   1. VkUploadHeap         per-frame host-visible vertex staging ring buffer (VMA-backed)
+//   2. VkDefaultTexture     1x1 white image + sampler + descriptor set (used as fallback
+//                           when SetTexture(0) is called or texture id is unknown)
 //   3. LoadSpvFile          read SPIR-V + vkCreateShaderModule helper
 //
-// Splitting these into 3 separate files would bloat the diff for what is a transient piece of
-// Phase-2 plumbing — Phase 3 replaces #2 with a real texture manager and #1 may move to VMA.
+// All allocations now go through VMA (Phase 3, ADR-002 Amendment 2026-04-19).
 #pragma once
 
-#include <volk.h>
+#include "VmaUsage.hpp"
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -43,10 +42,10 @@ public:
 
 private:
     struct PerFrame {
-        VkBuffer       buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        void*          mapped = nullptr;
-        VkDeviceSize   offset = 0;
+        VkBuffer        buffer    = VK_NULL_HANDLE;
+        VmaAllocation   alloc     = VK_NULL_HANDLE;
+        void*           mapped    = nullptr;
+        VkDeviceSize    offset    = 0;
     };
     PerFrame frames_[kFramesInFlight];
     uint32_t currentFrame_ = 0;
@@ -67,7 +66,7 @@ public:
 
 private:
     VkImage         image_   = VK_NULL_HANDLE;
-    VkDeviceMemory  memory_  = VK_NULL_HANDLE;
+    VmaAllocation   alloc_   = VK_NULL_HANDLE;
     VkImageView     view_    = VK_NULL_HANDLE;
     VkSampler       sampler_ = VK_NULL_HANDLE;
     VkDescriptorSet descSet_ = VK_NULL_HANDLE;

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
-// Phase 1 skeleton — 仅声明，不调用 VMA API。Phase 3 才会启用真正的 vmaCreate*。
-// 该 header 集中处理 VMA 单 header 的实现宏，仅 .cpp 中包含。
+// Phase 3 — VMA single-header bridge. Includers get vmaCreate*/vmaDestroy*/etc. The single
+// implementation TU is VmaUsage.cpp (defines VMA_IMPLEMENTATION). This header MUST be
+// included AFTER volk.h — it depends on Vulkan types but does not pull <vulkan/vulkan.h>
+// itself (we configure VMA to use volk's dispatch tables via dynamic function loading).
 #pragma once
 
-// VMA 推荐：使用动态加载，避免直接依赖 vulkan.h 的内联函数解析。
-// Phase 1 暂不引入实现宏，等 VkContext.cpp 第一次需要 vmaCreate* 时再 #define VMA_IMPLEMENTATION
-// 一次性。该 header 的目的是为 includer 屏蔽路径细节并固化 VMA 配置。
-#ifndef TH06_VULKAN_SKIP_VMA
-#  include <vma/vk_mem_alloc.h>
-#endif
+// VMA assumes vulkan.h is already visible. With volk, types are declared by <volk.h>,
+// which transitively includes <vulkan/vulkan.h> in types-only mode (no prototypes).
+#include <volk.h>
+
+#define VMA_STATIC_VULKAN_FUNCTIONS  0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#include <vma/vk_mem_alloc.h>

@@ -1,5 +1,5 @@
     // SPDX-License-Identifier: MIT
-// Phase 2 — RendererVulkan implementation. See header for design notes.
+// Phase 3 — RendererVulkan implementation. See header for design notes.
 #include "RendererVulkan.hpp"
 #include "sdl2_renderer.hpp"  // VertexDiffuseXyzrwh + friends + RenderVertexInfo (forward-declared in IRenderer.hpp)
 #include "AnmManager.hpp"     // RenderVertexInfo full definition
@@ -11,8 +11,12 @@
 #include "vulkan/VkPipelineCache.hpp"
 #include "vulkan/VkPipelineKey.hpp"
 #include "vulkan/VkResources.hpp"
+#include "vulkan/VkTextureManager.hpp"
 
 #include <SDL_log.h>
+#include <SDL_image.h>
+#include <SDL_rwops.h>
+#include <SDL_surface.h>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -83,6 +87,7 @@ void RendererVulkan::destroyAll() {
     if (dev) vkDeviceWaitIdle(dev);
 
     if (defaultTex_)    defaultTex_->Shutdown(*ctx_);
+    if (textureMgr_)    textureMgr_->Shutdown(*ctx_);
     if (uploadHeap_)    uploadHeap_->Shutdown(*ctx_);
     if (pipelineCache_) pipelineCache_->Shutdown(*ctx_);
     if (renderTarget_)  renderTarget_->Destroy(*ctx_);
@@ -101,6 +106,7 @@ void RendererVulkan::destroyAll() {
     if (swap_)   swap_->Destroy(*ctx_);
 
     defaultTex_.reset();
+    textureMgr_.reset();
     uploadHeap_.reset();
     pipelineCache_.reset();
     renderTarget_.reset();
@@ -201,6 +207,7 @@ void RendererVulkan::Init(SDL_Window *win, SDL_GLContext /*ctx_unused*/, i32 w, 
     pipelineCache_ = std::make_unique<vk::PipelineCache>();
     uploadHeap_    = std::make_unique<vk::VkUploadHeap>();
     defaultTex_    = std::make_unique<vk::VkDefaultTexture>();
+    textureMgr_    = std::make_unique<vk::VkTextureManager>();
 
     vk::VkContextCreateInfo ci{};
     ci.window = win;
@@ -235,9 +242,10 @@ void RendererVulkan::Init(SDL_Window *win, SDL_GLContext /*ctx_unused*/, i32 w, 
     if (!pipelineCache_->Init(*ctx_, deps))                { std::fprintf(stderr, "[VK] pipeline cache init failed\n"); return; }
     if (!uploadHeap_->Init(*ctx_))                         { std::fprintf(stderr, "[VK] upload heap init failed\n"); return; }
     if (!defaultTex_->Init(*ctx_, descriptorPool_, descLayoutTex_)) { std::fprintf(stderr, "[VK] default tex init failed\n"); return; }
+    if (!textureMgr_->Init(*ctx_, descLayoutTex_))         { std::fprintf(stderr, "[VK] texture mgr init failed\n"); return; }
 
     initialized_ = true;
-    std::fprintf(stderr, "[VK] RendererVulkan Phase 2 initialized %dx%d (validation=%s)\n",
+    std::fprintf(stderr, "[VK] RendererVulkan Phase 3 initialized %dx%d (validation=%s)\n",
                  w, h, ctx_->validationActive() ? "on" : "off");
 }
 
@@ -486,7 +494,9 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
     // 3. Bind pipeline + (optional) descriptor set.
     vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     if (hasTexture) {
-        VkDescriptorSet ds = defaultTex_->descriptorSet();  // Phase 2 placeholder
+        VkDescriptorSet ds = textureMgr_ ? textureMgr_->GetDescriptorSet(currentTexture)
+                                         : VK_NULL_HANDLE;
+        if (ds == VK_NULL_HANDLE) ds = defaultTex_->descriptorSet();
         vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayoutTex_, 0, 1, &ds, 0, nullptr);
     }
@@ -532,28 +542,82 @@ void RendererVulkan::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count
     drawCommon(4, 0, /*hasTex*/true, /*depth*/true, verts, count, sizeof(RenderVertexInfo));
 }
 
-// --- Texture / surface (Phase 3 stubs — return innocuous placeholder ID 0) ---
-#define TH_VK_PHASE3_NOOP(name) \
+// --- Texture / surface (Phase 3 — real impl for tex API; surfaces still Phase-4 stubs) ---
+#define TH_VK_PHASE4_NOOP(name) \
     do { static bool warned=false; if(!warned){ warned=true; \
-        std::fprintf(stderr,"[VK] %s: Phase-3 stub (no-op)\n", name);} } while(0)
+        std::fprintf(stderr,"[VK] %s: Phase-4 stub (no-op)\n", name);} } while(0)
 
-u32  RendererVulkan::CreateTextureFromMemory(const u8 *, i32, D3DCOLOR, i32 *outW, i32 *outH) {
-    TH_VK_PHASE3_NOOP("CreateTextureFromMemory");
-    if (outW) *outW = 1; if (outH) *outH = 1;
-    return 1;  // dummy non-zero id; SetTexture just caches it
+u32  RendererVulkan::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR colorKey,
+                                             i32 *outWidth, i32 *outHeight) {
+    if (!initialized_ || !textureMgr_ || !data || dataLen <= 0) {
+        if (outWidth)  *outWidth  = 0;
+        if (outHeight) *outHeight = 0;
+        return 0;
+    }
+    SDL_RWops *rw = SDL_RWFromConstMem(data, dataLen);
+    if (!rw) return 0;
+    SDL_Surface *surface = IMG_Load_RW(rw, 1);
+    if (!surface) {
+        std::fprintf(stderr, "[VK] CreateTextureFromMemory: IMG_Load_RW -> %s\n", IMG_GetError());
+        return 0;
+    }
+    SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_ABGR8888, 0);
+    SDL_FreeSurface(surface);
+    if (!rgba) return 0;
+
+    // Apply color key (D3D8 semantics: matching pixels become alpha=0; others alpha=255).
+    if (colorKey != 0) {
+        const u8 ckR = u8((colorKey >> 16) & 0xFF);
+        const u8 ckG = u8((colorKey >>  8) & 0xFF);
+        const u8 ckB = u8((colorKey      ) & 0xFF);
+        SDL_LockSurface(rgba);
+        u8 *pixels = static_cast<u8*>(rgba->pixels);
+        // ABGR8888 layout: byte order is R,G,B,A in memory.
+        const i32 pixelCount = rgba->w * rgba->h;
+        for (i32 i = 0; i < pixelCount; ++i) {
+            u8 *p = pixels + i * 4;
+            if (p[0] == ckR && p[1] == ckG && p[2] == ckB) p[3] = 0;
+            else                                            p[3] = 255;
+        }
+        SDL_UnlockSurface(rgba);
+    }
+
+    SDL_LockSurface(rgba);
+    u32 id = textureMgr_->CreateFromRgba(*ctx_, rgba->w, rgba->h,
+                                         static_cast<const u8*>(rgba->pixels));
+    SDL_UnlockSurface(rgba);
+
+    if (outWidth)  *outWidth  = rgba->w;
+    if (outHeight) *outHeight = rgba->h;
+    SDL_FreeSurface(rgba);
+    return id;
 }
-u32  RendererVulkan::CreateEmptyTexture(i32, i32)                                     { TH_VK_PHASE3_NOOP("CreateEmptyTexture"); return 1; }
-void RendererVulkan::DeleteTexture(u32)                                               { TH_VK_PHASE3_NOOP("DeleteTexture"); }
-void RendererVulkan::CopyAlphaChannel(u32, const u8 *, i32, i32, i32)                 { TH_VK_PHASE3_NOOP("CopyAlphaChannel"); }
-void RendererVulkan::UpdateTextureSubImage(u32, i32, i32, i32, i32, const u8 *)       { TH_VK_PHASE3_NOOP("UpdateTextureSubImage"); }
 
-u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, i32 *outW, i32 *outH)              { TH_VK_PHASE3_NOOP("LoadSurfaceFromFile/2"); if(outW)*outW=1; if(outH)*outH=1; return 1; }
-u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, D3DXIMAGE_INFO *)                  { TH_VK_PHASE3_NOOP("LoadSurfaceFromFile/3"); return 1; }
-void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)        { TH_VK_PHASE3_NOOP("CopySurfaceToScreen/9"); }
-void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32)                            { TH_VK_PHASE3_NOOP("CopySurfaceToScreen/5"); }
-void RendererVulkan::CopySurfaceRectToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)    { TH_VK_PHASE3_NOOP("CopySurfaceRectToScreen"); }
-void RendererVulkan::TakeScreenshot(u32, i32, i32, i32, i32)                                 { TH_VK_PHASE3_NOOP("TakeScreenshot"); }
+u32  RendererVulkan::CreateEmptyTexture(i32 width, i32 height) {
+    if (!initialized_ || !textureMgr_) return 0;
+    return textureMgr_->CreateEmpty(*ctx_, width, height);
+}
 
-#undef TH_VK_PHASE3_NOOP
+void RendererVulkan::DeleteTexture(u32 tex) {
+    if (!initialized_ || !textureMgr_ || tex == 0) return;
+    textureMgr_->Delete(*ctx_, tex);
+}
+
+void RendererVulkan::CopyAlphaChannel(u32, const u8 *, i32, i32, i32)                 { TH_VK_PHASE4_NOOP("CopyAlphaChannel"); }
+
+void RendererVulkan::UpdateTextureSubImage(u32 tex, i32 x, i32 y, i32 w, i32 h,
+                                           const u8 *rgbaPixels) {
+    if (!initialized_ || !textureMgr_ || tex == 0) return;
+    textureMgr_->UpdateSubImage(*ctx_, tex, x, y, w, h, rgbaPixels);
+}
+
+u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, i32 *outW, i32 *outH)              { TH_VK_PHASE4_NOOP("LoadSurfaceFromFile/2"); if(outW)*outW=1; if(outH)*outH=1; return 1; }
+u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, D3DXIMAGE_INFO *)                  { TH_VK_PHASE4_NOOP("LoadSurfaceFromFile/3"); return 1; }
+void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)        { TH_VK_PHASE4_NOOP("CopySurfaceToScreen/9"); }
+void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32)                            { TH_VK_PHASE4_NOOP("CopySurfaceToScreen/5"); }
+void RendererVulkan::CopySurfaceRectToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)    { TH_VK_PHASE4_NOOP("CopySurfaceRectToScreen"); }
+void RendererVulkan::TakeScreenshot(u32, i32, i32, i32, i32)                                 { TH_VK_PHASE4_NOOP("TakeScreenshot"); }
+
+#undef TH_VK_PHASE4_NOOP
 
 }  // namespace th06

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Phase 2 — render pass + depth attachment + per-swap-image framebuffers.
+// Phase 3 — render pass + depth attachment + per-swap-image framebuffers.
 //
 // Single render pass design (one color + one depth, one subpass):
 //   - color: format = swapchain (B8G8R8A8_UNORM), LOAD_OP_CLEAR,  STORE_OP_STORE,
@@ -7,15 +7,10 @@
 //   - depth: format = D32_SFLOAT (mandatory in Vulkan core), LOAD_OP_CLEAR, STORE_OP_DONT_CARE
 //
 // One depth image is allocated PER swapchain image. Recreated together with the swapchain.
-//
-// MEMORY ALLOC CARVE-OUT (Phase 2 only): we use raw vkAllocateMemory for the depth image
-// (and later the 1x1 white texture) because VMA isn't bootstrapped until Phase 3. Both call
-// sites are confined to this file and the default-texture upload in RendererVulkan::Init.
-// Phase 3 deletes this carve-out and swaps to vmaCreateImage. The static check script is
-// expected to allowlist these specific lines (see ADR-006 Amendment 3 if added).
+// Phase 3 — VMA-managed (no raw vkAllocateMemory remains).
 #pragma once
 
-#include <volk.h>
+#include "VmaUsage.hpp"
 #include <vector>
 #include <cstdint>
 
@@ -52,15 +47,9 @@ private:
     VkExtent2D                 extent_      { 0, 0 };
 
     std::vector<VkImage>        depthImages_;
-    std::vector<VkDeviceMemory> depthMemories_;
+    std::vector<VmaAllocation>  depthAllocs_;
     std::vector<VkImageView>    depthViews_;
     std::vector<VkFramebuffer>  framebuffers_;
 };
-
-// Carve-out helper (Phase 2 only). Picks first matching memory type from the requirements
-// + property flags. Returns UINT32_MAX on failure.
-uint32_t FindMemoryTypeIndex(VkPhysicalDevice phys,
-                             uint32_t typeBits,
-                             VkMemoryPropertyFlags required);
 
 }  // namespace th06::vk
