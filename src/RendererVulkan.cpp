@@ -421,10 +421,10 @@ void RendererVulkan::SetTexture(u32 tex)                 { currentTexture = tex;
 void RendererVulkan::SetTextureFactor(D3DCOLOR f)        { textureFactor = f; }
 void RendererVulkan::SetZWriteDisable(u8 d)              { currentZWriteDisable = d; }
 void RendererVulkan::SetDepthFunc(i32 alwaysPass)        { depthFuncAlways_ = alwaysPass ? 1 : 0; }
-void RendererVulkan::SetDestBlendInvSrcAlpha()           { /* implied by blendMode=ALPHA */ }
-void RendererVulkan::SetDestBlendOne()                   { /* implied by blendMode=ADD   */ }
-void RendererVulkan::SetTextureStageSelectDiffuse()      { /* spec const colorOp handles this */ }
-void RendererVulkan::SetTextureStageModulateTexture()    { /* spec const colorOp handles this */ }
+void RendererVulkan::SetDestBlendInvSrcAlpha()           { currentBlendMode = 0; /* alpha (matches GL: glBlendFunc SRC_ALPHA, ONE_MINUS_SRC_ALPHA) */ }
+void RendererVulkan::SetDestBlendOne()                   { currentBlendMode = 1; /* additive (matches GL: glBlendFunc SRC_ALPHA, ONE) */ }
+void RendererVulkan::SetTextureStageSelectDiffuse()      { currentTexture   = 0; /* mirrors RendererGL: zeroing currentTexture forces drawCommon to fallback to defaultTex_ (1x1 white), so untextured draws sample white and pure diffuse passes through. */ }
+void RendererVulkan::SetTextureStageModulateTexture()    { /* SetTexture(prev) restores the binding; pipeline colorOp picks Modulate via currentColorOp. */ }
 void RendererVulkan::SetFog(i32 e, D3DCOLOR c, f32 s, f32 z) {
     fogEnabled = e; fogColor = c; fogStart = s; fogEnd = z;
     // Phase 2: fog not implemented in shaders. Recorded for parity inspection only.
