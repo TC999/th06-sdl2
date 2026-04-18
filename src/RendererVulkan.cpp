@@ -1,0 +1,559 @@
+    // SPDX-License-Identifier: MIT
+// Phase 2 — RendererVulkan implementation. See header for design notes.
+#include "RendererVulkan.hpp"
+#include "sdl2_renderer.hpp"  // VertexDiffuseXyzrwh + friends + RenderVertexInfo (forward-declared in IRenderer.hpp)
+#include "AnmManager.hpp"     // RenderVertexInfo full definition
+
+#include "vulkan/VkContext.hpp"
+#include "vulkan/VkSwapchain.hpp"
+#include "vulkan/VkFrameContext.hpp"
+#include "vulkan/VkRenderTarget.hpp"
+#include "vulkan/VkPipelineCache.hpp"
+#include "vulkan/VkPipelineKey.hpp"
+#include "vulkan/VkResources.hpp"
+
+#include <SDL_log.h>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <string>
+
+#ifndef TH06_VK_SHADER_DIR
+#define TH06_VK_SHADER_DIR "shaders_vk"
+#endif
+
+namespace th06 {
+
+namespace {
+
+inline void ColorToFloat4(D3DCOLOR c, float out[4]) {
+    out[0] = ((c >> 16) & 0xFF) / 255.0f;  // R
+    out[1] = ((c >> 8)  & 0xFF) / 255.0f;  // G
+    out[2] = ((c)       & 0xFF) / 255.0f;  // B
+    out[3] = ((c >> 24) & 0xFF) / 255.0f;  // A
+}
+
+// Push constant block — must match GLSL `layout(push_constant) uniform PC` in all vertex shaders.
+struct PushConstants {
+    float invScreen[2];   // 1/screenWidth, 1/screenHeight (used by xyzrwh paths)
+    float _pad[2];
+    float mvp[16];        // column-major in shader; we feed row-major D3D bytes -> implicit transpose
+};
+
+inline void Mat4Mul_RowMajor(const float* a, const float* b, float* out) {
+    // out = a * b, all row-major 4x4.
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            float s = 0.f;
+            for (int k = 0; k < 4; ++k) {
+                s += a[r * 4 + k] * b[k * 4 + c];
+            }
+            out[r * 4 + c] = s;
+        }
+    }
+}
+
+}  // namespace
+
+RendererVulkan::RendererVulkan() {
+    window               = nullptr;
+    glContext            = nullptr;
+    screenWidth          = 0;
+    screenHeight         = 0;
+    viewportX = viewportY = viewportW = viewportH = 0;
+    currentTexture       = 0;
+    currentBlendMode     = 0;
+    currentColorOp       = 0;
+    currentVertexShader  = 0;
+    currentZWriteDisable = 0;
+    textureFactor        = 0xFFFFFFFF;
+    fogEnabled           = 0;
+    fogColor             = 0;
+    fogStart             = 0.f;
+    fogEnd               = 0.f;
+    realScreenWidth      = 0;
+    realScreenHeight     = 0;
+}
+
+RendererVulkan::~RendererVulkan() { destroyAll(); }
+
+void RendererVulkan::destroyAll() {
+    if (!initialized_) return;
+    VkDevice dev = ctx_ ? ctx_->device() : VK_NULL_HANDLE;
+    if (dev) vkDeviceWaitIdle(dev);
+
+    if (defaultTex_)    defaultTex_->Shutdown(*ctx_);
+    if (uploadHeap_)    uploadHeap_->Shutdown(*ctx_);
+    if (pipelineCache_) pipelineCache_->Shutdown(*ctx_);
+    if (renderTarget_)  renderTarget_->Destroy(*ctx_);
+
+    if (dev) {
+        for (auto& m : vertModules_) if (m) { vkDestroyShaderModule(dev, m, nullptr); m = VK_NULL_HANDLE; }
+        if (fragColorMod_) { vkDestroyShaderModule(dev, fragColorMod_, nullptr); fragColorMod_ = VK_NULL_HANDLE; }
+        if (fragTexMod_)   { vkDestroyShaderModule(dev, fragTexMod_,   nullptr); fragTexMod_   = VK_NULL_HANDLE; }
+        if (pipelineLayoutNoTex_) { vkDestroyPipelineLayout(dev, pipelineLayoutNoTex_, nullptr); pipelineLayoutNoTex_ = VK_NULL_HANDLE; }
+        if (pipelineLayoutTex_)   { vkDestroyPipelineLayout(dev, pipelineLayoutTex_,   nullptr); pipelineLayoutTex_   = VK_NULL_HANDLE; }
+        if (descLayoutTex_)       { vkDestroyDescriptorSetLayout(dev, descLayoutTex_, nullptr); descLayoutTex_ = VK_NULL_HANDLE; }
+        if (descriptorPool_)      { vkDestroyDescriptorPool(dev, descriptorPool_, nullptr); descriptorPool_ = VK_NULL_HANDLE; }
+    }
+
+    if (frames_) frames_->Destroy(*ctx_);
+    if (swap_)   swap_->Destroy(*ctx_);
+
+    defaultTex_.reset();
+    uploadHeap_.reset();
+    pipelineCache_.reset();
+    renderTarget_.reset();
+    frames_.reset();
+    swap_.reset();
+    if (ctx_) ctx_->Shutdown();
+    ctx_.reset();
+    initialized_ = false;
+}
+
+bool RendererVulkan::initShaderModules() {
+    static const char* kVertNames[5] = {
+        "v_diffuse_xyzrwh.vert.spv",
+        "v_tex1_xyzrwh.vert.spv",
+        "v_tex1_diffuse_xyzrwh.vert.spv",
+        "v_tex1_diffuse_xyz.vert.spv",
+        "v_render_vertex_info.vert.spv",
+    };
+    const std::string base = std::string(TH06_VK_SHADER_DIR) + "/";
+    for (int i = 0; i < 5; ++i) {
+        std::vector<uint32_t> words;
+        if (!vk::LoadSpvFile(base + kVertNames[i], words)) return false;
+        if (!vk::CreateShaderModule(*ctx_, words, &vertModules_[i])) return false;
+    }
+    {
+        std::vector<uint32_t> words;
+        if (!vk::LoadSpvFile(base + "f_color.frag.spv", words)) return false;
+        if (!vk::CreateShaderModule(*ctx_, words, &fragColorMod_)) return false;
+    }
+    {
+        std::vector<uint32_t> words;
+        if (!vk::LoadSpvFile(base + "f_textured.frag.spv", words)) return false;
+        if (!vk::CreateShaderModule(*ctx_, words, &fragTexMod_)) return false;
+    }
+    return true;
+}
+
+bool RendererVulkan::initLayoutsAndPool() {
+    VkDevice dev = ctx_->device();
+
+    // Descriptor set layout: set=0 binding=0 = combined image sampler (frag stage)
+    VkDescriptorSetLayoutBinding bind = {};
+    bind.binding         = 0;
+    bind.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bind.descriptorCount = 1;
+    bind.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo dslci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dslci.bindingCount = 1;
+    dslci.pBindings    = &bind;
+    TH_VK_CHECK(vkCreateDescriptorSetLayout(dev, &dslci, nullptr, &descLayoutTex_));
+
+    // Push constant range: vertex stage
+    VkPushConstantRange pcr = {};
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcr.offset     = 0;
+    pcr.size       = sizeof(PushConstants);
+
+    // Pipeline layout (no texture)
+    VkPipelineLayoutCreateInfo plci_no = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci_no.pushConstantRangeCount = 1;
+    plci_no.pPushConstantRanges    = &pcr;
+    TH_VK_CHECK(vkCreatePipelineLayout(dev, &plci_no, nullptr, &pipelineLayoutNoTex_));
+
+    // Pipeline layout (textured)
+    VkPipelineLayoutCreateInfo plci_tex = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci_tex.setLayoutCount         = 1;
+    plci_tex.pSetLayouts            = &descLayoutTex_;
+    plci_tex.pushConstantRangeCount = 1;
+    plci_tex.pPushConstantRanges    = &pcr;
+    TH_VK_CHECK(vkCreatePipelineLayout(dev, &plci_tex, nullptr, &pipelineLayoutTex_));
+
+    // Descriptor pool — Phase 2: just enough for the default texture set.
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16 };
+    VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.maxSets       = 16;
+    dpci.poolSizeCount = 1;
+    dpci.pPoolSizes    = &ps;
+    TH_VK_CHECK(vkCreateDescriptorPool(dev, &dpci, nullptr, &descriptorPool_));
+    return true;
+}
+
+void RendererVulkan::Init(SDL_Window *win, SDL_GLContext /*ctx_unused*/, i32 w, i32 h) {
+    if (initialized_) return;
+    window           = win;
+    glContext        = nullptr;
+    screenWidth      = w;
+    screenHeight     = h;
+    realScreenWidth  = w;
+    realScreenHeight = h;
+    viewportW        = w;
+    viewportH        = h;
+
+    ctx_           = std::make_unique<vk::VkContext>();
+    swap_          = std::make_unique<vk::VkSwapchain>();
+    frames_        = std::make_unique<vk::VkFrameContext>();
+    renderTarget_  = std::make_unique<vk::VkRenderTarget>();
+    pipelineCache_ = std::make_unique<vk::PipelineCache>();
+    uploadHeap_    = std::make_unique<vk::VkUploadHeap>();
+    defaultTex_    = std::make_unique<vk::VkDefaultTexture>();
+
+    vk::VkContextCreateInfo ci{};
+    ci.window = win;
+#ifndef NDEBUG
+    ci.enableValidation = true;
+#else
+    ci.enableValidation = false;
+#endif
+    if (!ctx_->Init(ci)) {
+        std::fprintf(stderr, "[VK] RendererVulkan: VkContext::Init failed\n");
+        return;
+    }
+
+    vk::SwapchainCreateInfo sci{};
+    sci.requestedWidth  = uint32_t(w);
+    sci.requestedHeight = uint32_t(h);
+    sci.vsync           = true;
+    sci.srgb            = false;
+    if (!swap_->Recreate(*ctx_, sci))                      { std::fprintf(stderr, "[VK] swapchain init failed\n"); return; }
+    if (!frames_->Init(*ctx_))                             { std::fprintf(stderr, "[VK] frames init failed\n"); return; }
+    if (!renderTarget_->Create(*ctx_, *swap_))             { std::fprintf(stderr, "[VK] rt init failed\n"); return; }
+    if (!initShaderModules())                              { std::fprintf(stderr, "[VK] shader load failed\n"); return; }
+    if (!initLayoutsAndPool())                             { std::fprintf(stderr, "[VK] layout/pool failed\n"); return; }
+
+    vk::PipelineFactoryDeps deps{};
+    deps.renderPass     = renderTarget_->renderPass();
+    deps.layoutNoTex    = pipelineLayoutNoTex_;
+    deps.layoutTextured = pipelineLayoutTex_;
+    for (int i = 0; i < 5; ++i) deps.vertModules[i] = vertModules_[i];
+    deps.fragColor    = fragColorMod_;
+    deps.fragTextured = fragTexMod_;
+    if (!pipelineCache_->Init(*ctx_, deps))                { std::fprintf(stderr, "[VK] pipeline cache init failed\n"); return; }
+    if (!uploadHeap_->Init(*ctx_))                         { std::fprintf(stderr, "[VK] upload heap init failed\n"); return; }
+    if (!defaultTex_->Init(*ctx_, descriptorPool_, descLayoutTex_)) { std::fprintf(stderr, "[VK] default tex init failed\n"); return; }
+
+    initialized_ = true;
+    std::fprintf(stderr, "[VK] RendererVulkan Phase 2 initialized %dx%d (validation=%s)\n",
+                 w, h, ctx_->validationActive() ? "on" : "off");
+}
+
+void RendererVulkan::InitDevice(u32) { /* no-op for Vk; everything in Init */ }
+void RendererVulkan::Release()       { destroyAll(); }
+void RendererVulkan::ResizeTarget()  { swapchainOutOfDate_ = true; }
+void RendererVulkan::BeginScene()    { /* no-op */ }
+void RendererVulkan::EndScene()      { /* no-op */ }
+
+void RendererVulkan::BeginFrame() {
+    if (!initialized_) return;
+
+    auto& frame = frames_->current();
+    VkDevice dev = ctx_->device();
+
+    TH_VK_CHECK(vkWaitForFences(dev, 1, &frame.inFlight, VK_TRUE, UINT64_MAX));
+
+    if (swapchainOutOfDate_) {
+        vkDeviceWaitIdle(dev);
+        renderTarget_->Destroy(*ctx_);
+        vk::SwapchainCreateInfo sci{};
+        sci.requestedWidth  = uint32_t(screenWidth);
+        sci.requestedHeight = uint32_t(screenHeight);
+        sci.vsync           = true;
+        sci.srgb            = false;
+        if (!swap_->Recreate(*ctx_, sci)) return;
+        if (!renderTarget_->Create(*ctx_, *swap_)) return;
+        swapchainOutOfDate_ = false;
+    }
+
+    VkResult acq = swap_->AcquireNext(*ctx_, frame.imgAvail, &currentSwapImage_);
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR) { swapchainOutOfDate_ = true; return; }
+    if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
+        std::fprintf(stderr, "[VK] AcquireNext -> %s\n", vk::VkResultToString(acq));
+        return;
+    }
+
+    TH_VK_CHECK(vkResetFences(dev, 1, &frame.inFlight));
+    TH_VK_CHECK(vkResetCommandBuffer(frame.cmd, 0));
+
+    VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    TH_VK_CHECK(vkBeginCommandBuffer(frame.cmd, &bi));
+
+    uploadHeap_->BeginFrame(uint32_t(frameCounter_));
+
+    // Begin render pass. LOAD_OP_CLEAR uses the values we provide here; subsequent in-pass
+    // Clear() calls override via vkCmdClearAttachments.
+    VkClearValue clearVals[2] = {};
+    clearVals[0].color.float32[0] = clearColor_[0];
+    clearVals[0].color.float32[1] = clearColor_[1];
+    clearVals[0].color.float32[2] = clearColor_[2];
+    clearVals[0].color.float32[3] = clearColor_[3];
+    clearVals[1].depthStencil.depth   = 1.0f;
+    clearVals[1].depthStencil.stencil = 0;
+
+    VkExtent2D ext = renderTarget_->extent();
+    VkRenderPassBeginInfo rpbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rpbi.renderPass        = renderTarget_->renderPass();
+    rpbi.framebuffer       = renderTarget_->framebuffer(currentSwapImage_);
+    rpbi.renderArea.extent = ext;
+    rpbi.clearValueCount   = 2;
+    rpbi.pClearValues      = clearVals;
+    vkCmdBeginRenderPass(frame.cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    inRenderPass_ = true;
+
+    // Set viewport + scissor (dynamic)
+    VkViewport vp = {};
+    vp.x        = float(viewportX);
+    vp.y        = float(viewportY);
+    vp.width    = float(viewportW > 0 ? viewportW : int(ext.width));
+    vp.height   = float(viewportH > 0 ? viewportH : int(ext.height));
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    VkRect2D sc = {};
+    sc.extent   = ext;
+    vkCmdSetViewport(frame.cmd, 0, 1, &vp);
+    vkCmdSetScissor (frame.cmd, 0, 1, &sc);
+
+    frameStarted_ = true;
+}
+
+void RendererVulkan::EndFrame() {
+    if (!initialized_ || !frameStarted_) { frameStarted_ = false; return; }
+
+    auto& frame = frames_->current();
+
+    if (inRenderPass_) {
+        vkCmdEndRenderPass(frame.cmd);
+        inRenderPass_ = false;
+    }
+
+    TH_VK_CHECK(vkEndCommandBuffer(frame.cmd));
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.waitSemaphoreCount   = 1;
+    si.pWaitSemaphores      = &frame.imgAvail;
+    si.pWaitDstStageMask    = &waitStage;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = &frame.cmd;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores    = &frame.renderDone;
+    TH_VK_CHECK(vkQueueSubmit(ctx_->graphicsQueue(), 1, &si, frame.inFlight));
+
+    VkSwapchainKHR swapHandles[1] = { swap_->handle() };
+    VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores    = &frame.renderDone;
+    pi.swapchainCount     = 1;
+    pi.pSwapchains        = swapHandles;
+    pi.pImageIndices      = &currentSwapImage_;
+    VkResult pr = vkQueuePresentKHR(ctx_->graphicsQueue(), &pi);
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+        swapchainOutOfDate_ = true;
+    } else if (pr != VK_SUCCESS) {
+        std::fprintf(stderr, "[VK] vkQueuePresentKHR -> %s\n", vk::VkResultToString(pr));
+    }
+
+    frames_->advance();
+    ++frameCounter_;
+    frameStarted_ = false;
+}
+
+void RendererVulkan::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) {
+    ColorToFloat4(color, clearColor_);   // remembered for next BeginFrame
+    if (!initialized_ || !frameStarted_ || !inRenderPass_) return;
+    if (!clearColor && !clearDepth)      return;
+
+    auto& frame = frames_->current();
+    VkExtent2D ext = renderTarget_->extent();
+
+    VkClearAttachment atts[2] = {};
+    uint32_t attCount = 0;
+    if (clearColor) {
+        atts[attCount].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        atts[attCount].colorAttachment = 0;
+        atts[attCount].clearValue.color.float32[0] = clearColor_[0];
+        atts[attCount].clearValue.color.float32[1] = clearColor_[1];
+        atts[attCount].clearValue.color.float32[2] = clearColor_[2];
+        atts[attCount].clearValue.color.float32[3] = clearColor_[3];
+        ++attCount;
+    }
+    if (clearDepth) {
+        atts[attCount].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        atts[attCount].clearValue.depthStencil.depth   = 1.0f;
+        atts[attCount].clearValue.depthStencil.stencil = 0;
+        ++attCount;
+    }
+    VkClearRect rect = {};
+    rect.rect.extent = ext;
+    rect.layerCount  = 1;
+    vkCmdClearAttachments(frame.cmd, attCount, atts, 1, &rect);
+}
+
+void RendererVulkan::SetViewport(i32 x, i32 y, i32 w, i32 h, f32, f32) {
+    viewportX = x; viewportY = y; viewportW = w; viewportH = h;
+    if (frameStarted_ && inRenderPass_) {
+        VkViewport vp = {};
+        vp.x = float(x); vp.y = float(y);
+        vp.width = float(w); vp.height = float(h);
+        vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+        vkCmdSetViewport(frames_->current().cmd, 0, 1, &vp);
+    }
+}
+
+// --- State setters ---
+void RendererVulkan::SetBlendMode(u8 m)                  { currentBlendMode = m; }
+void RendererVulkan::SetColorOp(u8 op)                   { currentColorOp = op; }
+void RendererVulkan::SetTexture(u32 tex)                 { currentTexture = tex; }
+void RendererVulkan::SetTextureFactor(D3DCOLOR f)        { textureFactor = f; }
+void RendererVulkan::SetZWriteDisable(u8 d)              { currentZWriteDisable = d; }
+void RendererVulkan::SetDepthFunc(i32 alwaysPass)        { depthFuncAlways_ = alwaysPass ? 1 : 0; }
+void RendererVulkan::SetDestBlendInvSrcAlpha()           { /* implied by blendMode=ALPHA */ }
+void RendererVulkan::SetDestBlendOne()                   { /* implied by blendMode=ADD   */ }
+void RendererVulkan::SetTextureStageSelectDiffuse()      { /* spec const colorOp handles this */ }
+void RendererVulkan::SetTextureStageModulateTexture()    { /* spec const colorOp handles this */ }
+void RendererVulkan::SetFog(i32 e, D3DCOLOR c, f32 s, f32 z) {
+    fogEnabled = e; fogColor = c; fogStart = s; fogEnd = z;
+    // Phase 2: fog not implemented in shaders. Recorded for parity inspection only.
+}
+
+// --- Transforms ---
+void RendererVulkan::SetViewTransform(const D3DXMATRIX *matrix) {
+    if (!matrix) return;
+    std::memcpy(viewMat_, &matrix->m[0][0], sizeof(viewMat_));
+    mvpDirty_ = true;
+}
+void RendererVulkan::SetProjectionTransform(const D3DXMATRIX *matrix) {
+    if (!matrix) return;
+    std::memcpy(projMat_, &matrix->m[0][0], sizeof(projMat_));
+    mvpDirty_ = true;
+}
+void RendererVulkan::SetWorldTransform(const D3DXMATRIX *matrix) {
+    if (!matrix) return;
+    std::memcpy(worldMat_, &matrix->m[0][0], sizeof(worldMat_));
+    mvpDirty_ = true;
+}
+void RendererVulkan::SetTextureTransform(const D3DXMATRIX *) {
+    // Phase 2: not used by TH06 game logic in any draw path we're stubbing.
+}
+
+void RendererVulkan::recomputeMvp() {
+    // D3D row-major math: (world * view) * proj.
+    float wv[16];
+    Mat4Mul_RowMajor(worldMat_, viewMat_, wv);
+    Mat4Mul_RowMajor(wv, projMat_, mvpMat_);
+    mvpDirty_ = false;
+}
+
+// --- Draw helpers ---
+bool RendererVulkan::drawCommon(int vertexLayoutEnum,
+                                int topologyEnum,
+                                bool hasTexture,
+                                bool depthTest,
+                                const void* verts,
+                                int count,
+                                uint32_t vertexStride) {
+    if (!initialized_ || !frameStarted_ || !inRenderPass_ || count <= 0) return false;
+    if (mvpDirty_) recomputeMvp();
+
+    auto& frame = frames_->current();
+
+    // 1. Build L2 key.
+    vk::VkPipelineKey key{};
+    key.vertexLayout      = static_cast<vk::VertexLayout>(vertexLayoutEnum);
+    key.topology          = static_cast<vk::Topology>(topologyEnum);
+    key.blendMode         = (currentBlendMode == 0) ? vk::BlendMode::Alpha : vk::BlendMode::Add;
+    key.colorOp           = (currentColorOp   == 0) ? vk::ColorOp::Modulate : vk::ColorOp::Add;
+    key.depthFunc         = depthFuncAlways_ ? vk::DepthFunc::Always : vk::DepthFunc::LessEqual;
+    key.hasTexture        = hasTexture ? 1 : 0;
+    key.depthTestEnable   = depthTest  ? 1 : 0;
+    key.depthWriteEnable  = currentZWriteDisable ? 0 : 1;
+
+    VkPipeline pipeline = pipelineCache_->GetOrCreate(*ctx_, key);
+    if (pipeline == VK_NULL_HANDLE) return false;
+
+    // 2. Upload verts.
+    void*        mapped = nullptr;
+    VkBuffer     vbBuf  = VK_NULL_HANDLE;
+    VkDeviceSize vbOff  = 0;
+    VkDeviceSize bytes  = VkDeviceSize(vertexStride) * VkDeviceSize(count);
+    if (!uploadHeap_->AllocVerts(bytes, &mapped, &vbBuf, &vbOff)) return false;
+    std::memcpy(mapped, verts, bytes);
+
+    // 3. Bind pipeline + (optional) descriptor set.
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    if (hasTexture) {
+        VkDescriptorSet ds = defaultTex_->descriptorSet();  // Phase 2 placeholder
+        vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayoutTex_, 0, 1, &ds, 0, nullptr);
+    }
+
+    // 4. Push constants (invScreen + mvp).
+    PushConstants pc{};
+    pc.invScreen[0] = (screenWidth  > 0) ? 1.0f / float(screenWidth)  : 0.0f;
+    pc.invScreen[1] = (screenHeight > 0) ? 1.0f / float(screenHeight) : 0.0f;
+    std::memcpy(pc.mvp, mvpMat_, sizeof(pc.mvp));
+    VkPipelineLayout layout = hasTexture ? pipelineLayoutTex_ : pipelineLayoutNoTex_;
+    vkCmdPushConstants(frame.cmd, layout, VK_SHADER_STAGE_VERTEX_BIT,
+                       0, sizeof(PushConstants), &pc);
+
+    // 5. Bind vertex buffer + draw.
+    vkCmdBindVertexBuffers(frame.cmd, 0, 1, &vbBuf, &vbOff);
+    vkCmdDraw(frame.cmd, uint32_t(count), 1, 0, 0);
+    return true;
+}
+
+// --- Draw method dispatch ---
+// Vertex layout enum / topology enum integer values match VkPipelineKey enums:
+//   VertexLayout: 0=DiffuseXyzrwh, 1=Tex1Xyzrwh, 2=Tex1DiffuseXyzrwh, 3=Tex1DiffuseXyz, 4=RenderVertexInfoXyz
+//   Topology:     0=TriangleStrip, 1=TriangleFan
+void RendererVulkan::DrawTriangleStrip(const VertexDiffuseXyzrwh *verts, i32 count) {
+    drawCommon(0, 0, /*hasTex*/false, /*depth*/false, verts, count, sizeof(VertexDiffuseXyzrwh));
+}
+void RendererVulkan::DrawTriangleStripTex(const VertexTex1Xyzrwh *verts, i32 count) {
+    drawCommon(1, 0, /*hasTex*/true, /*depth*/false, verts, count, sizeof(VertexTex1Xyzrwh));
+}
+void RendererVulkan::DrawTriangleStripTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count) {
+    drawCommon(2, 0, /*hasTex*/true, /*depth*/false, verts, count, sizeof(VertexTex1DiffuseXyzrwh));
+}
+void RendererVulkan::DrawTriangleStripTextured3D(const VertexTex1DiffuseXyz *verts, i32 count) {
+    drawCommon(3, 0, /*hasTex*/true, /*depth*/true, verts, count, sizeof(VertexTex1DiffuseXyz));
+}
+void RendererVulkan::DrawTriangleFanTextured(const VertexTex1DiffuseXyzrwh *verts, i32 count) {
+    drawCommon(2, 1, /*hasTex*/true, /*depth*/false, verts, count, sizeof(VertexTex1DiffuseXyzrwh));
+}
+void RendererVulkan::DrawTriangleFanTextured3D(const VertexTex1DiffuseXyz *verts, i32 count) {
+    drawCommon(3, 1, /*hasTex*/true, /*depth*/true, verts, count, sizeof(VertexTex1DiffuseXyz));
+}
+void RendererVulkan::DrawVertexBuffer3D(const RenderVertexInfo *verts, i32 count) {
+    drawCommon(4, 0, /*hasTex*/true, /*depth*/true, verts, count, sizeof(RenderVertexInfo));
+}
+
+// --- Texture / surface (Phase 3 stubs — return innocuous placeholder ID 0) ---
+#define TH_VK_PHASE3_NOOP(name) \
+    do { static bool warned=false; if(!warned){ warned=true; \
+        std::fprintf(stderr,"[VK] %s: Phase-3 stub (no-op)\n", name);} } while(0)
+
+u32  RendererVulkan::CreateTextureFromMemory(const u8 *, i32, D3DCOLOR, i32 *outW, i32 *outH) {
+    TH_VK_PHASE3_NOOP("CreateTextureFromMemory");
+    if (outW) *outW = 1; if (outH) *outH = 1;
+    return 1;  // dummy non-zero id; SetTexture just caches it
+}
+u32  RendererVulkan::CreateEmptyTexture(i32, i32)                                     { TH_VK_PHASE3_NOOP("CreateEmptyTexture"); return 1; }
+void RendererVulkan::DeleteTexture(u32)                                               { TH_VK_PHASE3_NOOP("DeleteTexture"); }
+void RendererVulkan::CopyAlphaChannel(u32, const u8 *, i32, i32, i32)                 { TH_VK_PHASE3_NOOP("CopyAlphaChannel"); }
+void RendererVulkan::UpdateTextureSubImage(u32, i32, i32, i32, i32, const u8 *)       { TH_VK_PHASE3_NOOP("UpdateTextureSubImage"); }
+
+u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, i32 *outW, i32 *outH)              { TH_VK_PHASE3_NOOP("LoadSurfaceFromFile/2"); if(outW)*outW=1; if(outH)*outH=1; return 1; }
+u32  RendererVulkan::LoadSurfaceFromFile(const u8 *, i32, D3DXIMAGE_INFO *)                  { TH_VK_PHASE3_NOOP("LoadSurfaceFromFile/3"); return 1; }
+void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)        { TH_VK_PHASE3_NOOP("CopySurfaceToScreen/9"); }
+void RendererVulkan::CopySurfaceToScreen(u32, i32, i32, i32, i32)                            { TH_VK_PHASE3_NOOP("CopySurfaceToScreen/5"); }
+void RendererVulkan::CopySurfaceRectToScreen(u32, i32, i32, i32, i32, i32, i32, i32, i32)    { TH_VK_PHASE3_NOOP("CopySurfaceRectToScreen"); }
+void RendererVulkan::TakeScreenshot(u32, i32, i32, i32, i32)                                 { TH_VK_PHASE3_NOOP("TakeScreenshot"); }
+
+#undef TH_VK_PHASE3_NOOP
+
+}  // namespace th06
