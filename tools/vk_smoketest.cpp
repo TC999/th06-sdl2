@@ -29,15 +29,17 @@ int main(int argc, char** argv) {
     int  width    = 640;
     int  height   = 480;
     bool windowed = false;
+    int  stressN  = 0;     // Phase 3: --stress=N runs Phase3StressTest then exits
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (std::strncmp(a, "--frames=", 9) == 0)        frames = ParseInt(a + 9, frames);
         else if (std::strncmp(a, "--width=",  8) == 0)   width  = ParseInt(a + 8, width);
         else if (std::strncmp(a, "--height=", 9) == 0)   height = ParseInt(a + 9, height);
+        else if (std::strncmp(a, "--stress=", 9) == 0)   stressN= ParseInt(a + 9, 100);
         else if (std::strcmp(a, "--windowed") == 0)      windowed = true;
         else if (std::strcmp(a, "--help") == 0) {
-            std::printf("Usage: vk_smoketest [--frames=N] [--width=W] [--height=H] [--windowed]\n");
+            std::printf("Usage: vk_smoketest [--frames=N] [--width=W] [--height=H] [--windowed] [--stress=N]\n");
             return 0;
         }
     }
@@ -67,6 +69,17 @@ int main(int argc, char** argv) {
     renderer.Init(win, nullptr, width, height);
     if (!renderer.window) {
         // Init 内部失败时不会 crash，但 window 仍为 win。这里靠日志。
+    }
+
+    // Phase 3: --stress=N runs the Phase3 stress test and exits (skip frame loop).
+    if (stressN > 0) {
+        std::fprintf(stderr, "[vk_smoketest] Running Phase 3 stress test (n=%d)...\n", stressN);
+        int errors = renderer.Phase3StressTest(stressN, stderr);
+        renderer.Release();
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        std::fprintf(stderr, "[vk_smoketest] Stress test exit=%d\n", errors);
+        return errors;
     }
 
     // Phase 3: build a 64x64 RGBA texture via CreateEmptyTexture + UpdateTextureSubImage,

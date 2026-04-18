@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
+#include <algorithm>
 
 #ifndef TH06_VK_SHADER_DIR
 #define TH06_VK_SHADER_DIR "shaders_vk"
@@ -619,5 +621,216 @@ void RendererVulkan::CopySurfaceRectToScreen(u32, i32, i32, i32, i32, i32, i32, 
 void RendererVulkan::TakeScreenshot(u32, i32, i32, i32, i32)                                 { TH_VK_PHASE4_NOOP("TakeScreenshot"); }
 
 #undef TH_VK_PHASE4_NOOP
+
+// ============================================================================
+// Phase 3 stress / verification harness (called by vk_smoketest --stress=N)
+// ============================================================================
+namespace {
+
+// Read back a texture's full RGBA contents into `dst` (size = w*h*4 bytes).
+// Issues a one-shot cmd buffer: SHADER_READ_ONLY_OPTIMAL → TRANSFER_SRC_OPTIMAL,
+// vkCmdCopyImageToBuffer into a transient HOST_VISIBLE staging buffer, then
+// transitions back to SHADER_READ_ONLY_OPTIMAL. Synchronous (vkQueueWaitIdle).
+bool ReadbackImageRgba(vk::VkContext& ctx, VkImage image, int w, int h,
+                       uint8_t* dst, size_t dstBytes)
+{
+    if (!image || w <= 0 || h <= 0) return false;
+    const VkDeviceSize bytes = VkDeviceSize(w) * VkDeviceSize(h) * 4u;
+    if (dstBytes < bytes) return false;
+
+    // Transient cmd pool (avoid coupling with VkTextureManager's pool).
+    VkCommandPool pool = VK_NULL_HANDLE;
+    {
+        VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+        cpci.queueFamilyIndex = ctx.graphicsQueueFamily();
+        cpci.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        if (vkCreateCommandPool(ctx.device(), &cpci, nullptr, &pool) != VK_SUCCESS) return false;
+    }
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    {
+        VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool        = pool;
+        cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(ctx.device(), &cbai, &cb) != VK_SUCCESS) {
+            vkDestroyCommandPool(ctx.device(), pool, nullptr); return false;
+        }
+    }
+
+    VkBuffer      staging      = VK_NULL_HANDLE;
+    VmaAllocation stagingAlloc = VK_NULL_HANDLE;
+    VmaAllocationInfo stagingInfo{};
+    {
+        VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = bytes;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_AUTO;
+        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                  | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        if (vmaCreateBuffer(ctx.allocator(), &bci, &aci,
+                            &staging, &stagingAlloc, &stagingInfo) != VK_SUCCESS) {
+            vkDestroyCommandPool(ctx.device(), pool, nullptr); return false;
+        }
+    }
+
+    VkCommandBufferBeginInfo bbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &bbi);
+
+    VkImageMemoryBarrier toSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    toSrc.oldLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.image               = image;
+    toSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    toSrc.subresourceRange.levelCount = 1;
+    toSrc.subresourceRange.layerCount = 1;
+    toSrc.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+    VkBufferImageCopy region = {};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = { uint32_t(w), uint32_t(h), 1 };
+    vkCmdCopyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging, 1, &region);
+
+    VkImageMemoryBarrier toShader = toSrc;
+    toShader.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toShader.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toShader.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toShader);
+
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cb;
+    vkQueueSubmit(ctx.graphicsQueue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx.graphicsQueue());
+
+    vmaInvalidateAllocation(ctx.allocator(), stagingAlloc, 0, VK_WHOLE_SIZE);
+    std::memcpy(dst, stagingInfo.pMappedData, size_t(bytes));
+
+    vmaDestroyBuffer(ctx.allocator(), staging, stagingAlloc);
+    vkDestroyCommandPool(ctx.device(), pool, nullptr);  // frees cb
+    return true;
+}
+
+}  // namespace
+
+int RendererVulkan::Phase3StressTest(int n, std::FILE* log)
+{
+    auto LOG = [&](const char* fmt, auto... args) {
+        if (log) { std::fprintf(log, fmt, args...); std::fflush(log); }
+    };
+    if (!initialized_ || !textureMgr_) {
+        LOG("[stress] FAIL: renderer not initialized\n");
+        return 1;
+    }
+    if (n < 1) n = 100;
+    VmaAllocator alloc = ctx_->allocator();
+
+    VmaTotalStatistics stat0{};
+    vmaCalculateStatistics(alloc, &stat0);
+    const uint32_t base_alloc = stat0.total.statistics.allocationCount;
+    const uint32_t base_block = stat0.total.statistics.blockCount;
+    LOG("[stress] baseline VMA: blocks=%u allocs=%u bytes=%llu\n",
+        base_block, base_alloc, (unsigned long long)stat0.total.statistics.allocationBytes);
+
+    int errors = 0;
+    std::vector<uint32_t> ids;        ids.reserve(size_t(n));
+    std::vector<std::vector<uint8_t>> patterns; patterns.reserve(size_t(n));
+
+    // Phase A: create N textures (varying sizes) + UpdateSubImage(full) with deterministic pattern.
+    static const int sizes[] = {16, 24, 32, 48, 64};
+    for (int i = 0; i < n; ++i) {
+        const int s = sizes[i % 5];
+        std::vector<uint8_t> px(size_t(s) * size_t(s) * 4u);
+        for (int y = 0; y < s; ++y) {
+            for (int x = 0; x < s; ++x) {
+                uint8_t* p = &px[(size_t(y) * s + x) * 4];
+                p[0] = uint8_t(i & 0xFF);
+                p[1] = uint8_t(x & 0xFF);
+                p[2] = uint8_t(y & 0xFF);
+                p[3] = 0xFF;
+            }
+        }
+        uint32_t id = textureMgr_->CreateEmpty(*ctx_, s, s);
+        if (id == 0) { LOG("[stress] FAIL: CreateEmpty(%d) at i=%d\n", s, i); ++errors; break; }
+        if (!textureMgr_->UpdateSubImage(*ctx_, id, 0, 0, s, s, px.data())) {
+            LOG("[stress] FAIL: UpdateSubImage at i=%d\n", i); ++errors; break;
+        }
+        ids.push_back(id);
+        patterns.push_back(std::move(px));
+    }
+    LOG("[stress] created %zu/%d textures\n", ids.size(), n);
+
+    VmaTotalStatistics stat1{};
+    vmaCalculateStatistics(alloc, &stat1);
+    const int dAlloc = int(stat1.total.statistics.allocationCount) - int(base_alloc);
+    const int dBlock = int(stat1.total.statistics.blockCount)      - int(base_block);
+    LOG("[stress] after create: blocks=%u (+%d) allocs=%u (+%d) bytes=%llu\n",
+        stat1.total.statistics.blockCount, dBlock,
+        stat1.total.statistics.allocationCount, dAlloc,
+        (unsigned long long)stat1.total.statistics.allocationBytes);
+
+    // Done When: VkDeviceMemory allocations << textures (VMA block coalescing).
+    if (dAlloc < n) {
+        LOG("[stress] FAIL: expected dAlloc>=%d, got %d\n", n, dAlloc); ++errors;
+    }
+    if (dBlock >= n) {
+        LOG("[stress] FAIL: expected dBlock<%d (block coalescing), got %d\n", n, dBlock); ++errors;
+    } else {
+        LOG("[stress] OK: VMA block coalescing — %d allocations across +%d block(s)\n", dAlloc, dBlock);
+    }
+
+    // Phase B: roundtrip readback verify on first 5 textures (memcmp).
+    const int verifyN = (int)std::min(size_t(5), ids.size());
+    int verified = 0;
+    for (int i = 0; i < verifyN; ++i) {
+        VkImage img = textureMgr_->GetImage(ids[i]);
+        int w = 0, h = 0; textureMgr_->GetSize(ids[i], &w, &h);
+        const size_t bytes = size_t(w) * size_t(h) * 4u;
+        std::vector<uint8_t> back(bytes, 0xCD);
+        if (!ReadbackImageRgba(*ctx_, img, w, h, back.data(), bytes)) {
+            LOG("[stress] FAIL: readback i=%d\n", i); ++errors; continue;
+        }
+        if (std::memcmp(back.data(), patterns[size_t(i)].data(), bytes) != 0) {
+            LOG("[stress] FAIL: roundtrip mismatch i=%d (%dx%d)\n", i, w, h); ++errors;
+        } else {
+            ++verified;
+        }
+    }
+    LOG("[stress] roundtrip verified %d/%d (memcmp == 0)\n", verified, verifyN);
+
+    // Phase C: delete all + leak check.
+    for (uint32_t id : ids) textureMgr_->Delete(*ctx_, id);
+    ids.clear();
+    VmaTotalStatistics stat2{};
+    vmaCalculateStatistics(alloc, &stat2);
+    LOG("[stress] after delete: blocks=%u allocs=%u bytes=%llu\n",
+        stat2.total.statistics.blockCount,
+        stat2.total.statistics.allocationCount,
+        (unsigned long long)stat2.total.statistics.allocationBytes);
+    if (stat2.total.statistics.allocationCount != base_alloc) {
+        LOG("[stress] FAIL: leak — allocCount delta=+%d\n",
+            int(stat2.total.statistics.allocationCount) - int(base_alloc));
+        ++errors;
+    } else {
+        LOG("[stress] OK: zero VMA leaks (allocCount returned to %u)\n", base_alloc);
+    }
+
+    LOG("[stress] DONE errors=%d\n", errors);
+    return errors;
+}
 
 }  // namespace th06

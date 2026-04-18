@@ -51,6 +51,9 @@ public:
     // Returns VK_NULL_HANDLE if id is unknown.
     VkDescriptorSet GetDescriptorSet(uint32_t id) const;
 
+    // Look up the underlying VkImage (e.g. for readback). Returns VK_NULL_HANDLE if unknown.
+    VkImage GetImage(uint32_t id) const;
+
     // Query dimensions; returns false if id unknown.
     bool GetSize(uint32_t id, int* outW, int* outH) const;
 

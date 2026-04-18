@@ -17,6 +17,7 @@
 #include <volk.h>
 #include <memory>
 #include <cstdint>
+#include <cstdio>
 
 namespace th06::vk {
 class VkContext;
@@ -96,6 +97,12 @@ public:
     void CopySurfaceRectToScreen(u32 surfaceTex, i32 srcX, i32 srcY, i32 srcW, i32 srcH,
                                  i32 dstX, i32 dstY, i32 texW, i32 texH) override;
     void TakeScreenshot(u32 dstTex, i32 left, i32 top, i32 width, i32 height) override;
+
+    // --- Phase 3 diagnostics (not in IRenderer; called by vk_smoketest --stress=N) ---
+    // Stress N = 100: create+update+roundtrip-readback+delete; assert VMA block coalescing
+    // (block count grows much less than N) and zero leaks (allocCount returns to baseline).
+    // Returns 0 on success; positive count of failures otherwise. log==nullptr → no output.
+    int Phase3StressTest(int n, std::FILE* log);
 
 private:
     void destroyAll();

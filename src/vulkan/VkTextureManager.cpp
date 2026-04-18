@@ -299,6 +299,12 @@ VkDescriptorSet VkTextureManager::GetDescriptorSet(uint32_t id) const {
     return it->second.descSet;
 }
 
+VkImage VkTextureManager::GetImage(uint32_t id) const {
+    auto it = entries_.find(id);
+    if (it == entries_.end()) return VK_NULL_HANDLE;
+    return it->second.image;
+}
+
 bool VkTextureManager::GetSize(uint32_t id, int* outW, int* outH) const {
     auto it = entries_.find(id);
     if (it == entries_.end()) return false;
