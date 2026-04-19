@@ -99,6 +99,19 @@ public:
                                  i32 dstX, i32 dstY, i32 texW, i32 texH) override;
     void TakeScreenshot(u32 dstTex, i32 left, i32 top, i32 width, i32 height) override;
 
+    // --- Phase 5b.2: ImGui (imgui_impl_vulkan) integration ---
+    // Lifecycle is symmetric with the GL backend:
+    //   InitImGui     after RendererVulkan::Init() returns successfully.
+    //   ShutdownImGui before destroyAll(); idempotent.
+    //   NewFrameImGui at the start of every CPU frame (before ImGui::NewFrame).
+    //   RenderImGui   inside the render pass scope of EndFrame; called from
+    //                 thprac_games::GameGuiRender via the IsUsingVulkan() branch.
+    bool InitImGui(SDL_Window* window);
+    void ShutdownImGui();
+    void NewFrameImGui();
+    void RenderImGui();
+    bool ImGuiReady() const { return imguiInitialized_; }
+
     // --- Phase 3 diagnostics (not in IRenderer; called by vk_smoketest --stress=N) ---
     // Stress N = 100: create+update+roundtrip-readback+delete; assert VMA block coalescing
     // (block count grows much less than N) and zero leaks (allocCount returns to baseline).
@@ -132,6 +145,12 @@ private:
     VkPipelineLayout      pipelineLayoutNoTex_   = VK_NULL_HANDLE;
     VkPipelineLayout      pipelineLayoutTex_     = VK_NULL_HANDLE;
     VkDescriptorPool      descriptorPool_        = VK_NULL_HANDLE;
+
+    // Phase 5b.2: dedicated ImGui descriptor pool + init flag (separate from descriptorPool_
+    // so ImGui's combined-image-sampler set lifecycle is independent of texture descriptors).
+    VkDescriptorPool      imguiDescPool_         = VK_NULL_HANDLE;
+    bool                  imguiInitialized_      = false;
+    bool                  imguiFontsUploaded_    = false;
 
     // Shader modules (owned). Index by VertexLayout enum value (0..4).
     VkShaderModule vertModules_[5] = {};

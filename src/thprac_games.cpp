@@ -2,6 +2,7 @@
 
 #include "thprac_games.h"
 #include <cstring>
+#include <cstdio>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_sdl.h>
@@ -10,7 +11,14 @@
 #else
 #include <imgui_impl_opengl2.h>
 #endif
+// Phase 5b.2: Vulkan ImGui forwarding via the renderer (RendererVulkan owns the
+// imgui_impl_vulkan lifecycle so cmd buffer / render pass details stay private).
+#include "IRenderer.hpp"          // th06::IsUsingVulkan
+#include "RendererVulkan.hpp"     // th06::GetRendererVulkan / RendererVulkan::RenderImGui
+#include "TouchVirtualButtons.hpp"
+#include "MenuTouchButtons.hpp"
 #include <SDL.h>
+#include "GameWindow.hpp" // th06::g_AndroidImeInsetPx
 
 namespace THPrac {
 
@@ -67,11 +75,17 @@ void GameGuiBegin(game_gui_impl /*impl*/, bool game_nav)
         Gui::GuiNavFocus::GlobalDisable(true);
     }
 
+    // Phase 5b.2: pick the matching ImGui backend NewFrame. On Vulkan we never
+    // initialised the GL backend, so calling its NewFrame would deref unset state.
+    if (th06::IsUsingVulkan() && th06::g_Renderer) {
+        static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->NewFrameImGui();
+    } else {
 #if defined(TH06_USE_GLES)
-    ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplOpenGL3_NewFrame();
 #else
-    ImGui_ImplOpenGL2_NewFrame();
+        ImGui_ImplOpenGL2_NewFrame();
 #endif
+    }
     if (!io.Fonts->IsBuilt())
         return;
     ImGui_ImplSDL2_NewFrame(s_guiWindow);
@@ -103,6 +117,71 @@ void GameGuiBegin(game_gui_impl /*impl*/, bool game_nav)
         io.MousePos.x = (io.MousePos.x - offsetX) * scaleX;
         io.MousePos.y = (io.MousePos.y - offsetY) * scaleY;
     }
+#ifdef __ANDROID__
+    // Android IME: shrink the ImGui logical canvas height by the keyboard's
+    // size so windows auto-clamped to DisplaySize stay above the keyboard.
+    // Only do so when the focused input is actually obstructed.
+    if (th06::g_AndroidImeInsetPx > 0 && winW > 0 && winH > 0) {
+        float yScale = (winW * 480.0f > winH * 640.0f) ? (480.0f / winH)
+                                                       : (640.0f / winW);
+        float imeLogical = th06::g_AndroidImeInsetPx * yScale;
+        if (imeLogical > 0.0f && imeLogical < 480.0f) {
+            float keyboardTopY = 480.0f - imeLogical;
+
+            // Decide whether the focused input intersects the keyboard area.
+            // Robust order:
+            //   1) ActiveIdWindow (the window owning the focused widget) —
+            //      stable across frames as long as the input has focus.
+            //   2) PlatformImePos (last caret position from the previous
+            //      InputText render) — fallback if no ActiveIdWindow.
+            //   3) WantTextInput true with neither hint available — assume
+            //      obstructed (safe default).
+            bool obstructed = false;
+            const char* reason = "no-ime-needed";
+            ImGuiContext* gctx = ImGui::GetCurrentContext();
+            if (io.WantTextInput) {
+                // Conservative margin so we lift even if the bottom of the
+                // window is only marginally inside the keyboard band.
+                const float kMargin = 8.0f;
+                if (gctx && gctx->ActiveIdWindow) {
+                    float wndBottom = gctx->ActiveIdWindow->Pos.y +
+                                      gctx->ActiveIdWindow->Size.y;
+                    obstructed = (wndBottom > keyboardTopY - kMargin);
+                    reason = obstructed ? "wnd-overlap" : "wnd-above";
+                } else if (gctx && gctx->PlatformImePos.x < 1.0e30f &&
+                           gctx->PlatformImePos.x > 2.0f) {
+                    // PlatformImePos == (1,1) is the per-frame reset value,
+                    // ignore it and fall through to "safe lift".
+                    float caretBottomY = gctx->PlatformImePos.y +
+                                         ImGui::GetFontSize();
+                    obstructed = (caretBottomY > keyboardTopY - kMargin);
+                    reason = obstructed ? "caret-overlap" : "caret-above";
+                } else {
+                    obstructed = true;
+                    reason = "want-input-no-pos";
+                }
+            }
+            if (obstructed) {
+                io.DisplaySize.y = keyboardTopY;
+            }
+
+            // Throttled diagnostic so we can verify the heuristic on device.
+            static int s_logTick = 0;
+            if ((++s_logTick % 30) == 0) {
+                float wndBottom = (gctx && gctx->ActiveIdWindow)
+                    ? (gctx->ActiveIdWindow->Pos.y + gctx->ActiveIdWindow->Size.y)
+                    : -1.0f;
+                std::fprintf(stderr,
+                    "[ime] inset=%dpx imeLogical=%.1f kbdTopY=%.1f want=%d "
+                    "wndBottom=%.1f caretImePos=(%.1f,%.1f) -> %s\n",
+                    th06::g_AndroidImeInsetPx, imeLogical, keyboardTopY,
+                    io.WantTextInput ? 1 : 0, wndBottom,
+                    gctx ? gctx->PlatformImePos.x : -1.0f,
+                    gctx ? gctx->PlatformImePos.y : -1.0f, reason);
+            }
+        }
+    }
+#endif
     ImGui::NewFrame();
     GameGuiProgress = 1;
 }
@@ -113,6 +192,105 @@ void GameGuiEnd(bool draw_cursor)
         return;
     ImGuiIO& io = ImGui::GetIO();
     io.MouseDrawCursor = draw_cursor;
+
+    // Phase 5b.2: emit touch virtual button overlay via ImGui's background draw
+    // list. On Vulkan, the offscreen FBO is sized to the swapchain (e.g. 1708x1067)
+    // and ImGui draw data is remapped (in RendererVulkan::RenderImGui) so that
+    // ImGui logical coordinates cover the *entire FBO*, not just the playfield.
+    // That means screen-space pixel positions can be expressed directly in
+    // (logical/s) units. GLES has its own DrawScreenSpaceButtons() in EndFrame;
+    // for Vulkan we piggyback on ImGui to avoid building a second pipeline.
+    if (th06::IsUsingVulkan() && th06::g_Renderer) {
+        th06::TouchButtonInfo buttons[12];
+        int count = th06::TouchVirtualButtons::GetButtonInfo(buttons, 7);
+        count += th06::MenuTouchButtons::GetButtonInfo(buttons + count, 5);
+        if (count > 0) {
+            // Get actual FBO size = swapchain extent. RendererVulkan keeps
+            // realScreenWidth/Height in sync with the swapchain (resize hook).
+            int rw = th06::g_Renderer->realScreenWidth;
+            int rh = th06::g_Renderer->realScreenHeight;
+            if (rw > 0 && rh > 0) {
+                const float gameW = 640.0f;
+                const float gameH = 480.0f;
+                int scaledW, scaledH;
+                if (rw * (int)gameH > rh * (int)gameW) {
+                    scaledH = rh;
+                    scaledW = (int)(rh * gameW / gameH);
+                } else {
+                    scaledW = rw;
+                    scaledH = (int)(rw * gameH / gameW);
+                }
+                int offsetX = (rw - scaledW) / 2;
+                int offsetY = (rh - scaledH) / 2;
+                if (offsetX >= 5) {  // need pillarbox to draw on
+                    // Uniform scale that ImGui's framebuffer uses (matches
+                    // RendererVulkan::RenderImGui's s = min(fbW/640, fbH/480)).
+                    const float s = (rw / gameW < rh / gameH) ? rw / gameW : rh / gameH;
+                    // Convert screen pixel coords -> ImGui logical coords:
+                    //   logical = DisplayPos + screen_pixel / s
+                    //           = (-offsetX/s, -offsetY/s) + (px, py)/s
+                    //           = ((px-offsetX)/s, (py-offsetY)/s)
+                    const float yScale = (float)scaledH / gameH;
+                    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+                    // io.DisplaySize was set to 640x480 in GameGuiBegin, so the
+                    // background draw list's default ClipRect is also (0,0)-(640,480).
+                    // RendererVulkan::RenderImGui later expands DisplayPos/Size
+                    // to the letterbox-aware FBO range, but per-cmd ClipRect is
+                    // captured AT submit time — so any draws outside [0,640]x[0,480]
+                    // (i.e. anything on the pillarbox bars) get scissor-clipped.
+                    // Push an extended clip rect matching the FBO logical extent.
+                    const ImVec2 extClipMin(-(float)offsetX / s, -(float)offsetY / s);
+                    const ImVec2 extClipMax((float)(rw - offsetX) / s, (float)(rh - offsetY) / s);
+                    dl->PushClipRect(extClipMin, extClipMax, false);
+                    // The Vulkan offscreen FBO uses LOAD_OP_LOAD and the game's
+                    // Clear() only scissor-clears the playfield viewport. The
+                    // pillarbox bars therefore accumulate content frame after
+                    // frame; without resetting them, repeated semi-transparent
+                    // overlays converge to opaque white. Reset both pillars to
+                    // opaque black before drawing the buttons.
+                    const ImU32 kBlack = IM_COL32(0, 0, 0, 255);
+                    // Left bar: x in [-offX/s, 0)
+                    dl->AddRectFilled(extClipMin, ImVec2(0.0f, extClipMax.y), kBlack);
+                    // Right bar: x in (640, (rw-offX)/s]
+                    dl->AddRectFilled(ImVec2(640.0f, extClipMin.y), extClipMax, kBlack);
+                    // Top bar (in case letterboxed instead of pillarboxed): y < 0
+                    if (offsetY > 0) {
+                        dl->AddRectFilled(extClipMin, ImVec2(extClipMax.x, 0.0f), kBlack);
+                        dl->AddRectFilled(ImVec2(extClipMin.x, 480.0f), extClipMax, kBlack);
+                    }
+                    for (int i = 0; i < count; i++) {
+                        float sy = offsetY + (buttons[i].gameY / gameH) * scaledH;
+                        float sr = buttons[i].gameRadius * yScale;
+                        float sx;
+                        if (buttons[i].anchor == th06::ScreenAnchor::RightPillar) {
+                            sx = (float)(rw - offsetX) + sr;
+                            if (sx > rw - sr) sx = rw - sr;
+                        } else {
+                            sx = (float)offsetX - sr;
+                            if (sx < sr) sx = sr;
+                        }
+                        // Map (sx, sy, sr) screen pixels -> ImGui logical units
+                        ImVec2 c((sx - offsetX) / s, (sy - offsetY) / s);
+                        float r = sr / s;
+                        // D3DCOLOR is ARGB; ImU32 is ABGR (IMGUI_COL32). Repack.
+                        auto toImCol = [](D3DCOLOR d) -> ImU32 {
+                            return IM_COL32(D3DCOLOR_R(d), D3DCOLOR_G(d),
+                                            D3DCOLOR_B(d), D3DCOLOR_A(d));
+                        };
+                        dl->AddCircleFilled(c, r, toImCol(buttons[i].fillColor), 32);
+                        dl->AddCircle(c, r, toImCol(buttons[i].borderColor), 32, 2.0f / s);
+                        if (buttons[i].label && buttons[i].label[0]) {
+                            ImVec2 ts = ImGui::CalcTextSize(buttons[i].label);
+                            ImVec2 tp(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f);
+                            dl->AddText(tp, IM_COL32(255, 255, 255, 255), buttons[i].label);
+                        }
+                    }
+                    dl->PopClipRect();
+                }
+            }
+        }
+    }
+
     ImGui::EndFrame();
     GameGuiProgress = 2;
 }
@@ -131,11 +309,18 @@ void GameGuiRender(game_gui_impl /*impl*/)
         return;
     }
     ImGui::Render();
+    if (th06::IsUsingVulkan() && th06::g_Renderer) {
+        // Phase 5b.2: Vulkan branch — RendererVulkan::EndFrame already opened the
+        // offscreen render pass and is calling THPracGuiRender → here. Forward
+        // into the renderer which records ImGui draws into the current cmd buffer.
+        static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->RenderImGui();
+    } else {
 #if defined(TH06_USE_GLES)
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 #else
-    ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
 #endif
+    }
     GameGuiProgress = 0;
 }
 

@@ -119,6 +119,7 @@ struct RendererGL : public IRenderer
 
     // Internal helper
     void BlitFBOToScreen();
+    void DrawScreenSpaceButtons();
 };
 
 } // namespace th06

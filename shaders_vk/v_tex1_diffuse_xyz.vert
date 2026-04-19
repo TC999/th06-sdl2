@@ -7,6 +7,7 @@ layout(push_constant) uniform PC {
     mat4 mvp;        // proj * view * world (precomputed on CPU)
     vec4 fogColor;
     vec4 fogParams;
+    vec4 textureFactor;  // unused by this layout (per-vertex color present); kept for PC layout parity
 } pc;
 
 layout(location = 0) in vec3 in_pos;

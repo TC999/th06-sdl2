@@ -243,6 +243,10 @@ set(TH06_GAME_SOURCES
     # ImGui SDL2+OpenGL2 后端
     3rdparty/imgui/imgui_impl_sdl.cpp
     3rdparty/imgui/imgui_impl_opengl2.cpp
+    # Phase 5b.2: ImGui Vulkan backend (always built; gated at runtime via IsUsingVulkan).
+    # imgui_impl_vulkan.cpp pulls vulkan.h after volk.h has set VK_NO_PROTOTYPES,
+    # so it auto-switches to its own dispatch table populated via LoadFunctions().
+    3rdparty/imgui/imgui_impl_vulkan.cpp
 )
 
 # Always compile both renderers and both ImGui GL backends for runtime switching
@@ -567,6 +571,7 @@ if(TH06_USE_VULKAN)
     target_compile_definitions(th06 PRIVATE
         TH06_USE_VULKAN=1
         VK_NO_PROTOTYPES=1
+        TH06_HAS_IMGUI=1   # Phase 5b.2: enables ImGui Vulkan integration in RendererVulkan
     )
     add_dependencies(th06 th06_vk_shaders)
     target_compile_definitions(th06 PRIVATE

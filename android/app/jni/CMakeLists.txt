@@ -141,6 +141,8 @@ set(TH06_GAME_SOURCES
     ${TH06_ROOT}/src/zwave.cpp
     # GLES renderer only (no fixed-function RendererGL on Android)
     ${TH06_ROOT}/src/RendererGLES.cpp
+    # Phase 5b.3: backend probe + availability clamping (cross-platform)
+    ${TH06_ROOT}/src/BackendAvailability.cpp
     # sdl2_renderer.cpp is EXCLUDED: uses GL 1.x fixed-function calls
     # pbg3 archive
     ${TH06_ROOT}/src/pbg3/FileAbstraction.cpp
@@ -219,3 +221,106 @@ target_link_libraries(main PRIVATE
     ${GLESv2-lib}
     ${android-lib}
 )
+
+# ============================================================================
+# Vulkan backend (optional, Phase 5b.3)
+#
+# Android NDK r24+ ships <vulkan/vulkan.h> in the sysroot and libvulkan.so
+# on devices that support it. We use vendored volk to runtime-load symbols
+# (matches desktop behaviour) and vendored VMA for allocations. SPIR-V is
+# generated on the host with glslangValidator (Vulkan SDK) and copied into
+# app/src/main/assets/shaders_vk/ so SDL_RWFromFile can stream it from the
+# APK at runtime.
+#
+# Toggle off if the NDK / device lacks Vulkan:
+#   -DTH06_USE_VULKAN_ANDROID=OFF
+# ============================================================================
+option(TH06_USE_VULKAN_ANDROID "Build Vulkan backend on Android" ON)
+
+if(TH06_USE_VULKAN_ANDROID)
+    set(TH06_VOLK_DIR "${TH06_ROOT}/3rdparty/volk")
+    set(TH06_VMA_DIR  "${TH06_ROOT}/3rdparty/Vulkan/include")
+
+    if(NOT EXISTS "${TH06_VOLK_DIR}/volk.h")
+        message(WARNING "TH06_USE_VULKAN_ANDROID: ${TH06_VOLK_DIR}/volk.h missing — disabling Vulkan")
+        set(TH06_USE_VULKAN_ANDROID OFF)
+    elseif(NOT EXISTS "${TH06_VMA_DIR}/vma/vk_mem_alloc.h")
+        message(WARNING "TH06_USE_VULKAN_ANDROID: ${TH06_VMA_DIR}/vma/vk_mem_alloc.h missing — disabling Vulkan")
+        set(TH06_USE_VULKAN_ANDROID OFF)
+    endif()
+endif()
+
+if(TH06_USE_VULKAN_ANDROID)
+    target_sources(main PRIVATE
+        ${TH06_ROOT}/src/RendererVulkan.cpp
+        ${TH06_ROOT}/src/vulkan/VkContext.cpp
+        ${TH06_ROOT}/src/vulkan/VkSwapchain.cpp
+        ${TH06_ROOT}/src/vulkan/VkFrameContext.cpp
+        ${TH06_ROOT}/src/vulkan/VkRenderTarget.cpp
+        ${TH06_ROOT}/src/vulkan/VkPipelineCache.cpp
+        ${TH06_ROOT}/src/vulkan/VkResources.cpp
+        ${TH06_ROOT}/src/vulkan/VmaUsage.cpp
+        ${TH06_ROOT}/src/vulkan/VkTextureManager.cpp
+        ${TH06_VOLK_DIR}/volk.c
+        ${TH06_ROOT}/3rdparty/imgui/imgui_impl_vulkan.cpp
+    )
+    target_include_directories(main PRIVATE
+        ${TH06_VOLK_DIR}
+        ${TH06_VMA_DIR}
+    )
+    target_compile_definitions(main PRIVATE
+        TH06_USE_VULKAN=1
+        VK_NO_PROTOTYPES=1
+        VK_USE_PLATFORM_ANDROID_KHR=1
+        TH06_HAS_IMGUI=1   # Phase 5b.2: enables ImGui Vulkan integration in RendererVulkan
+    )
+
+    # --- Compile SPIR-V via host glslangValidator and stage into APK assets ---
+    find_program(TH06_GLSLANG glslangValidator HINTS
+        "$ENV{VULKAN_SDK}/Bin"
+        "$ENV{VULKAN_SDK}/bin"
+    )
+    if(NOT TH06_GLSLANG)
+        message(WARNING "TH06_USE_VULKAN_ANDROID: glslangValidator not found on host; "
+                        "shaders won't be (re)compiled. Pre-built .spv must already be present in "
+                        "app/src/main/assets/shaders_vk/.")
+    else()
+        message(STATUS "TH06_USE_VULKAN_ANDROID: glslangValidator = ${TH06_GLSLANG}")
+        set(TH06_VK_SHADER_SRC_DIR "${TH06_ROOT}/shaders_vk")
+        set(TH06_VK_SHADER_OUT_DIR "${TH06_ROOT}/android/app/src/main/assets/shaders_vk")
+        file(MAKE_DIRECTORY "${TH06_VK_SHADER_OUT_DIR}")
+        set(TH06_VK_SHADER_NAMES
+            v_diffuse_xyzrwh.vert
+            v_tex1_xyzrwh.vert
+            v_tex1_diffuse_xyzrwh.vert
+            v_tex1_diffuse_xyz.vert
+            v_render_vertex_info.vert
+            f_color.frag
+            f_textured.frag
+        )
+        set(TH06_VK_SHADER_SPV "")
+        foreach(_sh IN LISTS TH06_VK_SHADER_NAMES)
+            set(_in  "${TH06_VK_SHADER_SRC_DIR}/${_sh}")
+            set(_out "${TH06_VK_SHADER_OUT_DIR}/${_sh}.spv")
+            add_custom_command(
+                OUTPUT  "${_out}"
+                COMMAND ${TH06_GLSLANG} -V "${_in}" -o "${_out}"
+                DEPENDS "${_in}"
+                COMMENT "glslang -> ${_sh}.spv (android assets)"
+                VERBATIM
+            )
+            list(APPEND TH06_VK_SHADER_SPV "${_out}")
+        endforeach()
+        add_custom_target(th06_vk_shaders_android DEPENDS ${TH06_VK_SHADER_SPV})
+        add_dependencies(main th06_vk_shaders_android)
+    endif()
+
+    find_library(vulkan-lib vulkan)
+    if(vulkan-lib)
+        # volk uses dlopen("libvulkan.so") so linking isn't strictly required,
+        # but having the import means the loader is in the dependency graph.
+        target_link_libraries(main PRIVATE ${vulkan-lib})
+    endif()
+
+    message(STATUS "TH06_USE_VULKAN_ANDROID: Vulkan backend enabled")
+endif()

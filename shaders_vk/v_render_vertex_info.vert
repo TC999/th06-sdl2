@@ -6,6 +6,7 @@ layout(push_constant) uniform PC {
     mat4 mvp;
     vec4 fogColor;
     vec4 fogParams;
+    vec4 textureFactor;
 } pc;
 
 layout(location = 0) in vec3 in_pos;
@@ -18,7 +19,8 @@ layout(location = 2) out float v_viewZ;
 void main() {
     gl_Position = pc.mvp * vec4(in_pos, 1.0);
     gl_Position.y = -gl_Position.y;  // Vulkan NDC Y-down vs GL/D3D Y-up
-    v_color = vec4(1.0);
+    // Fix 19: GL DrawVertexBuffer3D applies textureFactor via glColor4ub before draw.
+    v_color = pc.textureFactor;
     v_uv    = in_uv;
     v_viewZ = gl_Position.w;
 }

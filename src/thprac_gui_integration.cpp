@@ -12,6 +12,9 @@
 #else
 #include <imgui_impl_opengl2.h>
 #endif
+// Phase 5b.2: Vulkan ImGui owned by RendererVulkan.
+#include "IRenderer.hpp"
+#include "RendererVulkan.hpp"
 #include <SDL.h>
 #include <cstdio>
 
@@ -37,12 +40,28 @@ void THPracGuiInit(SDL_Window* window, void* glContext)
     io.IniFilename = nullptr; // Don't write imgui.ini
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    ImGui_ImplSDL2_InitForOpenGL(window, glContext);
+    // Phase 5b.2: Vulkan branch — RendererVulkan owns the imgui_impl_vulkan
+    // lifecycle (LoadFunctions / Init / font upload / DescriptorPool / Shutdown).
+    // We still need ImGui_ImplSDL2_InitForVulkan to wire up event/clipboard/etc.,
+    // which RendererVulkan::InitImGui handles internally.
+    const bool useVulkan = th06::IsUsingVulkan();
+    if (useVulkan) {
+        std::fprintf(stderr, "[thprac] useVulkan=1 g_Renderer=%p GetRendererVulkan()=%p\n",
+                     (void*)th06::g_Renderer, (void*)th06::GetRendererVulkan());
+        if (!th06::g_Renderer ||
+            !static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->InitImGui(window)) {
+            std::fprintf(stderr, "[thprac] Vulkan ImGui init failed\n");
+            ImGui::DestroyContext();
+            return;
+        }
+    } else {
+        ImGui_ImplSDL2_InitForOpenGL(window, glContext);
 #if defined(TH06_USE_GLES)
-    ImGui_ImplOpenGL3_Init();
+        ImGui_ImplOpenGL3_Init();
 #else
-    ImGui_ImplOpenGL2_Init();
+        ImGui_ImplOpenGL2_Init();
 #endif
+    }
 
     // Load a CJK-capable font for Chinese/Japanese locale strings.
     bool fontLoaded = false;
@@ -153,6 +172,21 @@ void THPracGuiRender()
     if (!s_initialized || s_headless)
         return;
     TH06::THPracRender();
+
+#ifdef __ANDROID__
+    // Sync Android soft-keyboard (IME) with ImGui's text-input intent.
+    // ImGuiIO::WantTextInput becomes true while an InputText widget is active.
+    // Toggle SDL text input accordingly so the IME pops up only when needed.
+    static bool s_imeOn = false;
+    bool want = ImGui::GetIO().WantTextInput;
+    if (want && !s_imeOn) {
+        SDL_StartTextInput();
+        s_imeOn = true;
+    } else if (!want && s_imeOn) {
+        SDL_StopTextInput();
+        s_imeOn = false;
+    }
+#endif
 }
 
 void THPracGuiInitHeadless(SDL_Window* window)
@@ -198,12 +232,19 @@ void THPracGuiShutdown()
     // Bump generation so GameGuiWnd instances re-apply size/pos/locale
     GameGuiGeneration++;
 
+    if (s_headless) {
+        // Headless init only created the ImGui context (no SDL2 / GL backend).
+    } else if (th06::IsUsingVulkan() && th06::g_Renderer) {
+        // Phase 5b.2: RendererVulkan owns ImplVulkan + ImplSDL2 lifecycle.
+        static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->ShutdownImGui();
+    } else {
 #if defined(TH06_USE_GLES)
-    ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplOpenGL3_Shutdown();
 #else
-    ImGui_ImplOpenGL2_Shutdown();
+        ImGui_ImplOpenGL2_Shutdown();
 #endif
-    ImGui_ImplSDL2_Shutdown();
+        ImGui_ImplSDL2_Shutdown();
+    }
     ImGui::DestroyContext();
     SetGuiWindow(nullptr);
     TH06Reset();

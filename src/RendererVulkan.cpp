@@ -13,10 +13,23 @@
 #include "vulkan/VkResources.hpp"
 #include "vulkan/VkTextureManager.hpp"
 
+// Phase 5b.2: imgui_impl_vulkan integration. Order matters — volk forces
+// VK_NO_PROTOTYPES, so imgui_impl_vulkan.h sees no prototypes and switches to
+// its own loader; we feed it volk's vkGetInstanceProcAddr via LoadFunctions.
+// Gated by TH06_HAS_IMGUI so vk_smoketest (which doesn't link ImGui) stays minimal.
+#ifdef TH06_HAS_IMGUI
+#include <imgui.h>
+#include <imgui_impl_vulkan.h>
+#include <imgui_impl_sdl.h>
+
+#include "thprac_gui_integration.h"
+#endif
+
 #include <SDL_log.h>
 #include <SDL_image.h>
 #include <SDL_rwops.h>
 #include <SDL_surface.h>
+#include <SDL_vulkan.h>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -41,13 +54,17 @@ inline void ColorToFloat4(D3DCOLOR c, float out[4]) {
 }
 
 // Push constant block — must match GLSL `layout(push_constant) uniform PC` in all vertex shaders.
-// Total = 8 + 8 + 64 + 16 + 16 = 112 bytes (within Vulkan-guaranteed 128-byte minimum).
+// Total = 8 + 8 + 64 + 16 + 16 + 16 = 128 bytes (within Vulkan-guaranteed 128-byte minimum).
 struct PushConstants {
-    float invScreen[2];   // 1/screenWidth, 1/screenHeight (used by xyzrwh paths)
+    float invScreen[2];     // 1/screenWidth, 1/screenHeight (used by xyzrwh paths)
     float _pad[2];
-    float mvp[16];        // column-major in shader; we feed row-major D3D bytes -> implicit transpose
-    float fogColor[4];    // RGBA, all 0..1
-    float fogParams[4];   // [0]=start, [1]=end, [2]=enabled (1.0 = on, 0.0 = off), [3]=pad
+    float mvp[16];          // column-major in shader; we feed row-major D3D bytes -> implicit transpose
+    float fogColor[4];      // RGBA, all 0..1
+    float fogParams[4];     // [0]=start, [1]=end, [2]=enabled (1.0 = on, 0.0 = off), [3]=pad
+    float textureFactor[4]; // RGBA fallback vertex color for layouts that lack per-vertex color
+                            // (Tex1Xyzrwh / RenderVertexInfoXyz). Mirrors GL ApplyVertexColor(textureFactor)
+                            // path in DrawTriangleStripTex / DrawVertexBuffer3D — critical for transparency
+                            // (textureFactor.a < 1.0 must propagate to fragment alpha).
 };
 
 inline void Mat4Mul_RowMajor(const float* a, const float* b, float* out) {
@@ -131,7 +148,15 @@ bool RendererVulkan::initShaderModules() {
         "v_tex1_diffuse_xyz.vert.spv",
         "v_render_vertex_info.vert.spv",
     };
+    // Phase 5b.3: on Android, the shaders live inside the APK at
+    // assets/shaders_vk/, which SDL_RWFromFile reads when given a relative
+    // path. The TH06_VK_SHADER_DIR macro (an absolute build-tree path) is
+    // only meaningful on desktop builds.
+#ifdef __ANDROID__
+    const std::string base = "shaders_vk/";
+#else
     const std::string base = std::string(TH06_VK_SHADER_DIR) + "/";
+#endif
     for (int i = 0; i < 5; ++i) {
         std::vector<uint32_t> words;
         if (!vk::LoadSpvFile(base + kVertNames[i], words)) return false;
@@ -215,8 +240,13 @@ void RendererVulkan::Init(SDL_Window *win, SDL_GLContext /*ctx_unused*/, i32 w, 
     glContext        = nullptr;
     screenWidth      = w;
     screenHeight     = h;
-    realScreenWidth  = w;
-    realScreenHeight = h;
+    // realScreenWidth/Height must reflect the actual drawable size, not the
+    // logical 640x480, so screen-space overlays (e.g. touch virtual buttons
+    // in thprac_games.cpp Vulkan branch) can compute the pillarbox layout.
+    int drawW = w, drawH = h;
+    SDL_Vulkan_GetDrawableSize(win, &drawW, &drawH);
+    realScreenWidth  = drawW;
+    realScreenHeight = drawH;
     viewportW        = w;
     viewportH        = h;
 
@@ -291,13 +321,44 @@ void RendererVulkan::BeginFrame() {
         sci.requestedHeight = uint32_t(screenHeight);
         sci.vsync           = true;
         sci.srgb            = false;
-        if (!swap_->Recreate(*ctx_, sci)) return;
+        if (!swap_->Recreate(*ctx_, sci)) {
+            // Swapchain rebuild failed — most likely VK_ERROR_SURFACE_LOST_KHR
+            // because the Android SurfaceView was destroyed/recreated across
+            // pause/resume. The old swapchain is permanently bound to the
+            // dead surface, so we must destroy it BEFORE recreating
+            // VkSurfaceKHR. Then retry Recreate against the fresh surface.
+            std::fprintf(stderr, "[VK] swapchain recreate failed, attempting surface recreate\n");
+            swap_->Destroy(*ctx_);
+            if (!ctx_->RecreateSurface(window)) {
+                return;
+            }
+            if (!swap_->Recreate(*ctx_, sci)) {
+                std::fprintf(stderr, "[VK] swapchain recreate failed even after surface recreate\n");
+                return;
+            }
+        }
         if (!renderTarget_->Create(*ctx_, *swap_)) return;
+        // Keep realScreenWidth/Height in sync with swapchain so screen-space
+        // overlays (touch buttons, etc.) get the correct pillarbox layout.
+        int drawW = screenWidth, drawH = screenHeight;
+        SDL_Vulkan_GetDrawableSize(window, &drawW, &drawH);
+        realScreenWidth  = drawW;
+        realScreenHeight = drawH;
         swapchainOutOfDate_ = false;
     }
 
     VkResult acq = swap_->AcquireNext(*ctx_, frame.imgAvail, &currentSwapImage_);
     if (acq == VK_ERROR_OUT_OF_DATE_KHR) { swapchainOutOfDate_ = true; return; }
+    // VK_TIMEOUT can occur when the Android surface was destroyed mid-frame
+    // (see VkSwapchain::AcquireNext hang-guard). VK_ERROR_SURFACE_LOST_KHR
+    // is the explicit form of the same condition. In both cases drop this
+    // frame and force a swapchain rebuild on the next BeginFrame; the
+    // GameWindow::Render() fast-path also gates entry on
+    // IsWindowPresentationUnavailable() so we won't busy-loop.
+    if (acq == VK_TIMEOUT || acq == VK_NOT_READY || acq == VK_ERROR_SURFACE_LOST_KHR) {
+        swapchainOutOfDate_ = true;
+        return;
+    }
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
         std::fprintf(stderr, "[VK] AcquireNext -> %s\n", vk::VkResultToString(acq));
         return;
@@ -384,6 +445,12 @@ void RendererVulkan::EndFrame() {
     auto& frame = frames_->current();
 
     if (inRenderPass_) {
+#ifdef TH06_HAS_IMGUI
+        // Phase 5b.2: composite ImGui (thprac overlay) ON TOP of the game frame
+        // while the offscreen render pass is still open. THPracGuiRender forwards
+        // into GameGuiRender which (Vulkan branch) calls RenderImGui() below.
+        THPrac::THPracGuiRender();
+#endif
         vkCmdEndRenderPass(frame.cmd);
         inRenderPass_ = false;
     }
@@ -494,9 +561,18 @@ void RendererVulkan::Present() {
     pi.pSwapchains        = swapHandles;
     pi.pImageIndices      = &currentSwapImage_;
     VkResult pr = vkQueuePresentKHR(ctx_->graphicsQueue(), &pi);
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+    // Note: VK_SUBOPTIMAL_KHR means the swapchain still works correctly but
+    // the driver could pick a more efficient configuration. On Android we
+    // intentionally pass preTransform=IDENTITY while caps.currentTransform is
+    // typically ROTATE_90, which makes Adreno return SUBOPTIMAL on EVERY
+    // present. Treating SUBOPTIMAL as out-of-date there causes a swapchain
+    // rebuild each frame (drops to ~30 FPS, sustained vmaCreateImage churn).
+    // The functional behaviour with IDENTITY is correct (SurfaceFlinger
+    // performs the rotation), so we ignore SUBOPTIMAL and only rebuild on
+    // OUT_OF_DATE / SURFACE_LOST.
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
         swapchainOutOfDate_ = true;
-    } else if (pr != VK_SUCCESS) {
+    } else if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
         std::fprintf(stderr, "[VK] vkQueuePresentKHR -> %s\n", vk::VkResultToString(pr));
     }
 
@@ -737,6 +813,14 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
     pc.fogParams[1] = fogOn ? fogEnd   : 1.0f;
     pc.fogParams[2] = fogOn ? 1.0f     : 0.0f;
     pc.fogParams[3] = 0.0f;
+    // Fix 19: textureFactor for layouts without vertex color (Tex1Xyzrwh / RenderVertexInfoXyz).
+    // GL's DrawTriangleStripTex / DrawVertexBuffer3D call glColor4ub(textureFactor) so the .a
+    // is the only source of transparency for those draws. Vulkan vertex shaders previously
+    // hardcoded vec4(1.0), making everything opaque.
+    pc.textureFactor[0] = D3DCOLOR_R(textureFactor) / 255.0f;
+    pc.textureFactor[1] = D3DCOLOR_G(textureFactor) / 255.0f;
+    pc.textureFactor[2] = D3DCOLOR_B(textureFactor) / 255.0f;
+    pc.textureFactor[3] = D3DCOLOR_A(textureFactor) / 255.0f;
     VkPipelineLayout layout = hasTexture ? pipelineLayoutTex_ : pipelineLayoutNoTex_;
     vkCmdPushConstants(frame.cmd, layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1455,6 +1539,243 @@ int RendererVulkan::Phase3StressTest(int n, std::FILE* log)
     LOG("[stress] DONE errors=%d\n", errors);
     return errors;
 }
+
+// ============================================================================
+// Phase 5b.2: ImGui (imgui_impl_vulkan) integration.
+//
+// Lifecycle:
+//   InitImGui     — after RendererVulkan::Init() returned successfully.
+//   ShutdownImGui — before destroyAll(); called from main / GameWindow teardown.
+//   NewFrameImGui — once per frame, before ImGui::NewFrame().
+//   RenderImGui   — inside the persistent offscreen render pass scope, called
+//                   from EndFrame() between game draws and vkCmdEndRenderPass.
+//
+// We share the offscreen render pass (LOAD_OP_LOAD, COLOR_ATTACHMENT_OPTIMAL)
+// with the game so ImGui composes ON TOP of the game's frame, then the EndFrame
+// blit copies the combined image to the swapchain.
+// vk_smoketest never links ImGui — gate everything on TH06_HAS_IMGUI; provide
+// no-op stubs in the absence so the class remains ABI-compatible.
+// ============================================================================
+
+#ifdef TH06_HAS_IMGUI
+
+namespace {
+// Volk thunk for ImGui's loader: the renderer uses VK_NO_PROTOTYPES (volk),
+// so imgui_impl_vulkan.cpp must resolve every entrypoint via this callback.
+// Use vkGetInstanceProcAddr loaded by volk; ImGui internally calls it for both
+// instance- and device-level functions (it has its own GetDeviceProcAddr step).
+PFN_vkVoidFunction ImGuiVkLoader(const char* name, void* user) {
+    auto inst = static_cast<VkInstance>(user);
+    return vkGetInstanceProcAddr(inst, name);
+}
+
+void ImGuiVkCheck(VkResult r) {
+    if (r != VK_SUCCESS) {
+        std::fprintf(stderr, "[VK ImGui] VkResult=%d\n", int(r));
+    }
+}
+} // namespace
+
+bool RendererVulkan::InitImGui(SDL_Window* window) {
+    std::fprintf(stderr, "[VK ImGui] InitImGui ENTER (initialized_=%d ctx_=%p rt_=%p swap_=%p window=%p imguiInit=%d)\n",
+                 (int)initialized_, (void*)ctx_.get(), (void*)renderTarget_.get(),
+                 (void*)swap_.get(), (void*)window, (int)imguiInitialized_);
+    if (imguiInitialized_) return true;
+    if (!initialized_ || !ctx_ || !renderTarget_ || !swap_) {
+        std::fprintf(stderr, "[VK ImGui] InitImGui called before renderer init\n");
+        return false;
+    }
+
+    // 1. SDL2 backend: ImGui_ImplSDL2_InitForVulkan only needs the window.
+    std::fprintf(stderr, "[VK ImGui] -> ImGui_ImplSDL2_InitForVulkan\n");
+    if (!ImGui_ImplSDL2_InitForVulkan(window)) {
+        std::fprintf(stderr, "[VK ImGui] ImGui_ImplSDL2_InitForVulkan failed\n");
+        return false;
+    }
+    std::fprintf(stderr, "[VK ImGui] ImGui_ImplSDL2_InitForVulkan OK\n");
+
+    // 2. Feed Vulkan loader (VK_NO_PROTOTYPES). Pass instance via user param.
+    if (!ImGui_ImplVulkan_LoadFunctions(&ImGuiVkLoader, ctx_->instance())) {
+        std::fprintf(stderr, "[VK ImGui] ImGui_ImplVulkan_LoadFunctions failed\n");
+        ImGui_ImplSDL2_Shutdown();
+        return false;
+    }
+
+    // 3. Dedicated descriptor pool. ImGui v1.82 only allocates one combined-image
+    //    sampler set (the font atlas) by default; budget extras for user images.
+    {
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16 };
+        VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        dpci.maxSets       = 16;
+        dpci.poolSizeCount = 1;
+        dpci.pPoolSizes    = &ps;
+        if (vkCreateDescriptorPool(ctx_->device(), &dpci, nullptr, &imguiDescPool_) != VK_SUCCESS) {
+            std::fprintf(stderr, "[VK ImGui] vkCreateDescriptorPool failed\n");
+            ImGui_ImplSDL2_Shutdown();
+            return false;
+        }
+    }
+
+    // 4. Init the Vulkan backend, sharing our offscreen render pass.
+    {
+        ImGui_ImplVulkan_InitInfo info = {};
+        info.Instance        = ctx_->instance();
+        info.PhysicalDevice  = ctx_->physicalDevice();
+        info.Device          = ctx_->device();
+        info.QueueFamily     = ctx_->graphicsQueueFamily();
+        info.Queue           = ctx_->graphicsQueue();
+        info.PipelineCache   = VK_NULL_HANDLE;
+        info.DescriptorPool  = imguiDescPool_;
+        info.Subpass         = 0;
+        info.MinImageCount   = 2;
+        info.ImageCount      = swap_->imageCount();
+        info.MSAASamples     = VK_SAMPLE_COUNT_1_BIT;
+        info.Allocator       = nullptr;
+        info.CheckVkResultFn = &ImGuiVkCheck;
+        if (!ImGui_ImplVulkan_Init(&info, renderTarget_->renderPass())) {
+            std::fprintf(stderr, "[VK ImGui] ImGui_ImplVulkan_Init failed\n");
+            vkDestroyDescriptorPool(ctx_->device(), imguiDescPool_, nullptr);
+            imguiDescPool_ = VK_NULL_HANDLE;
+            ImGui_ImplSDL2_Shutdown();
+            return false;
+        }
+    }
+
+    // 5. Font atlas upload is DEFERRED to first NewFrameImGui — thprac calls
+    //    AddFontFromFileTTF() AFTER InitImGui returns, so uploading here would
+    //    capture only the empty default atlas, leaving glyphs as solid color
+    //    blocks. The lazy path mirrors imgui_impl_opengl2's behaviour.
+
+    imguiInitialized_ = true;
+    std::fprintf(stderr, "[VK ImGui] initialised (renderpass=0x%llx, imageCount=%u)\n",
+                 static_cast<unsigned long long>((uint64_t)renderTarget_->renderPass()),
+                 unsigned(swap_->imageCount()));
+    return true;
+}
+
+namespace {
+// One-shot command buffer helper for font upload. Returns true on success.
+bool UploadImGuiFontsNow(th06::vk::VkContext* ctx) {
+    VkCommandPool tmpPool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    cpci.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    cpci.queueFamilyIndex = ctx->graphicsQueueFamily();
+    if (vkCreateCommandPool(ctx->device(), &cpci, nullptr, &tmpPool) != VK_SUCCESS)
+        return false;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = tmpPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(ctx->device(), &cbai, &cb);
+    VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &bi);
+    ImGui_ImplVulkan_CreateFontsTexture(cb);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cb;
+    vkQueueSubmit(ctx->graphicsQueue(), 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->graphicsQueue());
+    ImGui_ImplVulkan_DestroyFontUploadObjects();
+    vkDestroyCommandPool(ctx->device(), tmpPool, nullptr);
+    return true;
+}
+} // namespace
+
+void RendererVulkan::ShutdownImGui() {
+    if (!imguiInitialized_) return;
+    if (ctx_ && ctx_->device() != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(ctx_->device());
+    }
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    if (imguiDescPool_ != VK_NULL_HANDLE && ctx_ && ctx_->device() != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(ctx_->device(), imguiDescPool_, nullptr);
+    }
+    imguiDescPool_    = VK_NULL_HANDLE;
+    imguiInitialized_ = false;
+}
+
+void RendererVulkan::NewFrameImGui() {
+    if (!imguiInitialized_) return;
+    // Lazy font atlas upload: thprac registers fonts AFTER InitImGui returns,
+    // so the first frame is the earliest moment we know the atlas is final.
+    if (!imguiFontsUploaded_) {
+        if (UploadImGuiFontsNow(ctx_.get())) {
+            imguiFontsUploaded_ = true;
+            std::fprintf(stderr, "[VK ImGui] font atlas uploaded (%dx%d)\n",
+                         ImGui::GetIO().Fonts->TexWidth,
+                         ImGui::GetIO().Fonts->TexHeight);
+        } else {
+            std::fprintf(stderr, "[VK ImGui] font atlas upload FAILED\n");
+        }
+    }
+    ImGui_ImplVulkan_NewFrame();
+}
+
+void RendererVulkan::RenderImGui() {
+    if (!imguiInitialized_ || !frameStarted_ || !inRenderPass_) return;
+    ImDrawData* dd = ImGui::GetDrawData();
+    if (!dd || dd->CmdListsCount == 0) return;
+    auto& frame = frames_->current();
+
+    // ImGui logical UI is 640x480 (set by GameGuiBegin). The offscreen FBO is
+    // sized to the swapchain (e.g. 1708x1067 in fullscreen). To make ImGui
+    // share the GAME's letterbox/pillarbox geometry — i.e. render only inside
+    // the 640x480-aspect rectangle, NOT stretched anisotropically across the
+    // whole FBO — we inject a uniform letterbox transform into ImDrawData
+    // before handing it to imgui_impl_vulkan.
+    //
+    // imgui_impl_vulkan's vertex shader does:
+    //     pos_clip = (pos_logical - DisplayPos) * 2/DisplaySize - 1
+    //     viewport = (0, 0, DisplaySize * FramebufferScale)
+    //
+    // Setting DisplaySize=(fbW/s, fbH/s), FramebufferScale=(s,s),
+    // DisplayPos=(-offX/s, -offY/s) where s = min(fbW/640, fbH/480) makes
+    // logical (0,0)..(640,480) land inside the centered letterbox rect of the
+    // full FBO viewport — same as the game.
+    {
+        const VkExtent2D ext = renderTarget_->extent();
+        const float fbW = float(ext.width);
+        const float fbH = float(ext.height);
+        const float s   = std::min(fbW / 640.0f, fbH / 480.0f);
+        if (s > 0.0f) {
+            const float offX = (fbW - 640.0f * s) * 0.5f;
+            const float offY = (fbH - 480.0f * s) * 0.5f;
+            dd->DisplayPos        = ImVec2(-offX / s, -offY / s);
+            dd->DisplaySize       = ImVec2(fbW / s, fbH / s);
+            dd->FramebufferScale  = ImVec2(s, s);
+        }
+    }
+
+    // Set sane viewport+scissor before ImGui's own vkCmdSetViewport call (the
+    // impl will overwrite, but Vulkan requires both to be valid even if no
+    // pipeline using dynamic state has been bound yet).
+    {
+        VkExtent2D ext = renderTarget_->extent();
+        VkViewport vp = {};
+        vp.x = 0.0f; vp.y = 0.0f;
+        vp.width  = float(ext.width);
+        vp.height = float(ext.height);
+        vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+        VkRect2D sc = { {0, 0}, ext };
+        vkCmdSetViewport(frame.cmd, 0, 1, &vp);
+        vkCmdSetScissor (frame.cmd, 0, 1, &sc);
+    }
+    ImGui_ImplVulkan_RenderDrawData(dd, frame.cmd);
+}
+
+#else  // !TH06_HAS_IMGUI — vk_smoketest stubs (no ImGui linkage).
+
+bool RendererVulkan::InitImGui(SDL_Window*) { return false; }
+void RendererVulkan::ShutdownImGui()        {}
+void RendererVulkan::NewFrameImGui()        {}
+void RendererVulkan::RenderImGui()          {}
+
+#endif // TH06_HAS_IMGUI
 
 // ----------------------------------------------------------------------------
 // Phase 5a (ADR-008): static factory to mirror GetRendererGL/GLES.

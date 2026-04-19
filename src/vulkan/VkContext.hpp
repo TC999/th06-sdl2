@@ -43,6 +43,14 @@ public:
     bool Init(const VkContextCreateInfo& info);
     void Shutdown();
 
+    // Android: when the SurfaceView is destroyed/recreated across pause/resume,
+    // the old VkSurfaceKHR becomes permanently invalid (queries return
+    // VK_ERROR_SURFACE_LOST_KHR forever). Caller MUST ensure the device is
+    // idle (vkDeviceWaitIdle) and that no swapchain references the old
+    // surface before invoking. Returns false if SDL_Vulkan_CreateSurface
+    // fails (typically: SDL_Window not yet recreated by the system).
+    bool RecreateSurface(SDL_Window* window);
+
     VkInstance       instance()       const { return instance_; }
     VkSurfaceKHR     surface()        const { return surface_; }
     VkPhysicalDevice physicalDevice() const { return physicalDevice_; }

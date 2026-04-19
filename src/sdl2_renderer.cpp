@@ -6,8 +6,12 @@
 #include "AnmManager.hpp"
 #include "Supervisor.hpp"
 #include "thprac_gui_integration.h"
+#include "TouchVirtualButtons.hpp"
+#include "MenuTouchButtons.hpp"
+#include <imgui.h>
 #include <SDL_image.h>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 // FBO extension function pointers (loaded at runtime)
@@ -1216,6 +1220,177 @@ void RendererGL::BlitFBOToScreen()
     glPopMatrix();
 }
 
+void RendererGL::DrawScreenSpaceButtons()
+{
+    // Touch virtual button overlay drawn directly to the default framebuffer
+    // over the pillarbox/letterbox bars. Mirrors RendererGLES::DrawScreenSpaceButtons,
+    // but uses fixed-function GL 1.x (FFP) and ImGui's default font for text.
+    TouchButtonInfo buttons[12];
+    int count = TouchVirtualButtons::GetButtonInfo(buttons, 7);
+    count += MenuTouchButtons::GetButtonInfo(buttons + count, 5);
+    if (count == 0) return;
+
+    i32 rw = this->realScreenWidth;
+    i32 rh = this->realScreenHeight;
+
+    i32 scaledW, scaledH;
+    if (rw * this->screenHeight > rh * this->screenWidth) {
+        scaledH = rh;
+        scaledW = rh * this->screenWidth / this->screenHeight;
+    } else {
+        scaledW = rw;
+        scaledH = rw * this->screenHeight / this->screenWidth;
+    }
+    i32 offsetX = (rw - scaledW) / 2;
+    i32 offsetY = (rh - scaledH) / 2;
+    if (offsetX < 5) return;  // need pillarbox
+
+    // Render state: pixel-space ortho with Y top-down so coordinates match the
+    // GLES path verbatim.
+    glViewport(0, 0, rw, rh);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_FOG);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, (double)rw, (double)rh, 0.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glMatrixMode(GL_TEXTURE);
+    glPushMatrix();
+    glLoadIdentity();
+
+    constexpr int HALF_SEGS = 16;
+    constexpr float BORDER_W = 2.0f;
+    constexpr float PI = 3.14159265358979323846f;
+    float yScale = (float)scaledH / 480.0f;
+
+    // ---- Circles + borders (untextured) ----
+    glDisable(GL_TEXTURE_2D);
+    for (int i = 0; i < count; i++) {
+        float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
+        float sr = buttons[i].gameRadius * yScale;
+        float sx;
+        if (buttons[i].anchor == ScreenAnchor::RightPillar) {
+            sx = (float)(rw - offsetX) + sr;
+            if (sx > (float)rw - sr) sx = (float)rw - sr;
+        } else {
+            sx = (float)offsetX - sr;
+            if (sx < sr) sx = sr;
+        }
+
+        // Filled circle as TRIANGLE_FAN
+        {
+            D3DCOLOR c = buttons[i].fillColor;
+            float cr = D3DCOLOR_R(c) / 255.0f, cg = D3DCOLOR_G(c) / 255.0f;
+            float cb = D3DCOLOR_B(c) / 255.0f, ca = D3DCOLOR_A(c) / 255.0f;
+            int segs = HALF_SEGS * 2;
+            glBegin(GL_TRIANGLE_FAN);
+            glColor4f(cr, cg, cb, ca);
+            glVertex2f(sx, sy);
+            for (int j = 0; j <= segs; j++) {
+                float a = j * 2.0f * PI / segs;
+                glVertex2f(sx + sr * cosf(a), sy + sr * sinf(a));
+            }
+            glEnd();
+        }
+        // Border ring as TRIANGLE_STRIP
+        {
+            D3DCOLOR c = buttons[i].borderColor;
+            float cr = D3DCOLOR_R(c) / 255.0f, cg = D3DCOLOR_G(c) / 255.0f;
+            float cb = D3DCOLOR_B(c) / 255.0f, ca = D3DCOLOR_A(c) / 255.0f;
+            float innerR = sr - BORDER_W;
+            int segs = HALF_SEGS * 2;
+            glBegin(GL_TRIANGLE_STRIP);
+            glColor4f(cr, cg, cb, ca);
+            for (int j = 0; j <= segs; j++) {
+                float a = j * 2.0f * PI / segs;
+                float ca_ = cosf(a), sa_ = sinf(a);
+                glVertex2f(sx + sr     * ca_, sy + sr     * sa_);
+                glVertex2f(sx + innerR * ca_, sy + innerR * sa_);
+            }
+            glEnd();
+        }
+    }
+
+    // ---- Text labels using ImGui's default font ----
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        ImFont* font = io.FontDefault ? io.FontDefault
+                       : (io.Fonts && io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0] : nullptr);
+        GLuint fontTex = io.Fonts ? (GLuint)(uintptr_t)io.Fonts->TexID : 0;
+        if (font && font->IsLoaded() && fontTex != 0) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, fontTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glColor4f(1, 1, 1, 1);
+
+            for (int i = 0; i < count; i++) {
+                const char* label = buttons[i].label;
+                int len = (int)strlen(label);
+                if (len == 0) continue;
+
+                float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
+                float sr = buttons[i].gameRadius * yScale;
+                float sx;
+                if (buttons[i].anchor == ScreenAnchor::RightPillar) {
+                    sx = (float)(rw - offsetX) + sr;
+                    if (sx > (float)rw - sr) sx = (float)rw - sr;
+                } else {
+                    sx = (float)offsetX - sr;
+                    if (sx < sr) sx = sr;
+                }
+
+                float pixelHeight = 16.0f * buttons[i].textScale * yScale;
+                float fontScale = pixelHeight / font->FontSize;
+
+                float totalAdv = 0.0f;
+                for (int ci = 0; ci < len; ci++) {
+                    const ImFontGlyph* g = font->FindGlyph((ImWchar)(unsigned char)label[ci]);
+                    if (g) totalAdv += g->AdvanceX;
+                }
+                float penX = sx - totalAdv * fontScale * 0.5f;
+                float baseY = sy - (font->Ascent + font->Descent) * fontScale * 0.5f;
+
+                glBegin(GL_QUADS);
+                for (int ci = 0; ci < len; ci++) {
+                    const ImFontGlyph* g = font->FindGlyph((ImWchar)(unsigned char)label[ci]);
+                    if (!g) continue;
+                    if (g->Visible) {
+                        float x0 = penX + g->X0 * fontScale;
+                        float y0 = baseY + g->Y0 * fontScale;
+                        float x1 = penX + g->X1 * fontScale;
+                        float y1 = baseY + g->Y1 * fontScale;
+                        glTexCoord2f(g->U0, g->V0); glVertex2f(x0, y0);
+                        glTexCoord2f(g->U1, g->V0); glVertex2f(x1, y0);
+                        glTexCoord2f(g->U1, g->V1); glVertex2f(x1, y1);
+                        glTexCoord2f(g->U0, g->V1); glVertex2f(x0, y1);
+                    }
+                    penX += g->AdvanceX * fontScale;
+                }
+                glEnd();
+            }
+            glDisable(GL_TEXTURE_2D);
+        }
+    }
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glMatrixMode(GL_TEXTURE);
+    glPopMatrix();
+}
+
 void RendererGL::EndFrame()
 {
     if (this->fbo != 0)
@@ -1244,8 +1419,10 @@ void RendererGL::EndFrame()
         // frame, eliminating stale-frame capture regardless of when the tool
         // samples the buffer.
         BlitFBOToScreen();
+        DrawScreenSpaceButtons();
         SDL_GL_SwapWindow(this->window);
         BlitFBOToScreen();
+        DrawScreenSpaceButtons();
 
         // Restore the game's GL state saved at the top of EndFrame.
         // FBO binding is NOT part of the attrib stack, so BeginFrame will

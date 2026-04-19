@@ -7,6 +7,7 @@ layout(push_constant) uniform PC {
     mat4 mvp;
     vec4 fogColor;
     vec4 fogParams;
+    vec4 textureFactor;
 } pc;
 
 layout(location = 0) in vec4 in_pos;
@@ -20,7 +21,9 @@ void main() {
     float x_ndc = in_pos.x * pc.invScreen.x * 2.0 - 1.0;
     float y_ndc = in_pos.y * pc.invScreen.y * 2.0 - 1.0;
     gl_Position = vec4(x_ndc, y_ndc, in_pos.z, 1.0);
-    v_color = vec4(1.0);  // implicit white
+    // Fix 19: GL DrawTriangleStripTex applies textureFactor via glColor4ub before draw.
+    // textureFactor.a is the only transparency source for this layout (no per-vertex color).
+    v_color = pc.textureFactor;
     v_uv    = in_uv;
     v_viewZ = 0.0;        // 2D path: fog disabled at CPU side regardless
 }

@@ -24,6 +24,7 @@ layout(push_constant) uniform PC {
     mat4 mvp;
     vec4 fogColor;
     vec4 fogParams; // [start, end, enabled (1.0/0.0), pad]
+    vec4 textureFactor; // unused here (vertex shader applies it to v_color); kept for PC layout parity
 } pc;
 
 layout(location = 0) out vec4 out_color;

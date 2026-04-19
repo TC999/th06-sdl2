@@ -10,6 +10,7 @@
 #include "MenuTouchButtons.hpp"
 #include "thprac_gui_integration.h"
 #include "gles_shaders.h"
+#include <imgui.h>
 #include <SDL_image.h>
 #include <cstring>
 #include <cstdio>
@@ -2211,58 +2212,68 @@ void RendererGLES::DrawScreenSpaceButtons()
         }
     }
 
-    // --- Text labels using ascii.anm texture ---
-    if (g_AnmManager && g_AnmManager->textures[ANM_FILE_ASCII] != 0)
+    // --- Text labels using ImGui's default font (parity with Vulkan path) ---
     {
-        pglUniform1i(this->loc_u_TextureEnabled, 1);
-        this->stats.textureBinds++;
-        glBindTexture(GL_TEXTURE_2D, g_AnmManager->textures[ANM_FILE_ASCII]);
-
-        for (int i = 0; i < count; i++)
+        ImGuiIO& io = ImGui::GetIO();
+        ImFont* font = io.FontDefault ? io.FontDefault
+                       : (io.Fonts && io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0] : nullptr);
+        GLuint fontTex = io.Fonts ? (GLuint)(uintptr_t)io.Fonts->TexID : 0;
+        if (font && font->IsLoaded() && fontTex != 0)
         {
-            const char *label = buttons[i].label;
-            int len = (int)strlen(label);
-            if (len == 0)
-                continue;
+            pglUniform1i(this->loc_u_TextureEnabled, 1);
+            this->stats.textureBinds++;
+            glBindTexture(GL_TEXTURE_2D, fontTex);
 
-            float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
-            float sr = buttons[i].gameRadius * yScale;
-
-            // Recompute sx for text placement, matching the circle positioning.
-            float sx;
-            if (buttons[i].anchor == ScreenAnchor::RightPillar)
+            for (int i = 0; i < count; i++)
             {
-                sx = (float)(rw - offsetX) + sr;
-                if (sx > (float)rw - sr) sx = (float)rw - sr;
-            }
-            else
-            {
-                sx = (float)offsetX - sr;
-                if (sx < sr) sx = sr;
-            }
+                const char* label = buttons[i].label;
+                int len = (int)strlen(label);
+                if (len == 0) continue;
 
-            float charW = 14.0f * buttons[i].textScale * yScale;
-            float charH = 16.0f * buttons[i].textScale * yScale;
-            float totalW = len * charW;
-            float startX = sx - totalW / 2.0f;
-            float startY = sy - charH / 2.0f;
+                float sy = offsetY + (buttons[i].gameY / 480.0f) * scaledH;
+                float sr = buttons[i].gameRadius * yScale;
+                float sx;
+                if (buttons[i].anchor == ScreenAnchor::RightPillar) {
+                    sx = (float)(rw - offsetX) + sr;
+                    if (sx > (float)rw - sr) sx = (float)rw - sr;
+                } else {
+                    sx = (float)offsetX - sr;
+                    if (sx < sr) sx = sr;
+                }
 
-            for (int ci = 0; ci < len; ci++)
-            {
-                u8 ch = (u8)label[ci];
-                if (ch < 0x21) continue;
+                // Pick a pixel size proportional to the button + textScale, then
+                // derive a uniform scale relative to the font's native FontSize.
+                float pixelHeight = 16.0f * buttons[i].textScale * yScale;
+                float fontScale = pixelHeight / font->FontSize;
 
-                AnmLoadedSprite *spr = &g_AnmManager->sprites[ch - 0x15];
-                float u0 = spr->uvStart.x, v0 = spr->uvStart.y;
-                float u1 = spr->uvEnd.x,   v1 = spr->uvEnd.y;
+                // First pass: total advance for centering.
+                float totalAdv = 0.0f;
+                for (int ci = 0; ci < len; ci++) {
+                    ImWchar c = (ImWchar)(unsigned char)label[ci];
+                    const ImFontGlyph* g = font->FindGlyph(c);
+                    if (g) totalAdv += g->AdvanceX;
+                }
+                float penX = sx - totalAdv * fontScale * 0.5f;
+                // Y origin: center the font's visual height (Ascent) on sy.
+                float baseY = sy - (font->Ascent + font->Descent) * fontScale * 0.5f;
 
-                float x0 = startX + ci * charW, x1 = x0 + charW;
-                float y0 = startY, y1 = y0 + charH;
-
-                f32 pos[] = { x0,y0,0, x1,y0,0, x0,y1,0, x1,y1,0 };
-                f32 col[] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
-                f32 tc[]  = { u0,v0, u1,v0, u0,v1, u1,v1 };
-                DrawArrays(GL_TRIANGLE_STRIP, pos, col, tc, 4);
+                for (int ci = 0; ci < len; ci++)
+                {
+                    ImWchar c = (ImWchar)(unsigned char)label[ci];
+                    const ImFontGlyph* g = font->FindGlyph(c);
+                    if (!g) continue;
+                    if (g->Visible) {
+                        float x0 = penX + g->X0 * fontScale;
+                        float y0 = baseY + g->Y0 * fontScale;
+                        float x1 = penX + g->X1 * fontScale;
+                        float y1 = baseY + g->Y1 * fontScale;
+                        f32 pos[] = { x0,y0,0, x1,y0,0, x0,y1,0, x1,y1,0 };
+                        f32 col[] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
+                        f32 tc[]  = { g->U0,g->V0, g->U1,g->V0, g->U0,g->V1, g->U1,g->V1 };
+                        DrawArrays(GL_TRIANGLE_STRIP, pos, col, tc, 4);
+                    }
+                    penX += g->AdvanceX * fontScale;
+                }
             }
         }
     }

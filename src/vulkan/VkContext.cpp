@@ -222,6 +222,22 @@ bool VkContext::createSurface(SDL_Window* window) {
     return true;
 }
 
+bool VkContext::RecreateSurface(SDL_Window* window) {
+    if (instance_ == VK_NULL_HANDLE) return false;
+    if (surface_ != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(instance_, surface_, nullptr);
+        surface_ = VK_NULL_HANDLE;
+    }
+    if (!SDL_Vulkan_CreateSurface(window, instance_, &surface_)) {
+        std::fprintf(stderr, "[VK] RecreateSurface: SDL_Vulkan_CreateSurface failed: %s\n", SDL_GetError());
+        surface_ = VK_NULL_HANDLE;
+        return false;
+    }
+    std::fprintf(stderr, "[VK] RecreateSurface: new VkSurfaceKHR=0x%llx\n",
+                 static_cast<unsigned long long>((uint64_t)surface_));
+    return true;
+}
+
 bool VkContext::pickPhysicalDevice() {
     uint32_t count = 0;
     TH_VK_CHECK(vkEnumeratePhysicalDevices(instance_, &count, nullptr));

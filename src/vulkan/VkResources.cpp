@@ -8,6 +8,8 @@
 #include <cstring>
 #include <fstream>
 
+#include <SDL.h>
+
 namespace th06::vk {
 
 // =========================================================================================
@@ -236,21 +238,31 @@ void VkDefaultTexture::Shutdown(VkContext& ctx) {
 // =========================================================================================
 
 bool LoadSpvFile(const std::string& path, std::vector<uint32_t>& outWords) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) {
-        std::fprintf(stderr, "[LoadSpvFile] cannot open %s\n", path.c_str());
+    // Phase 5b.3: use SDL_RWFromFile so Android can resolve the path through
+    // the APK AAssetManager when given a relative path (e.g. "shaders_vk/x.spv").
+    // On desktop SDL_RWFromFile happily takes absolute paths too.
+    SDL_RWops* rw = SDL_RWFromFile(path.c_str(), "rb");
+    if (!rw) {
+        std::fprintf(stderr, "[LoadSpvFile] cannot open %s (%s)\n",
+                     path.c_str(), SDL_GetError());
         return false;
     }
-    std::streamsize sz = f.tellg();
+    Sint64 sz = SDL_RWsize(rw);
     if (sz <= 0 || (sz % 4) != 0) {
         std::fprintf(stderr, "[LoadSpvFile] invalid size %lld for %s\n",
                      static_cast<long long>(sz), path.c_str());
+        SDL_RWclose(rw);
         return false;
     }
     outWords.resize(static_cast<size_t>(sz / 4));
-    f.seekg(0);
-    f.read(reinterpret_cast<char*>(outWords.data()), sz);
-    return f.good();
+    size_t got = SDL_RWread(rw, outWords.data(), 1, static_cast<size_t>(sz));
+    SDL_RWclose(rw);
+    if (got != static_cast<size_t>(sz)) {
+        std::fprintf(stderr, "[LoadSpvFile] short read %zu/%lld for %s\n",
+                     got, static_cast<long long>(sz), path.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool CreateShaderModule(VkContext& ctx,

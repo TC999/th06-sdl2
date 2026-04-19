@@ -8,6 +8,7 @@ layout(push_constant) uniform PC {
     mat4 mvp;        // unused for 2D; layout fixed for shader-stage-compat
     vec4 fogColor;   // unused by 2D no-tex path; layout-shared with textured frag
     vec4 fogParams;
+    vec4 textureFactor;  // unused by this layout (per-vertex color present); kept for PC layout parity
 } pc;
 
 layout(location = 0) in vec4 in_pos;     // (x, y, z, rhw) — screen pixels
