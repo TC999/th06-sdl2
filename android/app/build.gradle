@@ -69,10 +69,19 @@ task syncGameAssets {
             logger.warn("Windows build dir not found: ${winBuildDir}")
             return
         }
-        // Sync DAT files
-        winBuildDir.listFiles()?.findAll { it.name.endsWith('.DAT') || it.name.endsWith('.dat') }?.each { datFile ->
+        // Sync DAT files (exclude score.dat — it's per-user save data,
+        // generated at runtime in the app's writable storage; bundling it
+        // would overwrite saves on every install/upgrade).
+        winBuildDir.listFiles()?.findAll {
+            (it.name.endsWith('.DAT') || it.name.endsWith('.dat')) &&
+                it.name.toLowerCase() != 'score.dat'
+        }?.each { datFile ->
             copy { from datFile; into assetsDir }
         }
+        // Also delete any stale score.dat that previous builds may have
+        // staged into assets/, so it doesn't end up packaged.
+        def staleScore = new File(assetsDir, 'score.dat')
+        if (staleScore.exists()) { staleScore.delete() }
         // Sync BGM directory
         def bgmSrc = new File(winBuildDir, 'BGM')
         if (bgmSrc.exists()) {
