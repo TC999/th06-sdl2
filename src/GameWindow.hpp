@@ -45,4 +45,9 @@ void GameWindow_ProcessEvents();
 DIFFABLE_EXTERN(GameWindow, g_GameWindow)
 DIFFABLE_EXTERN(i32, g_TickCountToEffectiveFramerate)
 DIFFABLE_EXTERN(double, g_LastFrameTime)
+
+// Android soft-keyboard (IME) inset, in physical pixels of the SurfaceView's
+// bottom edge that is currently obscured. 0 when no IME is shown. Updated by
+// GameWindow_ProcessEvents() from SDL_WINDOWEVENT_SIZE_CHANGED.
+extern int g_AndroidImeInsetPx;
 }; // namespace th06

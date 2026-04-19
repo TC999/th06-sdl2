@@ -19,6 +19,9 @@
 #include "thprac_gui_integration.h"
 #include <imgui.h>
 #include <cmath>
+#ifdef TH06_USE_VULKAN
+#include <SDL_vulkan.h>
+#endif
 #include <cstdio>
 
 namespace th06
@@ -26,6 +29,8 @@ namespace th06
 DIFFABLE_STATIC(GameWindow, g_GameWindow)
 DIFFABLE_STATIC(i32, g_TickCountToEffectiveFramerate)
 DIFFABLE_STATIC(f64, g_LastFrameTime)
+
+int g_AndroidImeInsetPx = 0;
 
 #ifdef __ANDROID__
 // On Android, sdl2_renderer.cpp is excluded (fixed-function GL).
@@ -227,6 +232,22 @@ RenderResult GameWindow::Render()
 
     if (this->lastActiveAppValue == 0 && ShouldFreezeWhenInactive())
     {
+        // Frozen: keep frame-pacing baseline current so we don't catch-up
+        // a huge burst of logic frames the moment we resume.
+        g_LastFrameTime = SDL_GetTicks();
+        return RENDER_RESULT_KEEP_RUNNING;
+    }
+
+    // Android: when the Activity is paused the SDL surface is destroyed but
+    // SDL may dispatch APP_DIDENTERBACKGROUND followed immediately by
+    // APP_WILLENTERFOREGROUND (observed on vivo PD2323), so lastActiveAppValue
+    // bounces back to 1 before the surface is actually re-created. Calling
+    // BeginFrame()/Present() against a dead surface hangs the main thread
+    // (Vulkan vkAcquireNextImageKHR blocks indefinitely on Adreno). Bail
+    // out for any backend whenever the window is currently un-presentable.
+    if (IsWindowPresentationUnavailable())
+    {
+        g_LastFrameTime = SDL_GetTicks();
         return RENDER_RESULT_KEEP_RUNNING;
     }
 
@@ -334,6 +355,19 @@ RenderResult GameWindow::Render()
             local_34 = fabs(slowdown - g_LastFrameTime);
             if (local_34 >= GetFrameTime())
             {
+                // Cap catch-up: if the process was suspended (e.g. switching
+                // to/from background, GC stall), the elapsed time can be huge
+                // and the original do/while would burst-run many logic frames
+                // in a single Render() call (visible as a brief speed-up).
+                // Limit to at most kMaxCatchupFrames worth of catch-up; beyond
+                // that, snap the baseline to "now".
+                constexpr double kMaxCatchupFrames = 3.0;
+                const double maxCatchup = GetFrameTime() * kMaxCatchupFrames;
+                if (local_34 > maxCatchup)
+                {
+                    g_LastFrameTime = slowdown - GetFrameTime();
+                    local_34 = GetFrameTime();
+                }
                 do
                 {
                     g_LastFrameTime += GetFrameTime();
@@ -408,7 +442,11 @@ void GameWindow::Present()
         g_Renderer->EndFrame();
         g_Renderer->Present(); // Phase 5a (ADR-008): explicit present after submit.
 
- #ifndef __ANDROID__
+        // Software frame-rate limiter. Even when the swapchain provides
+        // VSync we cannot rely on it: e.g. on Android the SurfaceView VSync
+        // signal is suspended/unblocked while the activity is being swiped
+        // to background, which used to let the game burst to ~90fps for a
+        // moment. Keep the SDL_Delay-based limiter active on every backend.
         if (g_GameWindow.screenWidth != 0)
         {
             static u32 s_lastPresentTime = 0;
@@ -437,7 +475,6 @@ void GameWindow::Present()
             // not just the draw+calc portion.
             s_lastPresentTime = curTime;
         }
- #endif
     }
     if (g_Supervisor.unk198 != 0)
     {
@@ -547,6 +584,12 @@ void GameWindow::CreateGameWindow(void *unused)
 #endif
 
     g_Supervisor.hwndGameWindow = (HWND)g_GameWindow.sdlWindow;
+
+    // SDL2 on Android starts text input by default after window creation,
+    // which causes the soft keyboard (IME) to pop up — particularly visible
+    // when returning from background. We never use SDL_TEXTINPUT here, so
+    // disable it to keep the IME hidden.
+    SDL_StopTextInput();
 }
 
 void GameWindow_ProcessEvents()
@@ -582,13 +625,46 @@ void GameWindow_ProcessEvents()
             }
             else if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
             {
-                // Update real screen dimensions for touch coordinate conversion.
+                // Android pause/resume + IME show/hide repeatedly fires
+                // SIZE_CHANGED with different SurfaceView dimensions (e.g.
+                // 2696x1260 -> 2696x1127 when soft keyboard is up). We must
+                //   1) refresh realScreen* (used for touch/pillarbox math)
+                //   2) trigger a swapchain rebuild on Vulkan, otherwise the
+                //      driver stretch-blits the old swapchain image into the
+                //      new SurfaceView rect, producing the "wrong scaling on
+                //      resume" symptom.
                 if (g_Renderer != nullptr)
                 {
-                    int drawW, drawH;
-                    SDL_GL_GetDrawableSize(g_GameWindow.sdlWindow, &drawW, &drawH);
-                    g_Renderer->realScreenWidth = drawW;
+                    int drawW = 0, drawH = 0;
+#ifdef TH06_USE_VULKAN
+                    if (IsUsingVulkan()) {
+                        SDL_Vulkan_GetDrawableSize(g_GameWindow.sdlWindow, &drawW, &drawH);
+                    } else
+#endif
+                    {
+                        SDL_GL_GetDrawableSize(g_GameWindow.sdlWindow, &drawW, &drawH);
+                    }
+                    g_Renderer->realScreenWidth  = drawW;
                     g_Renderer->realScreenHeight = drawH;
+                    g_Renderer->ResizeTarget();
+#ifdef __ANDROID__
+                    // Track maximum drawable height observed for this window
+                    // (== full SurfaceView height, no IME). When the IME
+                    // pops up, Android shrinks the SurfaceView (we set
+                    // android:windowSoftInputMode=adjustResize) so the diff
+                    // is the keyboard height in physical pixels.
+                    static int s_maxDrawHPx = 0;
+                    if (drawH > s_maxDrawHPx) s_maxDrawHPx = drawH;
+                    int inset = s_maxDrawHPx - drawH;
+                    if (inset < 0) inset = 0;
+                    // Tiny diffs (status bar quirks) are not the IME.
+                    if (inset < 64) inset = 0;
+                    g_AndroidImeInsetPx = inset;
+#endif
+                    std::fprintf(stderr,
+                        "[input/sdl] SIZE_CHANGED -> drawable=%dx%d (window event data=%d,%d) imeInset=%d\n",
+                        drawW, drawH, event.window.data1, event.window.data2,
+                        g_AndroidImeInsetPx);
                 }
             }
             break;
@@ -603,6 +679,8 @@ void GameWindow_ProcessEvents()
             g_GameWindow.lastActiveAppValue = 1;
             g_GameWindow.isAppActive = 0;
             Controller::ResetInputState();
+            // Suppress IME on resume — SDL re-enables text input internally.
+            SDL_StopTextInput();
             break;
         case SDL_JOYDEVICEADDED:
         case SDL_JOYDEVICEREMOVED:
@@ -716,34 +794,40 @@ i32 GameWindow::InitD3dRendering(void)
 
     // Select renderer based on Phase 5b CLI selection (g_SelectedBackend),
     // falling back to legacy persisted config (cfg.unk[0]) only when CLI absent.
-#ifdef __ANDROID__
-    g_Renderer = GetRendererGLES();
-#else
+    // Phase 5b.3: unified desktop+Android path. GL fixed-function backend is
+    // desktop-only (uses glBegin etc., absent on GLES); Vulkan is gated on
+    // TH06_USE_VULKAN and works on whichever platforms link it in.
     switch (g_SelectedBackend)
     {
+#ifdef TH06_USE_VULKAN
         case BackendKind::Vulkan: g_Renderer = GetRendererVulkan(); break;
+#endif
         case BackendKind::GLES:   g_Renderer = GetRendererGLES();   break;
-        case BackendKind::GL:
+#ifndef __ANDROID__
+        case BackendKind::GL:     g_Renderer = GetRendererGL();     break;
+#endif
         default:
-            g_Renderer = (g_Supervisor.cfg.unk[0] == 1) ? GetRendererGL() : GetRendererGLES();
+            // cfg.unk[0]: 0/0xFF=GLES, 1=GL, 2=Vulkan (Phase 5b.2 in-game switcher)
+            switch (g_Supervisor.cfg.unk[0])
+            {
+#ifndef __ANDROID__
+                case 1:  g_Renderer = GetRendererGL();      g_SelectedBackend = BackendKind::GL;     break;
+#endif
+#ifdef TH06_USE_VULKAN
+                case 2:  g_Renderer = GetRendererVulkan();  g_SelectedBackend = BackendKind::Vulkan; break;
+#endif
+                default: g_Renderer = GetRendererGLES();    g_SelectedBackend = BackendKind::GLES;   break;
+            }
             break;
     }
-#endif
     g_Renderer->Init(g_GameWindow.sdlWindow, glCtx, GAME_WINDOW_WIDTH, GAME_WINDOW_HEIGHT);
     UpdateWindowTitle();
 
-    // Phase 5b.1: ImGui SDL2 backend currently requires GL context. Vulkan path
-    // uses a headless ImGui (context only, no render backend) so thprac singletons
-    // can construct without crashing on ImGui::GetIO(). Real Vulkan UI rendering
-    // arrives in Phase 5b.2 with imgui_impl_vulkan.
-    if (IsUsingVulkan())
-    {
-        THPrac::THPracGuiInitHeadless(g_GameWindow.sdlWindow);
-    }
-    else
-    {
-        THPrac::THPracGuiInit(g_GameWindow.sdlWindow, glCtx);
-    }
+    // Phase 5b.2: ImGui SDL2 backend now supports both GL and Vulkan.
+    // THPracGuiInit branches on backend internally (Vulkan path uses
+    // RendererVulkan::InitImGui; GL path uses ImGui_ImplOpenGL{2,3}_Init).
+    // glCtx will be NULL on the Vulkan path and is unused there.
+    THPrac::THPracGuiInit(g_GameWindow.sdlWindow, glCtx);
 
     g_Supervisor.lockableBackbuffer = 1;
     g_Supervisor.hasD3dHardwareVertexProcessing = 1;
@@ -808,10 +892,10 @@ bool IsUsingGLES()
 
 bool IsUsingVulkan()
 {
-#ifdef __ANDROID__
-    return false;
-#else
+#ifdef TH06_USE_VULKAN
     return g_SelectedBackend == BackendKind::Vulkan;
+#else
+    return false;
 #endif
 }
 

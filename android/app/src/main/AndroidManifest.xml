@@ -32,6 +32,7 @@
             android:screenOrientation="sensorLandscape"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:preferMinimalPostProcessing="true"
+            android:windowSoftInputMode="adjustResize"
             android:exported="true"
             >
             <intent-filter>
