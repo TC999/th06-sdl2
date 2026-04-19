@@ -585,11 +585,19 @@ void GameWindow::CreateGameWindow(void *unused)
 
     g_Supervisor.hwndGameWindow = (HWND)g_GameWindow.sdlWindow;
 
+#ifdef __ANDROID__
     // SDL2 on Android starts text input by default after window creation,
     // which causes the soft keyboard (IME) to pop up — particularly visible
     // when returning from background. We never use SDL_TEXTINPUT here, so
     // disable it to keep the IME hidden.
+    //
+    // Desktop note: we deliberately do NOT call SDL_StopTextInput on
+    // Windows/Linux/macOS. SDL's text-input state on desktop drives the IME
+    // composition window (CJK/EastAsian users); forcibly disabling it would
+    // break legitimate IME usage in any future text widget and has no
+    // benefit on desktop where there's no on-screen keyboard popping up.
     SDL_StopTextInput();
+#endif
 }
 
 void GameWindow_ProcessEvents()
@@ -679,8 +687,11 @@ void GameWindow_ProcessEvents()
             g_GameWindow.lastActiveAppValue = 1;
             g_GameWindow.isAppActive = 0;
             Controller::ResetInputState();
+#ifdef __ANDROID__
             // Suppress IME on resume — SDL re-enables text input internally.
+            // Android-only: see the matching note in CreateGameWindow().
             SDL_StopTextInput();
+#endif
             break;
         case SDL_JOYDEVICEADDED:
         case SDL_JOYDEVICEREMOVED:
