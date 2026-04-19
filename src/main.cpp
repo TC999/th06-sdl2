@@ -4,6 +4,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <string>
+#endif
+
 #include "AnmManager.hpp"
 #include "Chain.hpp"
 #include "Controller.hpp"
@@ -42,11 +49,7 @@ BackendKind g_SelectedBackend = BackendKind::GL;
 // Phase 5a (ADR-008): single CLI knob, no config-file fallback yet.
 BackendKind SelectBackendFromCommandLine(int argc, char *argv[])
 {
-#ifdef __ANDROID__
-    BackendKind result = BackendKind::GLES;
-#else
-    BackendKind result = BackendKind::GL;
-#endif
+    BackendKind result = PlatformDefaultBackend();
     for (int i = 1; i < argc; ++i)
     {
         const char *a = argv[i];
@@ -116,18 +119,69 @@ int main(int argc, char *argv[])
 {
     i32 renderResult = 0;
 
-    // Phase 5b (ADR-008/010): parse --backend before any SDL/window init.
-    // --backend=vulkan now actually creates RendererVulkan + SDL_WINDOW_VULKAN.
-    // thprac (ImGui OpenGL2/3 backend) is auto-disabled on Vulkan path until
-    // Phase 5b.2 vendors imgui_impl_vulkan.
-    th06::g_SelectedBackend = th06::SelectBackendFromCommandLine(argc, argv);
-    if (th06::g_SelectedBackend == th06::BackendKind::Vulkan)
+#ifdef __ANDROID__
+    // Pipe stderr to logcat. Without this, every fprintf(stderr, ...) in the
+    // engine (backend probe results, Vulkan init steps, swapchain capabilities,
+    // texture upload errors, etc.) is silently dropped on Android, leaving us
+    // blind when something goes wrong post-install. Using a background thread
+    // that reads from a pipe attached to STDERR_FILENO and forwards each line
+    // to __android_log_write under the "th06-stderr" tag.
     {
-        std::fprintf(stderr,
-            "[main] --backend=vulkan selected (Phase 5b.1).\n"
-            "       NOTE: thprac UI overlay disabled until imgui_impl_vulkan\n"
-            "             is vendored (Phase 5b.2).\n");
+        static int s_stderrPipe[2] = { -1, -1 };
+        if (pipe(s_stderrPipe) == 0)
+        {
+            ::dup2(s_stderrPipe[1], STDERR_FILENO);
+            ::setvbuf(stderr, nullptr, _IOLBF, 0);  // line-buffer
+            pthread_t tid;
+            pthread_create(&tid, nullptr, [](void*) -> void* {
+                char buf[1024];
+                ssize_t n;
+                std::string acc;
+                while ((n = ::read(s_stderrPipe[0], buf, sizeof(buf) - 1)) > 0)
+                {
+                    acc.append(buf, n);
+                    size_t pos;
+                    while ((pos = acc.find('\n')) != std::string::npos)
+                    {
+                        std::string line = acc.substr(0, pos);
+                        acc.erase(0, pos + 1);
+                        __android_log_write(ANDROID_LOG_INFO, "th06-stderr",
+                                            line.c_str());
+                    }
+                }
+                if (!acc.empty())
+                    __android_log_write(ANDROID_LOG_INFO, "th06-stderr", acc.c_str());
+                return nullptr;
+            }, nullptr);
+            pthread_detach(tid);
+        }
+        std::fprintf(stderr, "[android] stderr -> logcat bridge installed\n");
     }
+#endif
+
+#ifdef _WIN32
+    // Make the game portable: when launched via Explorer / shortcut / file
+    // association the CWD is not guaranteed to be the exe directory, which
+    // breaks all relative paths (PBG3 archives, th06.cfg, log.txt, etc.).
+    // Force CWD to the exe's directory so double-clicking works the same as
+    // `cd build_vk && th06.exe`.
+    {
+        wchar_t exePath[MAX_PATH];
+        DWORD n = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        if (n > 0 && n < MAX_PATH)
+        {
+            for (DWORD i = n; i > 0; --i)
+            {
+                if (exePath[i - 1] == L'\\' || exePath[i - 1] == L'/')
+                {
+                    exePath[i - 1] = L'\0';
+                    break;
+                }
+            }
+            SetCurrentDirectoryW(exePath);
+        }
+    }
+#endif
 
 #ifdef _WIN32
     timeBeginPeriod(1);
@@ -145,6 +199,20 @@ int main(int argc, char *argv[])
         return 1;
     }
 #endif
+
+    // Phase 5b.3: probe backend availability once (after SDL_Init on Android,
+    // first thing on desktop). Establishes whether Vulkan / GL / GLES are
+    // usable on this device so subsequent selectors can clamp.
+    th06::ProbeBackendAvailability();
+
+    // Phase 5b (ADR-008/010): parse --backend and clamp to an available backend.
+    // CLI request → ResolveBackend → never returns an unavailable kind.
+    th06::g_SelectedBackend = th06::ResolveBackend(
+        th06::SelectBackendFromCommandLine(argc, argv));
+    if (th06::g_SelectedBackend == th06::BackendKind::Vulkan)
+    {
+        std::fprintf(stderr, "[main] backend=vulkan (Phase 5b.2 — ImGui Vulkan enabled).\n");
+    }
 
     GamePaths::Init();
 
@@ -172,6 +240,50 @@ int main(int argc, char *argv[])
     Session::UseLocalSession();
 
 restart:
+    // Phase 5b.2: Vulkan needs SDL_WINDOW_VULKAN at window-creation time,
+    // which is decided by IsUsingVulkan() == (g_SelectedBackend==Vulkan).
+    // GL ↔ GLES share SDL_WINDOW_OPENGL, so the legacy game-native restart
+    // route in GameWindow.cpp's renderer switch (which reads cfg.unk[0])
+    // already handles those without main.cpp doing anything.
+    //
+    // Only intervene when there is a Vulkan / non-Vulkan mismatch between
+    // the current g_SelectedBackend and the persisted cfg.unk[0]; otherwise
+    // leave g_SelectedBackend alone so the original flow stays intact.
+    //
+    // Phase 5b.3: also clamp through ResolveBackend so an unavailable backend
+    // (e.g. Vulkan persisted on a device without a Vulkan loader) silently
+    // falls back to GLES instead of crashing window creation.
+    {
+        const th06::BackendKind kPlatformDefault = th06::PlatformDefaultBackend();
+        const bool cfgWantsVulkan = (g_Supervisor.cfg.unk[0] == 2);
+        const bool selWantsVulkan = (th06::g_SelectedBackend == th06::BackendKind::Vulkan);
+        if (cfgWantsVulkan && !selWantsVulkan)
+        {
+            th06::g_SelectedBackend = th06::BackendKind::Vulkan;
+        }
+        else if (!cfgWantsVulkan && selWantsVulkan)
+        {
+            th06::g_SelectedBackend = kPlatformDefault;
+        }
+        // Final clamp: if the resolved backend isn't actually available on
+        // this device, fall back (Vulkan → platform default → GLES). Also
+        // rewrite cfg.unk[0] so the next restart doesn't re-trip this.
+        th06::BackendKind resolved = th06::ResolveBackend(th06::g_SelectedBackend);
+        if (resolved != th06::g_SelectedBackend)
+        {
+            std::fprintf(stderr,
+                "[main] selected backend unavailable; clamped to platform fallback.\n");
+            th06::g_SelectedBackend = resolved;
+            // Map back to cfg.unk[0]: 1=GL, 2=Vulkan, 0/0xFF=GLES.
+            switch (resolved)
+            {
+                case th06::BackendKind::GL:     g_Supervisor.cfg.unk[0] = 1; break;
+                case th06::BackendKind::Vulkan: g_Supervisor.cfg.unk[0] = 2; break;
+                default:                        g_Supervisor.cfg.unk[0] = 0; break;
+            }
+        }
+    }
+
     GameWindow::CreateGameWindow(NULL);
 
     if (GameWindow::InitD3dRendering())

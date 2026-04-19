@@ -113,8 +113,13 @@ struct IRenderer
 extern IRenderer *g_Renderer;
 
 // Access the static renderer instances.
+// GL fixed-function backend exists on desktop only (uses glBegin/glPushMatrix etc.).
 #ifndef __ANDROID__
 IRenderer *GetRendererGL();
+#endif
+// Vulkan backend is gated on TH06_USE_VULKAN (cross-platform — desktop OR Android
+// when the Vulkan toolchain is available).
+#ifdef TH06_USE_VULKAN
 IRenderer *GetRendererVulkan();
 #endif
 IRenderer *GetRendererGLES();
@@ -125,6 +130,25 @@ enum class BackendKind { GL, GLES, Vulkan };
 BackendKind SelectBackendFromCommandLine(int argc, char *argv[]);
 // Globally selected backend (set by main.cpp before GameWindow init).
 extern BackendKind g_SelectedBackend;
+
+// ---- Backend availability (Phase 5b.3) -------------------------------------
+// IsBackendCompiledIn: true if the binary actually links the backend's symbols.
+//   - GLES is always compiled in.
+//   - GL  is desktop-only (compiled iff !defined(__ANDROID__)).
+//   - Vulkan is compiled iff TH06_USE_VULKAN was set at build time.
+// IsBackendAvailable: IsBackendCompiledIn AND runtime probe succeeded.
+//   - Vulkan probe: volkInitialize() + vkCreateInstance + vkEnumeratePhysicalDevices >= 1.
+//   - GL/GLES probes: trivially true (SDL guarantees a software fallback).
+// ProbeBackendAvailability: must be called once after SDL_Init, before backend
+// selection is finalised. Cached results returned by subsequent IsBackendAvailable.
+// ResolveBackend: clamps a requested BackendKind to an available one (falling back
+// to GLES if the request isn't available).
+bool IsBackendCompiledIn(BackendKind kind);
+bool IsBackendAvailable(BackendKind kind);
+void ProbeBackendAvailability();
+BackendKind ResolveBackend(BackendKind requested);
+// Platform default backend (GLES on Android, GL on desktop).
+BackendKind PlatformDefaultBackend();
 
 // Returns true if the current renderer is RendererGLES.
 bool IsUsingGLES();

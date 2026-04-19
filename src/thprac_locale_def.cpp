@@ -7,7 +7,7 @@
 
 namespace THPrac {
 
-const char* th_glossary_str[3][1776] {
+const char* th_glossary_str[3][1777] {
     {
         "",
         "啤酒",
@@ -1778,6 +1778,7 @@ const char* th_glossary_str[3][1776] {
         "渲染后端",
         "GLES (着色器)",
         "GL (固定管线)",
+        "Vulkan (实验性)",
         "需要重启",
         "切换渲染后端需要重启游戏，是否立即重启？",
         "立即重启",
@@ -3557,6 +3558,7 @@ const char* th_glossary_str[3][1776] {
         "Render Backend",
         "GLES (Shader)",
         "GL (Fixed-Function)",
+        "Vulkan (Experimental)",
         "Restart Required",
         "Switching render backend requires a restart. Restart now?",
         "Restart Now",
@@ -5336,6 +5338,7 @@ const char* th_glossary_str[3][1776] {
         "レンダラバックエンド",
         "GLES (シェーダー)",
         "GL (固定機能)",
+        "Vulkan (実験的)",
         "再起動が必要",
         "レンダラバックエンドの切り替えには再起動が必要です。今すぐ再起動しますか？",
         "今すぐ再起動",

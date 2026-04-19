@@ -1779,6 +1779,7 @@ enum th_glossary_t {
     TH06_CFG_RENDERER_BACKEND,
     TH06_CFG_RENDERER_GLES,
     TH06_CFG_RENDERER_GL,
+    TH06_CFG_RENDERER_VULKAN,
     TH06_CFG_RESTART_TITLE,
     TH06_CFG_RESTART_MSG,
     TH06_CFG_RESTART_YES,
@@ -1789,7 +1790,7 @@ enum th_glossary_t {
     TH06_FIRSTRUN_WINDOWED,
 };
 
-extern const char* th_glossary_str[3][1776];
+extern const char* th_glossary_str[3][1777];
 
 extern const th_glossary_t TH_TYPE_SELECT[13];
 

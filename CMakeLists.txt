@@ -251,6 +251,7 @@ set(TH06_GAME_SOURCES
 
 # Always compile both renderers and both ImGui GL backends for runtime switching
 list(APPEND TH06_GAME_SOURCES src/RendererGLES.cpp)
+list(APPEND TH06_GAME_SOURCES src/BackendAvailability.cpp)
 list(APPEND TH06_GAME_SOURCES 3rdparty/imgui/imgui_impl_opengl3.cpp)
 
 if(TH06_ENABLE_PREDICTION_ROLLBACK)

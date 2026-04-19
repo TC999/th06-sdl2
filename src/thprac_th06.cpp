@@ -2656,7 +2656,7 @@ namespace TH06 {
         int  mColorMode;      // 0=32bit, 1=16bit
         int  mPadXAxis;
         int  mPadYAxis;
-        int  mBackend;        // 0=GLES (shader), 1=GL (fixed-function)
+        int  mBackend;        // 0=GLES (shader), 1=GL (fixed-function), 2=Vulkan (experimental)
         int  mOrigBackend;    // backend value at window open time
         bool mShowSaveMsg;
         int  mSaveMsgTimer;
@@ -2693,7 +2693,15 @@ namespace TH06 {
             mColorMode        = (cfg.colorMode16bit == 0xFF || cfg.colorMode16bit == 0) ? 0 : 1;
             mPadXAxis         = cfg.padXAxis;
             mPadYAxis         = cfg.padYAxis;
-            mBackend          = (cfg.unk[0] == 1) ? 1 : 0;
+            // cfg.unk[0]: 0/0xFF=GLES, 1=GL, 2=Vulkan (Phase 5b.2)
+            if (cfg.unk[0] == 1)      mBackend = 1;
+            else if (cfg.unk[0] == 2) mBackend = 2;
+            else                      mBackend = 0;
+            // Phase 5b.3: clamp to a backend actually available on this device,
+            // so the radio set always shows a consistent selection (no orphan
+            // selection on a hidden radio).
+            if (mBackend == 1 && !th06::IsBackendAvailable(th06::BackendKind::GL))     mBackend = 0;
+            if (mBackend == 2 && !th06::IsBackendAvailable(th06::BackendKind::Vulkan)) mBackend = 0;
             mOrigBackend      = mBackend;
         }
 
@@ -2720,6 +2728,12 @@ namespace TH06 {
             cfg.padXAxis = (i16)std::clamp(mPadXAxis, 1, 1000);
             cfg.padYAxis = (i16)std::clamp(mPadYAxis, 1, 1000);
             cfg.unk[0] = (i8)mBackend;
+            // NOTE: do NOT mutate th06::g_SelectedBackend here. The cold
+            // restart path in main.cpp re-applies cfg.unk[0] to the runtime
+            // selector right before CreateGameWindow, so any change here
+            // would only desync IsUsingVulkan() against the still-live
+            // current renderer, crashing the next ImGui frame routed to a
+            // backend impl that was never initialised.
             // Save to disk
             th06::FileSystem::WriteDataToFile((char*)"th06.cfg", &cfg, sizeof(cfg));
         }
@@ -2814,9 +2828,18 @@ namespace TH06 {
             ImGui::Separator();
             ImGui::TextUnformatted(S(TH06_CFG_RENDERER_BACKEND));
             ImGui::SameLine();
+            // Phase 5b.3: hide radio buttons for backends that aren't
+            // compiled in OR aren't available on this device. The GLES
+            // option is always shown (always-available baseline).
             ImGui::RadioButton(S(TH06_CFG_RENDERER_GLES), &mBackend, 0);
-            ImGui::SameLine();
-            ImGui::RadioButton(S(TH06_CFG_RENDERER_GL), &mBackend, 1);
+            if (th06::IsBackendAvailable(th06::BackendKind::GL)) {
+                ImGui::SameLine();
+                ImGui::RadioButton(S(TH06_CFG_RENDERER_GL), &mBackend, 1);
+            }
+            if (th06::IsBackendAvailable(th06::BackendKind::Vulkan)) {
+                ImGui::SameLine();
+                ImGui::RadioButton(S(TH06_CFG_RENDERER_VULKAN), &mBackend, 2);
+            }
 
             ImGui::EndChild(); // end scrollable region
 
