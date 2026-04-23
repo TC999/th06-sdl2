@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-msvc-win32-gles:
+    name: Windows (MSVC, Win32, USE_GLES=ON, Release)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure (CMake)
+        run: >
+          cmake -S . -B build_sdl2
+          -A Win32
+          -DUSE_GLES=ON
+
+      - name: Build (Release)
+        run: cmake --build build_sdl2 --config Release
+
+      - name: Upload artifact (Windows Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: th06-windows-win32-release
+          path: |
+            build_sdl2/Release/*.exe
+            build_sdl2/Release/*.dll
+            build_sdl2/Release/*.pdb
+            build_sdl2/Release/
+          if-no-files-found: warn
+
+  linux-gcc-32bit-gles:
+    name: Linux (GCC, 32-bit, USE_GLES=ON, Release)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install 32-bit toolchain + SDL2 deps
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-multilib g++-multilib \
+            pkg-config \
+            cmake ninja-build \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libgles2-mesa-dev \
+            libsdl2-dev:i386 \
+            libsdl2-image-dev:i386 \
+            libsdl2-mixer-dev:i386
+
+      - name: Configure (CMake 32-bit)
+        env:
+          PKG_CONFIG_PATH: /usr/lib/i386-linux-gnu/pkgconfig
+        run: |
+          cmake -S . -B build_linux_gles -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_GLES=ON \
+            -DCMAKE_C_FLAGS="-m32" \
+            -DCMAKE_CXX_FLAGS="-m32" \
+            -DCMAKE_EXE_LINKER_FLAGS="-m32"
+
+      - name: Build (Release)
+        run: cmake --build build_linux_gles
+
+      - name: Upload artifact (Linux Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: th06-linux-32bit-release
+          path: |
+            build_linux_gles/
+          if-no-files-found: warn
