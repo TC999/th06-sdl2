@@ -13,11 +13,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Vulkan SDK (choco)
+      - name: Setup vcpkg
+        uses: microsoft/setup-vcpkg@v1
+      
+      - name: Install deps (vcpkg)
         shell: pwsh
         run: |
-          choco install vulkansdk -y --no-progress
-          # 一般也会装到 C:\VulkanSDK\，后续同样写入 VULKAN_SDK / PATH
+          vcpkg install vulkan-headers vulkan-loader --triplet x86-windows
 
       - name: Configure (CMake)
         run: >
