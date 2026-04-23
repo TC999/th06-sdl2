@@ -13,6 +13,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Vulkan SDK (winget)
+        shell: pwsh
+        run: |
+          winget --v ersion
+          winget install --id LunarG.VulkanSDK --accept-package-agreements --accept-source-agreements        --silent
+      
+          # Vulkan SDK 安装后一般会放在 C:\VulkanSDK\ 下
+          $sdkRoot = "C:\VulkanSDK"
+          if (!(Test-Path $sdkRoot)) { throw "C:\VulkanSDK not found after install" }
+      
+          # 取最新版本目录
+          $latest = Get-ChildItem $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (!$latest) { throw "No VulkanSDK version directory under C:\VulkanSDK" }
+      
+          $env:VULKAN_SDK = $latest.FullName
+          "VULKAN_SDK=$($env:VULKAN_SDK)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      
+          # 可选：把工具加入 PATH，方便 CMake 找 glslangValidator
+          "$($env:VULKAN_SDK)\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      
+          # 验证头文件存在
+          if (!(Test-Path "$($env:VULKAN_SDK)\Include\vulkan\vulkan.h")) {
+            throw "vulkan.h not found in $env:VULKAN_SDK"
+          }
+          Write-Host "Vulkan SDK installed at $env:VULKAN_SDK"
+
       - name: Configure (CMake)
         run: >
           cmake -S . -B build_sdl2
