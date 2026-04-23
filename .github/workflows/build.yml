@@ -48,6 +48,7 @@ jobs:
             gcc-multilib g++-multilib \
             pkg-config \
             cmake ninja-build \
+            libvulkan-dev \
             libgl1-mesa-dev \
             libegl1-mesa-dev \
             libgles2-mesa-dev \
