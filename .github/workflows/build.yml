@@ -16,8 +16,8 @@ jobs:
       - name: Install Vulkan SDK (winget)
         shell: pwsh
         run: |
-          winget --v ersion
-          winget install --id LunarG.VulkanSDK --accept-package-agreements --accept-source-agreements        --silent
+          winget --version
+          winget install --id LunarG.VulkanSDK --accept-package-agreements --accept-source-agreements --silent
       
           # Vulkan SDK 安装后一般会放在 C:\VulkanSDK\ 下
           $sdkRoot = "C:\VulkanSDK"
@@ -61,7 +61,7 @@ jobs:
 
   linux-gcc-32bit-gles:
     name: Linux (GCC, 32-bit, USE_GLES=ON, Release)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
