@@ -486,6 +486,44 @@ void AndroidTouchInput::Update()
         g_TouchButtonsCur |= TH_BUTTON_SKIP;
     }
 
+    // ── Promote leftover dialogue-era finger to movement finger ────────
+    // While the dialogue overlay is up, HandleFingerDown routes new
+    // fingers into the gesture-pointer pool (so long-press → SKIP works)
+    // instead of claiming them as the gameplay movement finger. When the
+    // dialogue ends with a finger still pressed (typical: player held to
+    // skip and gameplay resumes immediately), we previously required the
+    // player to lift and re-touch before movement worked again, which felt
+    // like input "stuttering" right after every dialogue. Promote the
+    // first still-active gesture pointer to be the movement finger so the
+    // held finger seamlessly takes over without a release.
+    if (AndroidTouchInput::IsEnabled() && g_GameManager.isInMenu != 0
+        && !g_DialogueOverlayActive && !g_MoveFingerActive)
+    {
+        for (int i = 0; i < kMaxPointers; i++)
+        {
+            if (!g_Pointers[i].active)
+                continue;
+            TouchPointer &ptr = g_Pointers[i];
+            float gx, gy;
+            NormalizedToGameCoords(ptr.curX, ptr.curY, gx, gy);
+            g_MoveFingerActive = true;
+            g_MoveFingerId = ptr.fingerId;
+            g_MovePrevGameX = gx;
+            g_MovePrevGameY = gy;
+            g_MoveDeltaX = 0.0f;
+            g_MoveDeltaY = 0.0f;
+            // Free the gesture slot — this finger now drives movement,
+            // not gestures. Don't decrement g_TwoFingerTapCount: that
+            // counter tracks distinct finger-down events, not currently
+            // active pointers, and is reset when all pointers lift.
+            ptr.active = false;
+            if (g_ActivePointerCount > 0) g_ActivePointerCount--;
+            SDL_Log("[touch] post-dialogue promote to movement finger at game(%.1f, %.1f)",
+                    gx, gy);
+            break;
+        }
+    }
+
     // ── Touch-drag gameplay movement ────────────────────────────────────
     // When a movement finger is active during gameplay, its per-frame delta
     // drives AnalogMode::Displacement for uncapped 1:1 finger-to-player mapping.
