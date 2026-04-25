@@ -1,4 +1,5 @@
 #include "NetplayAuthoritativeTransport.hpp"
+#include <new>
 
 namespace th06::Netplay
 {
@@ -178,7 +179,8 @@ bool HandleAuthoritativeStateDatagram(const AuthoritativeStateDatagramHeader &he
     }
 
     g_State.lastRuntimeReceiveTick = SDL_GetTicks64();
-    g_State.latestAuthoritativeFrameState = {};
+    g_State.latestAuthoritativeFrameState.~AuthoritativeFrameState();
+    new (&g_State.latestAuthoritativeFrameState) AuthoritativeFrameState();
     g_State.latestAuthoritativeFrameState.valid = true;
     g_State.latestAuthoritativeFrameState.serverFrame = header.serverFrame;
     g_State.latestAuthoritativeFrameState.ackedInputFrameP1 = header.ackedInputFrameP1;

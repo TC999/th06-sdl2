@@ -113,27 +113,6 @@ struct LegacyStageReplayData
 };
 ZUN_ASSERT_SIZE(LegacyStageReplayData, 0x69780);
 
-struct LegacyReplayData
-{
-    char magic[4];
-    u16 version;
-    u8 shottypeChara;
-    u8 difficulty;
-    i32 checksum;
-    u8 rngValue1;
-    u8 rngValue2;
-    i8 key;
-    i8 rngValue3;
-    char date[9];
-    char name[8];
-    i32 score;
-    f32 slowdownRate2;
-    f32 slowdownRate;
-    f32 slowdownRate3;
-    LegacyStageReplayData *stageReplayData[7];
-};
-ZUN_ASSERT_SIZE(LegacyReplayData, 0x50);
-
 bool IsValidReplayStageIndex(int stageIndex)
 {
     return stageIndex >= 0 && stageIndex < kReplayStageCount;
@@ -173,7 +152,7 @@ ZunResult DecodeReplayBlob(ReplayBlob *data, i32 fileSize)
         checksum += *checksumCursor;
     }
 
-    if (checksum != data->checksum)
+    if (checksum != (u32)data->checksum)
     {
         return ZUN_ERROR;
     }
@@ -186,84 +165,110 @@ ZunResult DecodeReplayBlob(ReplayBlob *data, i32 fileSize)
     return ZUN_SUCCESS;
 }
 
-ZunResult ValidateLegacyReplayData(LegacyReplayData *data, i32 fileSize)
+// =============================================================================
+//  On-disk replay → in-memory ReplayData translation
+//
+//  These routines read the wire formats defined in ReplayData.hpp and produce
+//  a fully-relocated ReplayData* on heap, with stageReplayData[i] pointing to
+//  StageReplayData blocks inside the same allocation. After this returns,
+//  callers can treat the result like the in-memory layout would have looked
+//  on a 32-bit native build — pointers are real pointers, no fixup needed.
+//
+//  This makes 64-bit builds bit-compatible with 32-bit replays: the wire
+//  format never changes, only the in-memory pointer width.
+// =============================================================================
+
+template <typename DiskHdr>
+ReplayData *ReifyReplayBlob(const u8 *rawData, i32 fileSize)
 {
-    return DecodeReplayBlob(data, fileSize);
-}
+    static_assert(offsetof(DiskHdr, key) == offsetof(DiskHdr, rngValue3) - 1,
+                  "key/rngValue3 expected adjacent");
 
-ReplayData *ConvertLegacyReplayData(const LegacyReplayData *legacyReplayData, i32 fileSize)
-{
-    if (legacyReplayData == NULL || fileSize < (i32)sizeof(LegacyReplayData))
+    if (rawData == NULL || fileSize < (i32)sizeof(DiskHdr))
     {
         return NULL;
     }
 
-    const std::uintptr_t oldHeaderSize = sizeof(LegacyReplayData);
-    const std::uintptr_t newHeaderSize = sizeof(ReplayData);
-    if (newHeaderSize < oldHeaderSize)
+    const DiskHdr *disk = reinterpret_cast<const DiskHdr *>(rawData);
+    const size_t newHeaderSize = sizeof(ReplayData);
+    const size_t oldHeaderSize = sizeof(DiskHdr);
+    const size_t payloadSize = (size_t)fileSize - oldHeaderSize;
+    const size_t convertedSize = newHeaderSize + payloadSize;
+
+    ReplayData *replayData = reinterpret_cast<ReplayData *>(malloc(convertedSize));
+    if (replayData == NULL)
     {
         return NULL;
     }
+    memset(replayData, 0, convertedSize);
 
-    const std::uintptr_t headerDelta = newHeaderSize - oldHeaderSize;
-    const size_t convertedSize = (size_t)fileSize + (size_t)headerDelta;
-    ReplayData *convertedReplayData = reinterpret_cast<ReplayData *>(malloc(convertedSize));
-    if (convertedReplayData == NULL)
+    // Copy fields that share names. shottypeChara2 only exists in the
+    // post-vanilla format; for legacy files we duplicate shottypeChara so the
+    // single-player flow keeps working.
+    memcpy(replayData->magic, disk->magic, sizeof(replayData->magic));
+    replayData->version = disk->version;
+    replayData->shottypeChara = disk->shottypeChara;
+    if constexpr (offsetof(DiskHdr, stageOffset) == offsetof(OnDiskReplayData, stageOffset))
     {
-        return NULL;
+        replayData->shottypeChara2 = reinterpret_cast<const OnDiskReplayData *>(disk)->shottypeChara2;
+    }
+    else
+    {
+        replayData->shottypeChara2 = disk->shottypeChara;
+    }
+    replayData->difficulty = disk->difficulty;
+    replayData->checksum = disk->checksum;
+    replayData->rngValue1 = disk->rngValue1;
+    replayData->rngValue2 = disk->rngValue2;
+    replayData->key = disk->key;
+    replayData->rngValue3 = disk->rngValue3;
+    memcpy(replayData->date, disk->date, sizeof(replayData->date));
+    memcpy(replayData->name, disk->name, sizeof(replayData->name));
+    replayData->score = disk->score;
+    replayData->slowdownRate2 = disk->slowdownRate2;
+    replayData->slowdownRate = disk->slowdownRate;
+    replayData->slowdownRate3 = disk->slowdownRate3;
+
+    // Copy payload bytes verbatim (stage blocks).
+    if (payloadSize > 0)
+    {
+        memcpy(reinterpret_cast<u8 *>(replayData) + newHeaderSize,
+               rawData + oldHeaderSize, payloadSize);
     }
 
-    memset(convertedReplayData, 0, convertedSize);
-    convertedReplayData->version = legacyReplayData->version;
-    convertedReplayData->shottypeChara = legacyReplayData->shottypeChara;
-    convertedReplayData->shottypeChara2 = legacyReplayData->shottypeChara;
-    convertedReplayData->difficulty = legacyReplayData->difficulty;
-    convertedReplayData->checksum = legacyReplayData->checksum;
-    convertedReplayData->rngValue1 = legacyReplayData->rngValue1;
-    convertedReplayData->rngValue2 = legacyReplayData->rngValue2;
-    convertedReplayData->key = legacyReplayData->key;
-    convertedReplayData->rngValue3 = legacyReplayData->rngValue3;
-    convertedReplayData->score = legacyReplayData->score;
-    convertedReplayData->slowdownRate2 = legacyReplayData->slowdownRate2;
-    convertedReplayData->slowdownRate = legacyReplayData->slowdownRate;
-    convertedReplayData->slowdownRate3 = legacyReplayData->slowdownRate3;
-    memcpy(convertedReplayData->magic, legacyReplayData->magic, sizeof(convertedReplayData->magic));
-    memcpy(convertedReplayData->date, legacyReplayData->date, sizeof(convertedReplayData->date));
-    memcpy(convertedReplayData->name, legacyReplayData->name, sizeof(convertedReplayData->name));
-
-    if ((std::uintptr_t)fileSize > oldHeaderSize)
-    {
-        memcpy(reinterpret_cast<u8 *>(convertedReplayData) + newHeaderSize,
-               reinterpret_cast<const u8 *>(legacyReplayData) + oldHeaderSize,
-               (size_t)fileSize - (size_t)oldHeaderSize);
-    }
-
-    const std::uintptr_t stageHeaderSize = offsetof(StageReplayData, replayInputs);
+    // Translate u32 file offsets → real pointers into the new buffer.
+    const size_t stageHeaderSize = offsetof(StageReplayData, replayInputs);
     for (i32 idx = 0; idx < kReplayStageCount; idx += 1)
     {
-        if (legacyReplayData->stageReplayData[idx] == NULL)
+        u32 fileOffset = disk->stageOffset[idx];
+        if (fileOffset == 0)
         {
+            replayData->stageReplayData[idx] = NULL;
             continue;
         }
-
-        const std::uintptr_t oldStageOffset = reinterpret_cast<std::uintptr_t>(legacyReplayData->stageReplayData[idx]);
-        if (oldStageOffset < oldHeaderSize || oldStageOffset + stageHeaderSize > (std::uintptr_t)fileSize)
+        if (fileOffset < oldHeaderSize ||
+            (size_t)fileOffset + stageHeaderSize > (size_t)fileSize)
         {
+            replayData->stageReplayData[idx] = NULL;
             continue;
         }
+        const size_t newStageOffset = (size_t)fileOffset - oldHeaderSize + newHeaderSize;
+        StageReplayData *stage =
+            reinterpret_cast<StageReplayData *>(reinterpret_cast<u8 *>(replayData) + newStageOffset);
+        replayData->stageReplayData[idx] = stage;
 
-        const std::uintptr_t newStageOffset = oldStageOffset + headerDelta;
-        convertedReplayData->stageReplayData[idx] = reinterpret_cast<StageReplayData *>(newStageOffset);
-
-        StageReplayData *stageReplayData =
-            reinterpret_cast<StageReplayData *>(reinterpret_cast<u8 *>(convertedReplayData) + newStageOffset);
-        stageReplayData->power2 = 0;
-        stageReplayData->livesRemaining2 = 0;
-        stageReplayData->bombsRemaining2 = 0;
+        // Legacy format had unused padding[3] where the new format has
+        // power2/livesRemaining2/bombsRemaining2; zero those for safety.
+        if constexpr (offsetof(DiskHdr, stageOffset) != offsetof(OnDiskReplayData, stageOffset))
+        {
+            stage->power2 = 0;
+            stage->livesRemaining2 = 0;
+            stage->bombsRemaining2 = 0;
+        }
     }
 
     g_LastFileSize = (u32)convertedSize;
-    return convertedReplayData;
+    return replayData;
 }
 
 void CleanupFailedReplayManagerRegistration(ReplayManager *mgr)
@@ -534,7 +539,9 @@ void LogReplayTraceWindow(ReplayManager *mgr)
 #pragma var_order(idx, decryptedData, obfOffset, obfuscateCursor, checksum, checksumCursor)
 ZunResult ReplayManager::ValidateReplayData(ReplayData *data, i32 fileSize)
 {
-    return DecodeReplayBlob(data, fileSize);
+    // Legacy entry point: kept for ABI but no longer used by LoadReplayData.
+    // Operates on an OnDiskReplayData-shaped header laid into the same memory.
+    return DecodeReplayBlob(reinterpret_cast<OnDiskReplayData *>(data), fileSize);
 }
 
 ReplayData *ReplayManager::LoadReplayData(char *replayFile, int isExternalResource)
@@ -548,35 +555,50 @@ ReplayData *ReplayManager::LoadReplayData(char *replayFile, int isExternalResour
     ResetReplayTraceLog();
 
     const i32 fileSize = g_LastFileSize;
-    ReplayData *currentReplayData = reinterpret_cast<ReplayData *>(malloc(fileSize));
-    if (currentReplayData != NULL)
+
+    // Try the current 84-byte wire format first. DecodeReplayBlob does
+    // in-place decrypt on rawData, so we make a working copy to retry
+    // with the legacy format if validation fails.
+    if (fileSize >= (i32)sizeof(OnDiskReplayData))
     {
-        memcpy(currentReplayData, rawData, fileSize);
-        if (ValidateReplayData(currentReplayData, fileSize) == ZUN_SUCCESS)
+        u8 *workCopy = reinterpret_cast<u8 *>(malloc((size_t)fileSize));
+        if (workCopy != NULL)
         {
-            ReplayTraceLog("[ReplayLoad] path=%s format=current size=%d\n", replayFile != NULL ? replayFile : "<null>",
-                           fileSize);
-            free(rawData);
-            return currentReplayData;
+            memcpy(workCopy, rawData, (size_t)fileSize);
+            if (DecodeReplayBlob(reinterpret_cast<OnDiskReplayData *>(workCopy), fileSize) == ZUN_SUCCESS)
+            {
+                ReplayData *replayData = ReifyReplayBlob<OnDiskReplayData>(workCopy, fileSize);
+                free(workCopy);
+                if (replayData != NULL)
+                {
+                    ReplayTraceLog("[ReplayLoad] path=%s format=current size=%d\n",
+                                   replayFile != NULL ? replayFile : "<null>", fileSize);
+                    free(rawData);
+                    return replayData;
+                }
+            }
+            free(workCopy);
         }
-        free(currentReplayData);
     }
 
-    LegacyReplayData *legacyReplayData = reinterpret_cast<LegacyReplayData *>(rawData);
-    if (ValidateLegacyReplayData(legacyReplayData, fileSize) != ZUN_SUCCESS)
+    // Try legacy 80-byte format (original ZUN files).
+    if (fileSize >= (i32)sizeof(OnDiskLegacyReplayData))
     {
-        free(rawData);
-        return NULL;
+        if (DecodeReplayBlob(reinterpret_cast<OnDiskLegacyReplayData *>(rawData), fileSize) == ZUN_SUCCESS)
+        {
+            ReplayData *replayData = ReifyReplayBlob<OnDiskLegacyReplayData>(rawData, fileSize);
+            if (replayData != NULL)
+            {
+                ReplayTraceLog("[ReplayLoad] path=%s format=legacy size=%d\n",
+                               replayFile != NULL ? replayFile : "<null>", fileSize);
+            }
+            free(rawData);
+            return replayData;
+        }
     }
 
-    ReplayData *convertedReplayData = ConvertLegacyReplayData(legacyReplayData, fileSize);
-    if (convertedReplayData != NULL)
-    {
-        ReplayTraceLog("[ReplayLoad] path=%s format=legacy size=%d\n", replayFile != NULL ? replayFile : "<null>",
-                       fileSize);
-    }
     free(rawData);
-    return convertedReplayData;
+    return NULL;
 }
 
 ZunResult ReplayManager::RegisterChain(i32 isDemo, char *replayFile)
@@ -972,14 +994,8 @@ ZunResult ReplayManager::AddedCallbackDemo(ReplayManager *mgr)
         {
             return ZUN_ERROR;
         }
-        for (idx = 0; idx < ARRAY_SIZE_SIGNED(mgr->replayData->stageReplayData); idx += 1)
-        {
-            if (mgr->replayData->stageReplayData[idx] != NULL)
-            {
-                mgr->replayData->stageReplayData[idx] =
-                    (StageReplayData *)((u8 *)mgr->replayData + (uintptr_t)mgr->replayData->stageReplayData[idx]);
-            }
-        }
+        // LoadReplayData returns a buffer with stageReplayData[i] already
+        // pointing to real StageReplayData blocks (or NULL). No fixup needed.
     }
 
     const int stageIndex = g_GameManager.currentStage - 1;
@@ -1051,14 +1067,14 @@ void ReplayManager::StopRecording()
     }
 }
 
-#pragma var_order(stageIdx, mgr, slowDown, replayCopy, stageReplayPos, file, csumStagePos, checksum, checksumCursor,   \
+#pragma var_order(stageIdx, mgr, slowDown, diskHdr, stageReplayPos, file, csumStagePos, checksum, checksumCursor,    \
                   obfOffset, obfStagePos, obfuscateCursor)
 void ReplayManager::SaveReplay(char *replayPath, char *replayName)
 {
     ReplayManager *mgr;
     FILE *file;
     u8 *checksumCursor;
-    ReplayData replayCopy;
+    OnDiskReplayData diskHdr;
     u8 *obfuscateCursor;
     i32 obfStagePos;
     u8 obfOffset;
@@ -1075,21 +1091,41 @@ void ReplayManager::SaveReplay(char *replayPath, char *replayName)
         {
             if (replayPath != NULL)
             {
-                replayCopy = *mgr->replayData;
+                // Build the on-disk header from the in-memory ReplayData.
+                // This produces a byte-identical layout to what 32-bit TH06
+                // builds wrote: 84-byte header, u32 stage offsets, no
+                // architecture-dependent fields.
+                memset(&diskHdr, 0, sizeof(diskHdr));
+                memcpy(diskHdr.magic, mgr->replayData->magic, sizeof(diskHdr.magic));
+                diskHdr.version = mgr->replayData->version;
+                diskHdr.shottypeChara = mgr->replayData->shottypeChara;
+                diskHdr.shottypeChara2 = mgr->replayData->shottypeChara2;
+                diskHdr.difficulty = mgr->replayData->difficulty;
+                diskHdr.rngValue1 = mgr->replayData->rngValue1;
+                diskHdr.rngValue2 = mgr->replayData->rngValue2;
+                diskHdr.key = mgr->replayData->key;
+                diskHdr.rngValue3 = mgr->replayData->rngValue3;
+                memcpy(diskHdr.date, mgr->replayData->date, sizeof(diskHdr.date));
+                memcpy(diskHdr.name, mgr->replayData->name, sizeof(diskHdr.name));
+                diskHdr.score = mgr->replayData->score;
+                diskHdr.slowdownRate2 = mgr->replayData->slowdownRate2;
+                diskHdr.slowdownRate = mgr->replayData->slowdownRate;
+                diskHdr.slowdownRate3 = mgr->replayData->slowdownRate3;
+
                 ReplayManager::StopRecording();
-                stageReplayPos = sizeof(ReplayData);
+                stageReplayPos = sizeof(OnDiskReplayData);
                 for (stageIdx = 0; stageIdx < ARRAY_SIZE_SIGNED(g_ReplayManager->replayData->stageReplayData);
                      stageIdx += 1)
                 {
                     if (mgr->replayData->stageReplayData[stageIdx] != NULL)
                     {
-                        replayCopy.stageReplayData[stageIdx] = (StageReplayData *)stageReplayPos;
+                        diskHdr.stageOffset[stageIdx] = (u32)stageReplayPos;
                         stageReplayPos += (size_t)mgr->replayInputStageBookmarks[stageIdx] -
                                           (size_t)mgr->replayData->stageReplayData[stageIdx];
                     }
                 }
                 utils::DebugPrint2("%s write ...\n", replayPath);
-                replayCopy.score = g_GameManager.guiScore;
+                diskHdr.score = g_GameManager.guiScore;
                 slowDown = (g_Supervisor.unk1b4 / g_Supervisor.unk1b8 - 0.5f) * 2.0f;
                 if (slowDown < 0.0f)
                 {
@@ -1099,29 +1135,29 @@ void ReplayManager::SaveReplay(char *replayPath, char *replayName)
                 {
                     slowDown = 1.0f;
                 }
-                replayCopy.slowdownRate = (1.0f - slowDown) * 100.0f;
-                replayCopy.slowdownRate2 = replayCopy.slowdownRate + 1.12f;
-                replayCopy.slowdownRate3 = replayCopy.slowdownRate + 2.34f;
+                diskHdr.slowdownRate = (1.0f - slowDown) * 100.0f;
+                diskHdr.slowdownRate2 = diskHdr.slowdownRate + 1.12f;
+                diskHdr.slowdownRate3 = diskHdr.slowdownRate + 2.34f;
                 mgr->replayData->stageReplayData[g_GameManager.currentStage - 1]->score = g_GameManager.score;
-                utils::CopyStringToFixedField(replayCopy.name, sizeof(replayCopy.name), replayName);
+                utils::CopyStringToFixedField(diskHdr.name, sizeof(diskHdr.name), replayName);
 #ifdef _WIN32
-                _strdate(replayCopy.date);
+                _strdate(diskHdr.date);
 #else
                 {
                     time_t t = time(NULL);
                     struct tm *tm = localtime(&t);
-                    strftime(replayCopy.date, sizeof(replayCopy.date), "%m/%d/%y", tm);
+                    strftime(diskHdr.date, sizeof(diskHdr.date), "%m/%d/%y", tm);
                 }
 #endif
-                replayCopy.key = g_Rng.GetRandomU16InRange(128) + 64;
-                replayCopy.rngValue3 = g_Rng.GetRandomU16InRange(256);
-                replayCopy.rngValue1 = g_Rng.GetRandomU16InRange(256);
-                replayCopy.rngValue2 = g_Rng.GetRandomU16InRange(256);
+                diskHdr.key = g_Rng.GetRandomU16InRange(128) + 64;
+                diskHdr.rngValue3 = g_Rng.GetRandomU16InRange(256);
+                diskHdr.rngValue1 = g_Rng.GetRandomU16InRange(256);
+                diskHdr.rngValue2 = g_Rng.GetRandomU16InRange(256);
 
-                // Calculate the checksum.
-                checksumCursor = (u8 *)&replayCopy.key;
+                // Calculate the checksum (over header from `key` onward + every stage payload).
+                checksumCursor = (u8 *)&diskHdr.key;
                 checksum = 0x3f000318;
-                for (stageIdx = 0; stageIdx < sizeof(ReplayData) - offsetof(ReplayData, key);
+                for (stageIdx = 0; stageIdx < (i32)(sizeof(OnDiskReplayData) - offsetof(OnDiskReplayData, key));
                      stageIdx += 1, checksumCursor += 1)
                 {
                     checksum += *checksumCursor;
@@ -1139,12 +1175,12 @@ void ReplayManager::SaveReplay(char *replayPath, char *replayName)
                         }
                     }
                 }
-                replayCopy.checksum = checksum;
+                diskHdr.checksum = (i32)checksum;
 
-                // Obfuscate the data.
-                obfuscateCursor = (u8 *)&replayCopy.rngValue3;
-                obfOffset = replayCopy.key;
-                for (stageIdx = 0; stageIdx < sizeof(ReplayData) - offsetof(ReplayData, rngValue3);
+                // Obfuscate the data (over header from `rngValue3` onward + every stage payload).
+                obfuscateCursor = (u8 *)&diskHdr.rngValue3;
+                obfOffset = diskHdr.key;
+                for (stageIdx = 0; stageIdx < (i32)(sizeof(OnDiskReplayData) - offsetof(OnDiskReplayData, rngValue3));
                      stageIdx += 1, obfuscateCursor += 1)
                 {
                     *obfuscateCursor += obfOffset;
@@ -1170,7 +1206,7 @@ void ReplayManager::SaveReplay(char *replayPath, char *replayName)
                 GamePaths::Resolve(resolvedReplayPath, sizeof(resolvedReplayPath), replayPath);
                 GamePaths::EnsureParentDir(resolvedReplayPath);
                 file = fopen(resolvedReplayPath, "wb");
-                fwrite(&replayCopy, sizeof(ReplayData), 1, file);
+                fwrite(&diskHdr, sizeof(OnDiskReplayData), 1, file);
                 for (stageIdx = 0; stageIdx < ARRAY_SIZE_SIGNED(mgr->replayData->stageReplayData); stageIdx += 1)
                 {
                     if (mgr->replayData->stageReplayData[stageIdx] != NULL)
