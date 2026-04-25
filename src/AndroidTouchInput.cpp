@@ -110,6 +110,18 @@ static float g_MovePrevGameY = 0.0f;
 static float g_MoveDeltaX = 0.0f;   // accumulated delta this frame
 static float g_MoveDeltaY = 0.0f;
 
+// Movement-finger UP/DN debounce. After a stall, Android's InputDispatcher
+// often synthesizes UP for the held finger (gesture timeout), then resumes
+// DN+UP cycles instead of MOTION. Without debounce, each UP destroys the
+// movement finger and the subsequent DN re-creates it with delta=0, so no
+// drag motion ever reaches the player. We remember the last UP and, if a
+// DN for fid=0 arrives within kMoveDebounceMs at a nearby position, we treat
+// it as the SAME logical drag and accumulate the position delta directly.
+static constexpr Uint32 kMoveDebounceMs = 200;
+static Uint32 g_LastMoveUpMs = 0;
+static float g_LastMoveUpGameX = 0.0f;
+static float g_LastMoveUpGameY = 0.0f;
+
 // ────────────────────────────────────────────────────────────────────────────
 // Coordinate conversion
 // ────────────────────────────────────────────────────────────────────────────
@@ -295,15 +307,42 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
             && g_GameManager.isInMenu != 0 && !g_MoveFingerActive
             && !g_DialogueOverlayActive)
         {
-            g_MoveFingerActive = true;
-            g_MoveFingerId = event.fingerId;
             float gx, gy;
             NormalizedToGameCoords(event.x, event.y, gx, gy);
-            g_MovePrevGameX = gx;
-            g_MovePrevGameY = gy;
-            g_MoveDeltaX = 0.0f;
-            g_MoveDeltaY = 0.0f;
-            SDL_Log("[touch] movement finger DOWN at game(%.1f, %.1f)", gx, gy);
+
+            // Debounce: if a movement finger UP just happened nearby, treat
+            // this DN as the same logical drag (Android synthesizes UP/DN
+            // cycles after stalls instead of MOTION, see kMoveDebounceMs).
+            Uint32 now = SDL_GetTicks();
+            bool isReconnect = (g_LastMoveUpMs != 0)
+                && (now - g_LastMoveUpMs <= kMoveDebounceMs)
+                && (std::abs(gx - g_LastMoveUpGameX) < 80.0f)
+                && (std::abs(gy - g_LastMoveUpGameY) < 80.0f);
+
+            g_MoveFingerActive = true;
+            g_MoveFingerId = event.fingerId;
+
+            if (isReconnect)
+            {
+                // Same drag continuing — accumulate position delta from the
+                // last UP into MoveDelta so the player keeps moving.
+                g_MoveDeltaX += (gx - g_LastMoveUpGameX);
+                g_MoveDeltaY += (gy - g_LastMoveUpGameY);
+                g_MovePrevGameX = gx;
+                g_MovePrevGameY = gy;
+                std::fprintf(stderr,
+                    "[touch/dn]   -> movement reconnect dx=%.1f dy=%.1f (gap=%ums)\n",
+                    gx - g_LastMoveUpGameX, gy - g_LastMoveUpGameY,
+                    (unsigned)(now - g_LastMoveUpMs));
+            }
+            else
+            {
+                g_MovePrevGameX = gx;
+                g_MovePrevGameY = gy;
+                g_MoveDeltaX = 0.0f;
+                g_MoveDeltaY = 0.0f;
+                SDL_Log("[touch] movement finger DOWN at game(%.1f, %.1f)", gx, gy);
+            }
             return; // Don't create a gesture pointer during gameplay
         }
     }
@@ -397,11 +436,14 @@ void AndroidTouchInput::HandleFingerUp(const SDL_TouchFingerEvent &event)
     // Check if this was the movement finger.
     if (g_MoveFingerActive && event.fingerId == g_MoveFingerId)
     {
+        // Remember position+time for the DN/UP debounce reconnect.
+        g_LastMoveUpMs = SDL_GetTicks();
+        g_LastMoveUpGameX = g_MovePrevGameX;
+        g_LastMoveUpGameY = g_MovePrevGameY;
         SDL_Log("[touch] movement finger UP");
         g_MoveFingerActive = false;
         g_MoveFingerId = -1;
-        g_MoveDeltaX = 0.0f;
-        g_MoveDeltaY = 0.0f;
+        // Note: keep accumulated MoveDelta so the current frame still applies it.
         return;
     }
 
@@ -500,6 +542,14 @@ void AndroidTouchInput::Update()
                 g_Pointers[i].active = false;
             g_ActivePointerCount = 0;
             g_TwoFingerTapCount = 0;
+            // Save movement finger position for DN/UP debounce reconnect
+            // (post-stall Android event stream is UP/DN cycles, not MOTION).
+            if (g_MoveFingerActive)
+            {
+                g_LastMoveUpMs = now;
+                g_LastMoveUpGameX = g_MovePrevGameX;
+                g_LastMoveUpGameY = g_MovePrevGameY;
+            }
             g_MoveFingerActive = false;
             g_MoveDeltaX = 0.0f;
             g_MoveDeltaY = 0.0f;
