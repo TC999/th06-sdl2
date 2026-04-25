@@ -68,6 +68,15 @@ VertexFormatDesc GetVertexFormat(VertexLayout vl) {
         d.attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT,       12 };  // uv (shader: location=1)
         d.attrCount = 2;
         break;
+    case VertexLayout::Tex1DiffuseXyzClip:
+        // Phase 6.2 pretransformed sprite batch layout: same on-disk size
+        // as Tex1DiffuseXyzrwh (28 B) but used by the sprite batcher only.
+        d.stride = 28;
+        d.attrs[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0  };  // clip-space pos (vec4)
+        d.attrs[1] = { 1, 0, VK_FORMAT_B8G8R8A8_UNORM,      16 };  // color (D3DCOLOR)
+        d.attrs[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT,       20 };  // uv
+        d.attrCount = 3;
+        break;
     default:
         break;
     }
@@ -87,8 +96,12 @@ VkCompareOp DepthOp(DepthFunc f) {
 }
 
 VkPrimitiveTopology Topo(Topology t) {
-    return (t == Topology::TriangleStrip) ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
-                                          : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+    switch (t) {
+        case Topology::TriangleStrip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        case Topology::TriangleFan:   return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+        case Topology::TriangleList:  return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        default:                      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    }
 }
 
 }  // namespace

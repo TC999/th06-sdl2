@@ -90,6 +90,7 @@ set(TH06_GAME_SOURCES
     ${TH06_ROOT}/src/Ending.cpp
     ${TH06_ROOT}/src/EnemyEclInstr.cpp
     ${TH06_ROOT}/src/EnemyManager.cpp
+    ${TH06_ROOT}/src/AssetIO.cpp
     ${TH06_ROOT}/src/FileSystem.cpp
     ${TH06_ROOT}/src/GameErrorContext.cpp
     ${TH06_ROOT}/src/GameManager.cpp

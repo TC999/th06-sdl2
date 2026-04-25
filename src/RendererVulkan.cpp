@@ -23,6 +23,13 @@
 #include <imgui_impl_sdl.h>
 
 #include "thprac_gui_integration.h"
+#include "thprac_th06.h"
+#ifndef TH06_VK_NO_THPRAC
+#include "thprac_games.h"  // g_adv_igi_options.th06_unlock_framerate (vsync override)
+#define TH06_VK_UNLOCK_FRAMERATE() (THPrac::g_adv_igi_options.th06_unlock_framerate)
+#else
+#define TH06_VK_UNLOCK_FRAMERATE() (false)
+#endif
 #endif
 
 #include <SDL_log.h>
@@ -141,12 +148,13 @@ void RendererVulkan::destroyAll() {
 }
 
 bool RendererVulkan::initShaderModules() {
-    static const char* kVertNames[5] = {
+    static const char* kVertNames[6] = {
         "v_diffuse_xyzrwh.vert.spv",
         "v_tex1_xyzrwh.vert.spv",
         "v_tex1_diffuse_xyzrwh.vert.spv",
         "v_tex1_diffuse_xyz.vert.spv",
         "v_render_vertex_info.vert.spv",
+        "v_tex1_diffuse_xyz_clip.vert.spv",  // Phase 6.2 sprite-batch pretransformed
     };
     // Phase 5b.3: on Android, the shaders live inside the APK at
     // assets/shaders_vk/, which SDL_RWFromFile reads when given a relative
@@ -157,7 +165,7 @@ bool RendererVulkan::initShaderModules() {
 #else
     const std::string base = std::string(TH06_VK_SHADER_DIR) + "/";
 #endif
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         std::vector<uint32_t> words;
         if (!vk::LoadSpvFile(base + kVertNames[i], words)) return false;
         if (!vk::CreateShaderModule(*ctx_, words, &vertModules_[i])) return false;
@@ -274,7 +282,10 @@ void RendererVulkan::Init(SDL_Window *win, SDL_GLContext /*ctx_unused*/, i32 w, 
     vk::SwapchainCreateInfo sci{};
     sci.requestedWidth  = uint32_t(w);
     sci.requestedHeight = uint32_t(h);
-    sci.vsync           = true;
+    // Default vsync = on (FIFO). Honor F11 "Unlock Frame Rate" toggle so
+    // benchmarks can break monitor refresh cap (mirrors original D3D8
+    // D3DPRESENT_INTERVAL_IMMEDIATE behavior).
+    sci.vsync           = !TH06_VK_UNLOCK_FRAMERATE();
     sci.srgb            = false;
     if (!swap_->Recreate(*ctx_, sci))                      { std::fprintf(stderr, "[VK] swapchain init failed\n"); return; }
     if (!frames_->Init(*ctx_))                             { std::fprintf(stderr, "[VK] frames init failed\n"); return; }
@@ -286,7 +297,7 @@ void RendererVulkan::Init(SDL_Window *win, SDL_GLContext /*ctx_unused*/, i32 w, 
     deps.renderPass     = renderTarget_->renderPass();
     deps.layoutNoTex    = pipelineLayoutNoTex_;
     deps.layoutTextured = pipelineLayoutTex_;
-    for (int i = 0; i < 5; ++i) deps.vertModules[i] = vertModules_[i];
+    for (int i = 0; i < 6; ++i) deps.vertModules[i] = vertModules_[i];
     deps.fragColor    = fragColorMod_;
     deps.fragTextured = fragTexMod_;
     if (!pipelineCache_->Init(*ctx_, deps))                { std::fprintf(stderr, "[VK] pipeline cache init failed\n"); return; }
@@ -308,10 +319,50 @@ void RendererVulkan::EndScene()      { /* no-op */ }
 void RendererVulkan::BeginFrame() {
     if (!initialized_) return;
 
+    // Phase 6 batcher: defensive reset. Anything left over from a previous
+    // frame's command buffer is now invalid (cmd buffer was either submitted
+    // or abandoned); discard the staging vector so we start fresh.
+    pendingBatch_.active = false;
+    pendingBatch_.verts.clear();
+    pendingBatch_.vertCount = 0;
+    statsInputDraws_ = 0;
+    statsBatchFlush_ = 0;
+    statsVertsOut_   = 0;
+    for (uint32_t i = 0; i < FR_COUNT; ++i) flushReasonHist_[i] = 0;
+    for (int li = 0; li < kLayoutSlots_; ++li)
+        for (uint32_t i = 0; i < FR_COUNT; ++i)
+            flushReasonByLayout_[li][i] = 0;
+
     auto& frame = frames_->current();
     VkDevice dev = ctx_->device();
 
     TH_VK_CHECK(vkWaitForFences(dev, 1, &frame.inFlight, VK_TRUE, UINT64_MAX));
+
+    // Live-toggle hook for F11 → Unlock Frame Rate. We track the last vsync
+    // intent we applied to the swapchain; whenever the user flips the toggle
+    // we rebuild ONLY the swapchain (present-mode change). We deliberately
+    // do NOT go through the full swapchainOutOfDate_ path because that
+    // destroys/recreates the offscreen render pass, which would invalidate
+    // every pipeline cached in PipelineCache (deps.renderPass becomes a
+    // dangling handle → AV deep inside the ICD on the next createPipeline).
+    // The offscreen render target is independent of the swap images (we
+    // blit from offscreen to swap), so present-mode changes need no RT work.
+    {
+        const bool wantVsync = !TH06_VK_UNLOCK_FRAMERATE();
+        static bool s_lastVsyncIntent = true;
+        if (wantVsync != s_lastVsyncIntent) {
+            s_lastVsyncIntent = wantVsync;
+            vkDeviceWaitIdle(dev);
+            vk::SwapchainCreateInfo sci{};
+            sci.requestedWidth  = uint32_t(screenWidth);
+            sci.requestedHeight = uint32_t(screenHeight);
+            sci.vsync           = wantVsync;
+            sci.srgb            = false;
+            if (!swap_->Recreate(*ctx_, sci)) {
+                std::fprintf(stderr, "[VK] swapchain present-mode rebuild failed\n");
+            }
+        }
+    }
 
     if (swapchainOutOfDate_) {
         vkDeviceWaitIdle(dev);
@@ -319,7 +370,9 @@ void RendererVulkan::BeginFrame() {
         vk::SwapchainCreateInfo sci{};
         sci.requestedWidth  = uint32_t(screenWidth);
         sci.requestedHeight = uint32_t(screenHeight);
-        sci.vsync           = true;
+        // Honor F11 "Unlock Frame Rate": switch present mode dynamically on
+        // every swapchain rebuild so toggling the option live takes effect.
+        sci.vsync           = !TH06_VK_UNLOCK_FRAMERATE();
         sci.srgb            = false;
         if (!swap_->Recreate(*ctx_, sci)) {
             // Swapchain rebuild failed — most likely VK_ERROR_SURFACE_LOST_KHR
@@ -446,10 +499,17 @@ void RendererVulkan::EndFrame() {
 
     if (inRenderPass_) {
 #ifdef TH06_HAS_IMGUI
+        // Phase 6 batcher: drain any sprites left after the game's last
+        // explicit draw so they appear UNDER the ImGui overlay.
+        if (pendingBatch_.active) bumpFlushReason(FR_NonDraw_EndFrame);
+        FlushBatch();
         // Phase 5b.2: composite ImGui (thprac overlay) ON TOP of the game frame
         // while the offscreen render pass is still open. THPracGuiRender forwards
         // into GameGuiRender which (Vulkan branch) calls RenderImGui() below.
         THPrac::THPracGuiRender();
+#else
+        if (pendingBatch_.active) bumpFlushReason(FR_NonDraw_EndFrame);
+        FlushBatch();
 #endif
         vkCmdEndRenderPass(frame.cmd);
         inRenderPass_ = false;
@@ -546,6 +606,102 @@ void RendererVulkan::EndFrame() {
     // Note: vkQueuePresentKHR moved to Present() per Phase 5a (ADR-008).
     // EndFrame submits the command buffer; Present() pushes the swapchain image.
     frameStarted_ = false;
+
+    // Phase 6 batcher diagnostics — gated on user-selected log level >= Info(3),
+    // emitted once per second of game time (60 frames) so it doesn't dominate
+    // the log even at INFO. Format:
+    //   [Vk Batch] frame=N  inDraws=I  flushes=F  vertsOut=V  ratio=I/F
+    if (THPrac::TH06::THPracGetLogLevel() >= 3 && (frameCounter_ % 60u == 0u) && statsBatchFlush_ > 0) {
+        const double ratio = double(statsInputDraws_) / double(statsBatchFlush_);
+        // Compose a short flush-reason histogram so the user can tell which
+        // state field is dominating cache misses. Print only the top-5 reasons
+        // with non-zero counts, sorted descending.
+        const char* names[FR_COUNT] = {
+            "_none","FirstDraw","VtxLayout","HasTex","DepthTest","BlendMode",
+            "ColorOp","ZWrite","DepthFunc","Texture","TexStgDiff","TexFactor",
+            "FogEn","FogParams","Mvp","Viewport","ScreenSize",
+            "ND_Clear","ND_SetVP","ND_EndFrame"
+        };
+        // Sort indices by count desc.
+        uint32_t idx[FR_COUNT];
+        for (uint32_t i = 0; i < FR_COUNT; ++i) idx[i] = i;
+        std::sort(idx, idx + FR_COUNT, [&](uint32_t a, uint32_t b) {
+            return flushReasonHist_[a] > flushReasonHist_[b];
+        });
+        char hist[256]; int hp = 0;
+        for (uint32_t i = 0; i < FR_COUNT && i < 5; ++i) {
+            uint32_t r = idx[i];
+            if (flushReasonHist_[r] == 0) break;
+            int n = std::snprintf(hist + hp, sizeof(hist) - hp,
+                                  " %s=%u", names[r], flushReasonHist_[r]);
+            if (n <= 0 || hp + n >= int(sizeof(hist))) break;
+            hp += n;
+        }
+        hist[hp] = '\0';
+
+        // Per-layout flush attribution: rank layouts by total flushes this
+        // tick, then for each top layout list its top-2 reasons. This is the
+        // signal needed to pick the next pre-multiply target — Phase 6.2 fixed
+        // layout 3 but telemetry showed layout 4 was the actual hot path.
+        char layHist[320]; int lp = 0;
+        {
+            uint32_t totalsByLayout[kLayoutSlots_] = {};
+            for (int li = 0; li < kLayoutSlots_; ++li) {
+                for (uint32_t r = 0; r < FR_COUNT; ++r) totalsByLayout[li] += flushReasonByLayout_[li][r];
+            }
+            int order[kLayoutSlots_];
+            for (int li = 0; li < kLayoutSlots_; ++li) order[li] = li;
+            std::sort(order, order + kLayoutSlots_, [&](int a, int b) {
+                return totalsByLayout[a] > totalsByLayout[b];
+            });
+            for (int rank = 0; rank < kLayoutSlots_ && rank < 4; ++rank) {
+                int li = order[rank];
+                if (totalsByLayout[li] == 0) break;
+                int n = std::snprintf(layHist + lp, sizeof(layHist) - lp,
+                                      " L%d=%u(", li, totalsByLayout[li]);
+                if (n <= 0 || lp + n >= int(sizeof(layHist))) break;
+                lp += n;
+                // Top-2 reasons within this layout.
+                uint32_t ridx[FR_COUNT];
+                for (uint32_t i = 0; i < FR_COUNT; ++i) ridx[i] = i;
+                std::sort(ridx, ridx + FR_COUNT, [&](uint32_t a, uint32_t b) {
+                    return flushReasonByLayout_[li][a] > flushReasonByLayout_[li][b];
+                });
+                int shown = 0;
+                for (uint32_t i = 0; i < FR_COUNT && shown < 2; ++i) {
+                    uint32_t r = ridx[i];
+                    if (flushReasonByLayout_[li][r] == 0) break;
+                    n = std::snprintf(layHist + lp, sizeof(layHist) - lp,
+                                      "%s%s=%u", shown ? "," : "",
+                                      names[r], flushReasonByLayout_[li][r]);
+                    if (n <= 0 || lp + n >= int(sizeof(layHist))) break;
+                    lp += n; ++shown;
+                }
+                n = std::snprintf(layHist + lp, sizeof(layHist) - lp, ")");
+                if (n <= 0 || lp + n >= int(sizeof(layHist))) break;
+                lp += n;
+            }
+        }
+        layHist[lp] = '\0';
+
+        std::fprintf(stderr,
+            "[Vk Batch] f%u inDraws=%u flushes=%u vertsOut=%u merge=%.2fx |%s | byL%s\n",
+            unsigned(frameCounter_),
+            statsInputDraws_, statsBatchFlush_, statsVertsOut_, ratio, hist, layHist);
+        // GUI-subsystem builds don't show stderr, so also tee to a file
+        // next to the executable. Lazy-open on first hit; line-buffered.
+        static FILE* s_batchLog = nullptr;
+        if (!s_batchLog) {
+            s_batchLog = std::fopen("vk_batch.log", "w");
+        }
+        if (s_batchLog) {
+            std::fprintf(s_batchLog,
+                "[Vk Batch] f%u inDraws=%u flushes=%u vertsOut=%u merge=%.2fx |%s | byL%s\n",
+                unsigned(frameCounter_),
+                statsInputDraws_, statsBatchFlush_, statsVertsOut_, ratio, hist, layHist);
+            std::fflush(s_batchLog);
+        }
+    }
 }
 
 void RendererVulkan::Present() {
@@ -581,6 +737,10 @@ void RendererVulkan::Present() {
 }
 
 void RendererVulkan::Clear(D3DCOLOR color, i32 clearColor, i32 clearDepth) {
+    // Phase 6 batcher: pending sprites must reach the cmd buffer BEFORE the
+    // clear, otherwise vkCmdClearAttachments would obscure their work.
+    if (pendingBatch_.active) bumpFlushReason(FR_NonDraw_Clear);
+    FlushBatch();
     // Only remember color when caller actually wants color cleared. Storing it
     // unconditionally bleeds the value into next frame's render-pass LOAD_OP_CLEAR
     // (which ignores scissor and paints the whole attachment). GameManager.cpp:229
@@ -657,6 +817,10 @@ void RendererVulkan::SetViewport(i32 x, i32 y, i32 w, i32 h, f32 minZ, f32 maxZ)
     viewportX = x; viewportY = y; viewportW = w; viewportH = h;
     viewportMinZ_ = minZ; viewportMaxZ_ = maxZ;
     if (frameStarted_ && inRenderPass_) {
+        // Phase 6 batcher: changing viewport breaks the in-flight batch's
+        // 2D scissor/viewport snapshot, so flush before issuing vkCmdSet*.
+        if (pendingBatch_.active) bumpFlushReason(FR_NonDraw_SetViewport);
+        FlushBatch();
         // Apply same letterbox mapping as BeginFrame.
         VkExtent2D ext = renderTarget_->extent();
         const float gameW = float(screenWidth  > 0 ? screenWidth  : int(ext.width));
@@ -744,100 +908,349 @@ void RendererVulkan::recomputeMvp() {
 }
 
 // --- Draw helpers ---
-bool RendererVulkan::drawCommon(int vertexLayoutEnum,
-                                int topologyEnum,
-                                bool hasTexture,
-                                bool depthTest,
-                                const void* verts,
-                                int count,
-                                uint32_t vertexStride) {
-    if (!initialized_ || !frameStarted_ || !inRenderPass_ || count <= 0) return false;
-    if (mvpDirty_) recomputeMvp();
+//
+// Phase 6 sprite batcher: drawCommon now enqueues into pendingBatch_; the
+// expensive AllocVerts + Bind* + Push + vkCmdDraw work happens once per batch
+// in FlushBatch(). State-equality check decides whether the new draw can join
+// the in-flight batch or must start a new one. All non-draw GPU commands
+// (Clear, SetViewport, render-pass close) call FlushBatch() first to preserve
+// submission order semantics.
+
+bool RendererVulkan::batchStateMatches(int vertexLayoutEnum,
+                                       bool hasTexture,
+                                       bool depthTest) const {
+    const PendingBatch& b = pendingBatch_;
+    if (!b.active)                                            { lastMismatchReason_ = FR_FirstDraw;                return false; }
+    if (b.vertexLayoutEnum  != vertexLayoutEnum)              { lastMismatchReason_ = FR_VertexLayout;             return false; }
+    if (b.hasTexture        != hasTexture)                    { lastMismatchReason_ = FR_HasTexture;               return false; }
+    if (b.depthTest         != depthTest)                     { lastMismatchReason_ = FR_DepthTest;                return false; }
+    if (b.blendMode         != currentBlendMode)              { lastMismatchReason_ = FR_BlendMode;                return false; }
+    if (b.colorOp           != currentColorOp)                { lastMismatchReason_ = FR_ColorOp;                  return false; }
+    if (b.zWriteDisable     != currentZWriteDisable)          { lastMismatchReason_ = FR_ZWriteDisable;            return false; }
+    if (b.depthFuncAlways   != depthFuncAlways_)              { lastMismatchReason_ = FR_DepthFuncAlways;          return false; }
+    if (b.texture           != currentTexture)                { lastMismatchReason_ = FR_Texture;                  return false; }
+    if (b.textureStageDiffuseOnly != textureStageDiffuseOnly_){ lastMismatchReason_ = FR_TextureStageDiffuseOnly;  return false; }
+    if (b.fogEnabled        != fogEnabled)                    { lastMismatchReason_ = FR_FogEnabled;               return false; }
+    if (b.fogColor != fogColor || b.fogStart != fogStart || b.fogEnd != fogEnd) { lastMismatchReason_ = FR_FogParams; return false; }
+    // textureFactor is only consumed by shaders for layouts 1 (Tex1Xyzrwh) and
+    // 4 (RenderVertexInfoXyz) — the others reference the field only to keep
+    // PushConstants layout parity. Skipping the comparison for unused layouts
+    // recovers the second-largest flush reason (~17.6% in Phase 6.1 telemetry).
+    const bool layoutUsesTexFactor = (b.vertexLayoutEnum == 1) || (b.vertexLayoutEnum == 4);
+    if (layoutUsesTexFactor && b.textureFactor != textureFactor)
+                                                              { lastMismatchReason_ = FR_TextureFactor;            return false; }
+    // MVP only matters for 3D-layout draws. The xyzrwh shaders (layouts 0/1/2)
+    // build gl_Position directly from the pre-transformed screen-space input
+    // and never read pc.mvp, so skipping the comparison there is visually
+    // identity — and recovers the dominant flush reason in the histogram
+    // (Phase 6.1 telemetry: ~79% of flushes were Mvp differences for sprites
+    // that didn't even consume the matrix).
+    const bool layoutUsesMvp = (b.vertexLayoutEnum == 3) || (b.vertexLayoutEnum == 4);
+    if (layoutUsesMvp && std::memcmp(b.mvp, mvpMat_, sizeof(b.mvp)) != 0)
+                                                              { lastMismatchReason_ = FR_Mvp;                      return false; }
+    if (b.viewportX != viewportX || b.viewportY != viewportY ||
+        b.viewportW != viewportW || b.viewportH != viewportH ||
+        b.viewportMinZ != viewportMinZ_ || b.viewportMaxZ != viewportMaxZ_)     { lastMismatchReason_ = FR_Viewport; return false; }
+    if (b.screenWidth != screenWidth || b.screenHeight != screenHeight)         { lastMismatchReason_ = FR_ScreenSize; return false; }
+    return true;
+}
+
+void RendererVulkan::beginPendingBatch(int vertexLayoutEnum,
+                                       bool hasTexture,
+                                       bool depthTest,
+                                       uint32_t vertexStride) {
+    PendingBatch& b = pendingBatch_;
+    b.active           = true;
+    b.vertexLayoutEnum = vertexLayoutEnum;
+    b.hasTexture       = hasTexture;
+    b.depthTest        = depthTest;
+    b.blendMode        = currentBlendMode;
+    b.colorOp          = currentColorOp;
+    b.zWriteDisable    = currentZWriteDisable;
+    b.depthFuncAlways  = depthFuncAlways_;
+    b.texture          = currentTexture;
+    b.textureStageDiffuseOnly = textureStageDiffuseOnly_;
+    b.textureFactor    = textureFactor;
+    b.fogEnabled       = fogEnabled;
+    b.fogColor         = fogColor;
+    b.fogStart         = fogStart;
+    b.fogEnd           = fogEnd;
+    std::memcpy(b.mvp, mvpMat_, sizeof(b.mvp));
+    b.viewportX = viewportX; b.viewportY = viewportY;
+    b.viewportW = viewportW; b.viewportH = viewportH;
+    b.viewportMinZ = viewportMinZ_; b.viewportMaxZ = viewportMaxZ_;
+    b.screenWidth = screenWidth; b.screenHeight = screenHeight;
+    b.vertexStride     = vertexStride;
+    b.vertCount        = 0;
+    b.mergedDraws      = 0;
+    b.verts.clear();
+}
+
+void RendererVulkan::appendAsTriangleList(int topologyEnum,
+                                          const void* verts,
+                                          int count,
+                                          uint32_t vertexStride) {
+    if (count < 3) return;
+    PendingBatch& b = pendingBatch_;
+    const uint8_t* src = static_cast<const uint8_t*>(verts);
+
+    // Topology 0 = STRIP, 1 = FAN, 2 = LIST.
+    auto pushVert = [&](int idx) {
+        const size_t off = b.verts.size();
+        b.verts.resize(off + vertexStride);
+        std::memcpy(b.verts.data() + off, src + size_t(idx) * vertexStride, vertexStride);
+        ++b.vertCount;
+    };
+    const int triCount = count - 2;
+    if (topologyEnum == 0) {                 // TRIANGLE_STRIP
+        for (int i = 0; i < triCount; ++i) {
+            if ((i & 1) == 0) {
+                pushVert(i); pushVert(i + 1); pushVert(i + 2);
+            } else {
+                pushVert(i + 1); pushVert(i); pushVert(i + 2);
+            }
+        }
+    } else if (topologyEnum == 1) {          // TRIANGLE_FAN
+        for (int i = 0; i < triCount; ++i) {
+            pushVert(0); pushVert(i + 1); pushVert(i + 2);
+        }
+    } else {                                  // TRIANGLE_LIST passthrough
+        const int triCountList = (count / 3) * 3;
+        for (int i = 0; i < triCountList; ++i) pushVert(i);
+    }
+}
+
+void RendererVulkan::appendAsTriangleListPretransform3(int topologyEnum,
+                                                       const void* verts,
+                                                       int count) {
+    if (count < 3) return;
+    PendingBatch& b = pendingBatch_;
+    // Input  layout 3 (Tex1DiffuseXyz):       vec3 pos + u32 color + vec2 uv = 24 B
+    // Output layout 5 (Tex1DiffuseXyzClip):   vec4 clip + u32 color + vec2 uv = 28 B
+    constexpr size_t kInStride  = 24;
+    constexpr size_t kOutStride = 28;
+    const uint8_t* src = static_cast<const uint8_t*>(verts);
+    const float* M = mvpMat_;
+
+    // Pre-transform input verts into a small scratch buffer so the strip/fan
+    // expansion that follows can index them by primitive vertex. Reuse a
+    // thread-local heap to avoid per-call allocation churn.
+    static thread_local std::vector<uint8_t> xformed;
+    xformed.resize(size_t(count) * kOutStride);
+    for (int i = 0; i < count; ++i) {
+        const uint8_t* sv = src + size_t(i) * kInStride;
+        float px, py, pz;
+        std::memcpy(&px, sv + 0, 4);
+        std::memcpy(&py, sv + 4, 4);
+        std::memcpy(&pz, sv + 8, 4);
+        // mvpMat_ is the C++ row-major product (world*view*proj). The Vulkan
+        // shaders memcpy the same bytes into a GLSL `mat4 mvp` (column-major
+        // by default) and compute `pc.mvp * vec4(in_pos, 1.0)`. With those
+        // bytes reinterpreted as columns, the shader expression becomes
+        // mathematically equivalent to (v_row * M_rowmajor), i.e.
+        //   clip[i] = sum_j(M[j*4+i] * v[j])
+        // We replicate exactly that here so visual output is bit-identical
+        // to the per-draw layout-3 path. Y-flip is applied by the shader,
+        // not here.
+        const float clipX = M[0]*px + M[4]*py + M[ 8]*pz + M[12];
+        const float clipY = M[1]*px + M[5]*py + M[ 9]*pz + M[13];
+        const float clipZ = M[2]*px + M[6]*py + M[10]*pz + M[14];
+        const float clipW = M[3]*px + M[7]*py + M[11]*pz + M[15];
+        uint8_t* dv = xformed.data() + size_t(i) * kOutStride;
+        std::memcpy(dv +  0, &clipX, 4);
+        std::memcpy(dv +  4, &clipY, 4);
+        std::memcpy(dv +  8, &clipZ, 4);
+        std::memcpy(dv + 12, &clipW, 4);
+        std::memcpy(dv + 16, sv + 12, 4);  // diffuse (B8G8R8A8 D3DCOLOR)
+        std::memcpy(dv + 20, sv + 16, 8);  // uv (vec2)
+    }
+
+    auto pushVert = [&](int idx) {
+        const size_t off = b.verts.size();
+        b.verts.resize(off + kOutStride);
+        std::memcpy(b.verts.data() + off, xformed.data() + size_t(idx) * kOutStride, kOutStride);
+        ++b.vertCount;
+    };
+    const int triCount = count - 2;
+    if (topologyEnum == 0) {                 // TRIANGLE_STRIP
+        for (int i = 0; i < triCount; ++i) {
+            if ((i & 1) == 0) { pushVert(i);     pushVert(i + 1); pushVert(i + 2); }
+            else              { pushVert(i + 1); pushVert(i);     pushVert(i + 2); }
+        }
+    } else if (topologyEnum == 1) {          // TRIANGLE_FAN
+        for (int i = 0; i < triCount; ++i) {
+            pushVert(0); pushVert(i + 1); pushVert(i + 2);
+        }
+    } else {                                  // TRIANGLE_LIST passthrough
+        const int triCountList = (count / 3) * 3;
+        for (int i = 0; i < triCountList; ++i) pushVert(i);
+    }
+}
+
+void RendererVulkan::appendAsTriangleListPretransform4(int topologyEnum,
+                                                       const void* verts,
+                                                       int count) {
+    if (count < 3) return;
+    PendingBatch& b = pendingBatch_;
+    // Input  layout 4 (RenderVertexInfoXyz):  vec3 pos + vec2 uv          = 20 B
+    // Output layout 5 (Tex1DiffuseXyzClip):   vec4 clip + u32 BGRA + uv   = 28 B
+    // The original layout-4 shader writes v_color = pc.textureFactor for
+    // every vertex; we fold that into per-vertex color so the layout-5 PSO
+    // (which reads v_color from input) reproduces it bit-identically. The
+    // CURRENT textureFactor state is captured per call so two adjacent
+    // calls with different textureFactor coexist in one batch.
+    constexpr size_t kInStride  = 20;
+    constexpr size_t kOutStride = 28;
+    const uint8_t* src = static_cast<const uint8_t*>(verts);
+    const float*   M   = mvpMat_;
+    const uint32_t color = textureFactor;  // D3DCOLOR is little-endian 0xAARRGGBB
+                                           // whose memory bytes B,G,R,A line up
+                                           // with the Vulkan B8G8R8A8_UNORM
+                                           // input on layout 5.
+
+    static thread_local std::vector<uint8_t> xformed;
+    xformed.resize(size_t(count) * kOutStride);
+    for (int i = 0; i < count; ++i) {
+        const uint8_t* sv = src + size_t(i) * kInStride;
+        float px, py, pz;
+        std::memcpy(&px, sv + 0, 4);
+        std::memcpy(&py, sv + 4, 4);
+        std::memcpy(&pz, sv + 8, 4);
+        // Same row-major math as Pretransform3 (see comment there for the
+        // bit-identical-to-shader argument).
+        const float clipX = M[0]*px + M[4]*py + M[ 8]*pz + M[12];
+        const float clipY = M[1]*px + M[5]*py + M[ 9]*pz + M[13];
+        const float clipZ = M[2]*px + M[6]*py + M[10]*pz + M[14];
+        const float clipW = M[3]*px + M[7]*py + M[11]*pz + M[15];
+        uint8_t* dv = xformed.data() + size_t(i) * kOutStride;
+        std::memcpy(dv +  0, &clipX, 4);
+        std::memcpy(dv +  4, &clipY, 4);
+        std::memcpy(dv +  8, &clipZ, 4);
+        std::memcpy(dv + 12, &clipW, 4);
+        std::memcpy(dv + 16, &color, 4);   // textureFactor folded in here
+        std::memcpy(dv + 20, sv + 12, 8);  // uv (vec2) — note uv starts at
+                                            // byte 12 in RenderVertexInfo
+                                            // (vec3 pos = 12B, no padding).
+    }
+
+    auto pushVert = [&](int idx) {
+        const size_t off = b.verts.size();
+        b.verts.resize(off + kOutStride);
+        std::memcpy(b.verts.data() + off, xformed.data() + size_t(idx) * kOutStride, kOutStride);
+        ++b.vertCount;
+    };
+    const int triCount = count - 2;
+    if (topologyEnum == 0) {                 // TRIANGLE_STRIP
+        for (int i = 0; i < triCount; ++i) {
+            if ((i & 1) == 0) { pushVert(i);     pushVert(i + 1); pushVert(i + 2); }
+            else              { pushVert(i + 1); pushVert(i);     pushVert(i + 2); }
+        }
+    } else if (topologyEnum == 1) {          // TRIANGLE_FAN
+        for (int i = 0; i < triCount; ++i) {
+            pushVert(0); pushVert(i + 1); pushVert(i + 2);
+        }
+    } else {                                  // TRIANGLE_LIST passthrough
+        const int triCountList = (count / 3) * 3;
+        for (int i = 0; i < triCountList; ++i) pushVert(i);
+    }
+}
+
+void RendererVulkan::FlushBatch() {
+    PendingBatch& b = pendingBatch_;
+    if (!b.active || b.vertCount <= 0) {
+        // Nothing pending; clear flag defensively (e.g. after a frame reset).
+        b.active = false;
+        b.verts.clear();
+        b.vertCount = 0;
+        return;
+    }
+    if (!initialized_ || !frameStarted_ || !inRenderPass_) {
+        // Render pass closed under us; abandon the batch silently. Should
+        // only happen if the caller misused the API (e.g. submitted draws
+        // outside BeginFrame/EndFrame).
+        b.active = false;
+        b.verts.clear();
+        b.vertCount = 0;
+        return;
+    }
 
     auto& frame = frames_->current();
 
-    // 1. Build L2 key.
+    // 1. Build L2 key — always TRIANGLE_LIST for batched output.
     vk::VkPipelineKey key{};
-    key.vertexLayout      = static_cast<vk::VertexLayout>(vertexLayoutEnum);
-    key.topology          = static_cast<vk::Topology>(topologyEnum);
-    key.blendMode         = (currentBlendMode == 0) ? vk::BlendMode::Alpha : vk::BlendMode::Add;
-    key.colorOp           = (currentColorOp   == 0) ? vk::ColorOp::Modulate : vk::ColorOp::Add;
-    key.depthFunc         = depthFuncAlways_ ? vk::DepthFunc::Always : vk::DepthFunc::LessEqual;
-    key.hasTexture        = hasTexture ? 1 : 0;
-    key.depthTestEnable   = depthTest  ? 1 : 0;
-    key.depthWriteEnable  = currentZWriteDisable ? 0 : 1;
+    key.vertexLayout      = static_cast<vk::VertexLayout>(b.vertexLayoutEnum);
+    key.topology          = vk::Topology::TriangleList;
+    key.blendMode         = (b.blendMode == 0) ? vk::BlendMode::Alpha : vk::BlendMode::Add;
+    key.colorOp           = (b.colorOp   == 0) ? vk::ColorOp::Modulate : vk::ColorOp::Add;
+    key.depthFunc         = b.depthFuncAlways ? vk::DepthFunc::Always : vk::DepthFunc::LessEqual;
+    key.hasTexture        = b.hasTexture ? 1 : 0;
+    key.depthTestEnable   = b.depthTest  ? 1 : 0;
+    key.depthWriteEnable  = b.zWriteDisable ? 0 : 1;
 
     VkPipeline pipeline = pipelineCache_->GetOrCreate(*ctx_, key);
-    if (pipeline == VK_NULL_HANDLE) return false;
+    if (pipeline == VK_NULL_HANDLE) {
+        b.active = false; b.verts.clear(); b.vertCount = 0;
+        return;
+    }
 
-    // 2. Upload verts.
+    // 2. Upload all batched verts in one shot.
     void*        mapped = nullptr;
     VkBuffer     vbBuf  = VK_NULL_HANDLE;
     VkDeviceSize vbOff  = 0;
-    VkDeviceSize bytes  = VkDeviceSize(vertexStride) * VkDeviceSize(count);
-    if (!uploadHeap_->AllocVerts(bytes, &mapped, &vbBuf, &vbOff)) return false;
-    std::memcpy(mapped, verts, bytes);
+    VkDeviceSize bytes  = VkDeviceSize(b.vertexStride) * VkDeviceSize(b.vertCount);
+    if (!uploadHeap_->AllocVerts(bytes, &mapped, &vbBuf, &vbOff)) {
+        b.active = false; b.verts.clear(); b.vertCount = 0;
+        return;
+    }
+    std::memcpy(mapped, b.verts.data(), bytes);
 
     // 3. Bind pipeline + (optional) descriptor set.
     vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    if (hasTexture) {
-        // SelectDiffuse stage forces white sample so vertex diffuse passes through
-        // unmodulated; do NOT consult currentTexture (kept intact for AnmManager cache).
-        // Sampler choice mirrors RendererGL ApplySamplerFor2D / ApplySamplerFor3D:
-        // 2D layouts (XYZRHW: 0/1/2) use NEAREST; 3D layouts (XYZ: 3/4) use LINEAR.
-        const bool useLinearSampler = (vertexLayoutEnum == 3 || vertexLayoutEnum == 4);
+    if (b.hasTexture) {
+        // Linear filtering for the 3D scene path (layouts 3, 4) and the
+        // pretransformed mirror of layout 3 (layout 5).
+        const bool useLinearSampler = (b.vertexLayoutEnum == 3 ||
+                                       b.vertexLayoutEnum == 4 ||
+                                       b.vertexLayoutEnum == 5);
         VkDescriptorSet ds = VK_NULL_HANDLE;
-        if (!textureStageDiffuseOnly_ && textureMgr_) {
-            ds = textureMgr_->GetDescriptorSet(currentTexture, useLinearSampler);
+        if (!b.textureStageDiffuseOnly && textureMgr_) {
+            ds = textureMgr_->GetDescriptorSet(b.texture, useLinearSampler);
         }
         if (ds == VK_NULL_HANDLE) ds = defaultTex_->descriptorSet();
         vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayoutTex_, 0, 1, &ds, 0, nullptr);
     }
 
-    // 4. Push constants (invScreen + mvp + fog).
+    // 4. Push constants.
     PushConstants pc{};
-    pc.invScreen[0] = (screenWidth  > 0) ? 1.0f / float(screenWidth)  : 0.0f;
-    pc.invScreen[1] = (screenHeight > 0) ? 1.0f / float(screenHeight) : 0.0f;
-    std::memcpy(pc.mvp, mvpMat_, sizeof(pc.mvp));
-    // Fog only applies to 3D draws (depthTest=true); 2D screen-space draws disable it
-    // unconditionally even if SetFog(1) was called earlier (matches GL discipline:
-    // TH06 only invokes SetFog before stage 3D background, and fog has no meaningful
-    // viewZ for pre-projected xyzrwh verts).
-    const bool fogOn = depthTest && (fogEnabled != 0);
-    pc.fogColor[0]  = fogOn ? D3DCOLOR_R(fogColor) / 255.0f : 0.0f;
-    pc.fogColor[1]  = fogOn ? D3DCOLOR_G(fogColor) / 255.0f : 0.0f;
-    pc.fogColor[2]  = fogOn ? D3DCOLOR_B(fogColor) / 255.0f : 0.0f;
-    pc.fogColor[3]  = fogOn ? D3DCOLOR_A(fogColor) / 255.0f : 0.0f;
-    pc.fogParams[0] = fogOn ? fogStart : 0.0f;
-    pc.fogParams[1] = fogOn ? fogEnd   : 1.0f;
-    pc.fogParams[2] = fogOn ? 1.0f     : 0.0f;
+    pc.invScreen[0] = (b.screenWidth  > 0) ? 1.0f / float(b.screenWidth)  : 0.0f;
+    pc.invScreen[1] = (b.screenHeight > 0) ? 1.0f / float(b.screenHeight) : 0.0f;
+    std::memcpy(pc.mvp, b.mvp, sizeof(pc.mvp));
+    const bool fogOn = b.depthTest && (b.fogEnabled != 0);
+    pc.fogColor[0]  = fogOn ? D3DCOLOR_R(b.fogColor) / 255.0f : 0.0f;
+    pc.fogColor[1]  = fogOn ? D3DCOLOR_G(b.fogColor) / 255.0f : 0.0f;
+    pc.fogColor[2]  = fogOn ? D3DCOLOR_B(b.fogColor) / 255.0f : 0.0f;
+    pc.fogColor[3]  = fogOn ? D3DCOLOR_A(b.fogColor) / 255.0f : 0.0f;
+    pc.fogParams[0] = fogOn ? b.fogStart : 0.0f;
+    pc.fogParams[1] = fogOn ? b.fogEnd   : 1.0f;
+    pc.fogParams[2] = fogOn ? 1.0f       : 0.0f;
     pc.fogParams[3] = 0.0f;
-    // Fix 19: textureFactor for layouts without vertex color (Tex1Xyzrwh / RenderVertexInfoXyz).
-    // GL's DrawTriangleStripTex / DrawVertexBuffer3D call glColor4ub(textureFactor) so the .a
-    // is the only source of transparency for those draws. Vulkan vertex shaders previously
-    // hardcoded vec4(1.0), making everything opaque.
-    pc.textureFactor[0] = D3DCOLOR_R(textureFactor) / 255.0f;
-    pc.textureFactor[1] = D3DCOLOR_G(textureFactor) / 255.0f;
-    pc.textureFactor[2] = D3DCOLOR_B(textureFactor) / 255.0f;
-    pc.textureFactor[3] = D3DCOLOR_A(textureFactor) / 255.0f;
-    VkPipelineLayout layout = hasTexture ? pipelineLayoutTex_ : pipelineLayoutNoTex_;
+    pc.textureFactor[0] = D3DCOLOR_R(b.textureFactor) / 255.0f;
+    pc.textureFactor[1] = D3DCOLOR_G(b.textureFactor) / 255.0f;
+    pc.textureFactor[2] = D3DCOLOR_B(b.textureFactor) / 255.0f;
+    pc.textureFactor[3] = D3DCOLOR_A(b.textureFactor) / 255.0f;
+    VkPipelineLayout layout = b.hasTexture ? pipelineLayoutTex_ : pipelineLayoutNoTex_;
     vkCmdPushConstants(frame.cmd, layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(PushConstants), &pc);
 
-    // 5. For 2D (XYZRHW) layouts: D3D8 bypasses viewport transform on pre-projected
-    //    verts but clips to viewport rect. GLES emulates this by force-setting
-    //    glViewport to fullscreen + keeping scissor at viewport rect (commit 364a9ce).
-    //    Vulkan 2D shader assumes fullscreen viewport (pos * invScreen * 2 - 1), so
-    //    when game's logical viewport is the playfield (32,16,384,448), 2D draws come
-    //    out scaled/offset wrong. Force viewport=letterbox-fullscreen + scissor=current
-    //    viewport rect for 2D, then restore for any subsequent 3D.
-    const bool is2DLayout = (vertexLayoutEnum == 0 || vertexLayoutEnum == 1 || vertexLayoutEnum == 2);
-    if (is2DLayout && viewportW > 0 && viewportH > 0) {
+    // 5. 2D viewport / scissor handling — identical math to the original
+    //    drawCommon path, just done once per batch.
+    const bool is2DLayout = (b.vertexLayoutEnum == 0 || b.vertexLayoutEnum == 1 || b.vertexLayoutEnum == 2);
+    if (is2DLayout && b.viewportW > 0 && b.viewportH > 0) {
         VkExtent2D extL = renderTarget_->extent();
-        const float gW = float(screenWidth  > 0 ? screenWidth  : int(extL.width));
-        const float gH = float(screenHeight > 0 ? screenHeight : int(extL.height));
+        const float gW = float(b.screenWidth  > 0 ? b.screenWidth  : int(extL.width));
+        const float gH = float(b.screenHeight > 0 ? b.screenHeight : int(extL.height));
         const float sc = std::min(float(extL.width) / gW, float(extL.height) / gH);
         const float sW = gW * sc;
         const float sH = gH * sc;
@@ -845,12 +1258,11 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
         const float oY = (float(extL.height) - sH) * 0.5f;
         VkViewport vp2 = {};
         vp2.x = oX; vp2.y = oY; vp2.width = sW; vp2.height = sH;
-        vp2.minDepth = viewportMinZ_; vp2.maxDepth = viewportMaxZ_;
-        // Fix 18: pixel-aligned scissor (round nearest end-points).
-        const float gx0 = oX + float(viewportX) * sc;
-        const float gy0 = oY + float(viewportY) * sc;
-        const float gx1 = gx0 + float(viewportW) * sc;
-        const float gy1 = gy0 + float(viewportH) * sc;
+        vp2.minDepth = b.viewportMinZ; vp2.maxDepth = b.viewportMaxZ;
+        const float gx0 = oX + float(b.viewportX) * sc;
+        const float gy0 = oY + float(b.viewportY) * sc;
+        const float gx1 = gx0 + float(b.viewportW) * sc;
+        const float gy1 = gy0 + float(b.viewportH) * sc;
         const int32_t ix0 = int32_t(std::lround(gx0));
         const int32_t iy0 = int32_t(std::lround(gy0));
         const int32_t ix1 = int32_t(std::lround(gx1));
@@ -864,29 +1276,28 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
         vkCmdSetScissor (frame.cmd, 0, 1, &sc2);
     }
 
-    // 6. Bind vertex buffer + draw.
+    // 6. Bind vertex buffer + draw the entire batch in one call.
     vkCmdBindVertexBuffers(frame.cmd, 0, 1, &vbBuf, &vbOff);
-    vkCmdDraw(frame.cmd, uint32_t(count), 1, 0, 0);
+    vkCmdDraw(frame.cmd, uint32_t(b.vertCount), 1, 0, 0);
 
-    // 7. Restore game-logical viewport for any subsequent 3D draws.
-    if (is2DLayout && viewportW > 0 && viewportH > 0) {
+    // 7. Restore game-logical viewport for any subsequent 3D draws (matches
+    //    the original drawCommon's 2D-restore step).
+    if (is2DLayout && b.viewportW > 0 && b.viewportH > 0) {
         VkExtent2D extR = renderTarget_->extent();
-        const float gW = float(screenWidth  > 0 ? screenWidth  : int(extR.width));
-        const float gH = float(screenHeight > 0 ? screenHeight : int(extR.height));
+        const float gW = float(b.screenWidth  > 0 ? b.screenWidth  : int(extR.width));
+        const float gH = float(b.screenHeight > 0 ? b.screenHeight : int(extR.height));
         const float sc = std::min(float(extR.width) / gW, float(extR.height) / gH);
         const float sW = gW * sc;
         const float sH = gH * sc;
         const float oX = (float(extR.width)  - sW) * 0.5f;
         const float oY = (float(extR.height) - sH) * 0.5f;
         VkViewport vp3 = {};
-        vp3.x = oX + float(viewportX) * sc;
-        vp3.y = oY + float(viewportY) * sc;
-        vp3.width  = float(viewportW) * sc;
-        vp3.height = float(viewportH) * sc;
-        vp3.minDepth = viewportMinZ_; vp3.maxDepth = viewportMaxZ_;
+        vp3.x = oX + float(b.viewportX) * sc;
+        vp3.y = oY + float(b.viewportY) * sc;
+        vp3.width  = float(b.viewportW) * sc;
+        vp3.height = float(b.viewportH) * sc;
+        vp3.minDepth = b.viewportMinZ; vp3.maxDepth = b.viewportMaxZ;
         vkCmdSetViewport(frame.cmd, 0, 1, &vp3);
-        // Scissor restored to game viewport rect (NOT full letterbox) — D3D8/GL
-        // semantics: scissor follows viewport. Fix 18: pixel-aligned via lround.
         const int32_t rx0 = int32_t(std::lround(vp3.x));
         const int32_t ry0 = int32_t(std::lround(vp3.y));
         const int32_t rx1 = int32_t(std::lround(vp3.x + vp3.width));
@@ -899,76 +1310,69 @@ bool RendererVulkan::drawCommon(int vertexLayoutEnum,
         vkCmdSetScissor(frame.cmd, 0, 1, &sc3);
     }
 
-    // ---- Diagnostic: dump textured draws across early frames + all 3D-path draws ----
-    {
-        static int s_diagDrawCount  = 0;
-        static int s_diagPrevFrame  = -1;
-        static int s_diagL3Count    = 0;
-        static int s_diagL4Count    = 0;
-        const int  kMaxPerFrame  = 6;
-        const int  kMaxFrames    = 6;
-        const int  kMax3DDumps   = 12;
-        const bool isNewFrame    = s_diagPrevFrame != int(frameCounter_);
-        const bool wantThisDraw  = hasTexture && (
-            (vertexLayoutEnum == 3 && s_diagL3Count < kMax3DDumps) ||
-            (vertexLayoutEnum == 4 && s_diagL4Count < kMax3DDumps) ||
-            (int(frameCounter_) < kMaxFrames && (isNewFrame || s_diagDrawCount < kMaxPerFrame)));
-        if (wantThisDraw) {
-            if (isNewFrame) {
-                s_diagPrevFrame  = int(frameCounter_);
-                s_diagDrawCount  = 0;
-                std::fprintf(stderr,
-                    "[Vk DIAG] ===== frame=%d =====\n", int(frameCounter_));
-            }
-            if (vertexLayoutEnum == 3) ++s_diagL3Count;
-            if (vertexLayoutEnum == 4) ++s_diagL4Count;
-            VkDescriptorSet diagDs = (hasTexture && textureMgr_) ? textureMgr_->GetDescriptorSet(currentTexture) : VK_NULL_HANDLE;
-            std::fprintf(stderr,
-                "[Vk DIAG] f%d d#%d L=%d t=%d dep=%d zw=%d bl=%d co=%d "
-                "tex=%u ds=0x%llx s=%u n=%d invScr=%.5f,%.5f sc=%dx%d\n",
-                int(frameCounter_), int(s_diagDrawCount), int(vertexLayoutEnum),
-                int(topologyEnum), int(depthTest ? 1 : 0), int(currentZWriteDisable ? 0 : 1),
-                int(key.blendMode), int(key.colorOp),
-                unsigned(currentTexture),
-                static_cast<unsigned long long>((uint64_t)diagDs),
-                unsigned(vertexStride), int(count),
-                double(pc.invScreen[0]), double(pc.invScreen[1]),
-                int(screenWidth), int(screenHeight));
-            const uint8_t* p = static_cast<const uint8_t*>(verts);
-            const int dumpVerts = std::min(count, 4);
-            for (int vi = 0; vi < dumpVerts; ++vi) {
-                const uint8_t* pv = p + vi * vertexStride;
-                auto fAtV = [&](uint32_t off) { float v; std::memcpy(&v, pv + off, 4); return v; };
-                auto u32AtV = [&](uint32_t off) { uint32_t v; std::memcpy(&v, pv + off, 4); return v; };
-                switch (vertexLayoutEnum) {
-                case 1:
-                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.4f,%.4f) uv=(%.4f,%.4f)\n",
-                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)), double(fAtV(12)),
-                        double(fAtV(16)), double(fAtV(20))); break;
-                case 2:
-                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.4f,%.4f) diff=0x%08x uv=(%.4f,%.4f)\n",
-                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)), double(fAtV(12)),
-                        unsigned(u32AtV(16)), double(fAtV(20)), double(fAtV(24))); break;
-                case 3:
-                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.2f) diff=0x%08x uv=(%.4f,%.4f)\n",
-                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)),
-                        unsigned(u32AtV(12)), double(fAtV(16)), double(fAtV(20))); break;
-                case 4:
-                    std::fprintf(stderr, "[Vk DIAG]   v%d pos=(%.2f,%.2f,%.2f) uv=(%.4f,%.4f)\n",
-                        vi, double(fAtV(0)), double(fAtV(4)), double(fAtV(8)),
-                        double(fAtV(12)), double(fAtV(16))); break;
-                }
-            }
-            ++s_diagDrawCount;
-        }
+    statsVertsOut_   += uint32_t(b.vertCount);
+    ++statsBatchFlush_;
+
+    // Reset for next batch.
+    b.active   = false;
+    b.verts.clear();
+    b.vertCount = 0;
+    b.mergedDraws = 0;
+}
+
+bool RendererVulkan::drawCommon(int vertexLayoutEnum,
+                                int topologyEnum,
+                                bool hasTexture,
+                                bool depthTest,
+                                const void* verts,
+                                int count,
+                                uint32_t vertexStride) {
+    if (!initialized_ || !frameStarted_ || !inRenderPass_ || count <= 0) return false;
+    if (mvpDirty_) recomputeMvp();
+
+    ++statsInputDraws_;
+
+    // Phase 6.2/6.3: layouts 3 (Tex1DiffuseXyz, sprite) and 4
+    // (RenderVertexInfoXyz, 3D scene mesh) get remapped to layout 5
+    // (Tex1DiffuseXyzClip) with mvp pre-multiplied into pos on the CPU.
+    // Layout 4 additionally folds textureFactor into per-vertex color.
+    // The layout-5 shader ignores pc.mvp AND reads its color from input,
+    // so adjacent draws with different SetWorldTransform / SetTextureFactor
+    // values share one batch. Phase 6.2 telemetry attributed L4 = 97.3% of
+    // all flushes (Mvp 82% + TexFactor 16%); this redirect kills both.
+    const bool useCpuMvp3 = (vertexLayoutEnum == 3);
+    const bool useCpuMvp4 = (vertexLayoutEnum == 4);
+    const bool useCpuMvp  = useCpuMvp3 || useCpuMvp4;
+    const int  effLayout = useCpuMvp ? 5 : vertexLayoutEnum;
+    const uint32_t effStride = useCpuMvp ? uint32_t(28) /* vec4+u32+vec2 */
+                                          : vertexStride;
+
+    if (batchStateMatches(effLayout, hasTexture, depthTest)) {
+        if      (useCpuMvp3) appendAsTriangleListPretransform3(topologyEnum, verts, count);
+        else if (useCpuMvp4) appendAsTriangleListPretransform4(topologyEnum, verts, count);
+        else                  appendAsTriangleList(topologyEnum, verts, count, vertexStride);
+        ++pendingBatch_.mergedDraws;
+        return true;
     }
+    // Mismatch: bump histogram with the captured reason then flush+restart.
+    if (lastMismatchReason_ < FR_COUNT) {
+        bumpFlushReason(lastMismatchReason_);
+    }
+    if (pendingBatch_.active) FlushBatch();
+    beginPendingBatch(effLayout, hasTexture, depthTest, effStride);
+    if      (useCpuMvp3) appendAsTriangleListPretransform3(topologyEnum, verts, count);
+    else if (useCpuMvp4) appendAsTriangleListPretransform4(topologyEnum, verts, count);
+    else                  appendAsTriangleList(topologyEnum, verts, count, vertexStride);
     return true;
 }
 
 // --- Draw method dispatch ---
 // Vertex layout enum / topology enum integer values match VkPipelineKey enums:
-//   VertexLayout: 0=DiffuseXyzrwh, 1=Tex1Xyzrwh, 2=Tex1DiffuseXyzrwh, 3=Tex1DiffuseXyz, 4=RenderVertexInfoXyz
-//   Topology:     0=TriangleStrip, 1=TriangleFan
+//   VertexLayout: 0=DiffuseXyzrwh, 1=Tex1Xyzrwh, 2=Tex1DiffuseXyzrwh,
+//                 3=Tex1DiffuseXyz, 4=RenderVertexInfoXyz,
+//                 5=Tex1DiffuseXyzClip (batcher-internal CPU-pretransformed
+//                 mirror of layout 3; never used as a drawCommon input layout)
+//   Topology:     0=TriangleStrip, 1=TriangleFan, 2=TriangleList (batcher output only)
 void RendererVulkan::DrawTriangleStrip(const VertexDiffuseXyzrwh *verts, i32 count) {
     drawCommon(0, 0, /*hasTex*/false, /*depth*/false, verts, count, sizeof(VertexDiffuseXyzrwh));
 }

@@ -39,6 +39,10 @@ enum class VertexLayout : uint8_t {
     Tex1DiffuseXyzrwh    = 2,  // VertexTex1DiffuseXyzrwh:    vec4 pos + color + vec2 uv
     Tex1DiffuseXyz       = 3,  // VertexTex1DiffuseXyz:       vec3 pos + color + vec2 uv
     RenderVertexInfoXyz  = 4,  // RenderVertexInfo:           vec3 pos + vec2 uv
+    Tex1DiffuseXyzClip   = 5,  // CPU-pretransformed: vec4 clipPos + color + vec2 uv
+                               //   (sprite batcher only; bakes per-sprite world
+                               //    matrix into vertex pos so layout-3 sprites with
+                               //    differing SetWorldTransform can share one draw)
 
     Count
 };
@@ -46,6 +50,9 @@ enum class VertexLayout : uint8_t {
 enum class Topology : uint8_t {
     TriangleStrip = 0,
     TriangleFan   = 1,
+    TriangleList  = 2,  // Used by the same-PSO sprite batcher; one PSO
+                        //  per (vertexLayout, blend, colorOp, depth, hasTex)
+                        //  combination, shared across batched sprites.
 
     Count
 };
