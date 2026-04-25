@@ -10,6 +10,7 @@
 #include <SDL.h>
 #include <cmath>
 #include <cstring>
+#include "imgui.h"
 
 // Developer mode check (defined in thprac_th06.cpp).
 namespace THPrac { namespace TH06 {
@@ -484,6 +485,21 @@ void AndroidTouchInput::Update()
             g_DragSwipeAccumX = 0.0f;
             g_PendingButtons = 0;
             std::memset(g_PendingScancodes, 0, sizeof(g_PendingScancodes));
+
+            // Force-release any phantom ImGui mouse capture. During the stall,
+            // ImGui sees touch events as left-click; if a DOWN was delivered
+            // without a matching UP (or out of order), WantCaptureMouse stays
+            // sticky-true, and the SDL_FINGER* dispatch in GameWindow.cpp
+            // silently drops every subsequent finger event ("re-touch doesn't
+            // help, only a few pixels of motion sneak through" maps exactly
+            // to this). Clear ImGui's mouse-down state so capture releases.
+            if (ImGui::GetCurrentContext() != nullptr)
+            {
+                ImGuiIO &io = ImGui::GetIO();
+                for (int b = 0; b < IM_ARRAYSIZE(io.MouseDown); b++)
+                    io.MouseDown[b] = false;
+                io.MouseDownDuration[0] = io.MouseDownDuration[1] = io.MouseDownDuration[2] = -1.0f;
+            }
         }
         s_LastUpdateMs = now;
     }
