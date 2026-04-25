@@ -836,7 +836,11 @@ void Init()
     }
 
     // Set up alternate signal stack for stack overflow scenarios.
-    static char altStack[SIGSTKSZ + 16384];
+    // SIGSTKSZ is no longer a compile-time constant on glibc 2.34+ (it became
+    // sysconf(_SC_SIGSTKSZ)). Use a generous fixed buffer instead so the array
+    // size is constant on all libc versions.
+    static constexpr size_t kAltStackBytes = 64 * 1024;
+    static char altStack[kAltStackBytes];
     stack_t ss;
     ss.ss_sp = altStack;
     ss.ss_size = sizeof(altStack);

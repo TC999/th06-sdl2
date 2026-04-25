@@ -2,13 +2,34 @@
 // File: zwave.cpp - SDL2_mixer based replacement for DSUtil
 //-----------------------------------------------------------------------------
 #include "zwave.hpp"
+#include "AssetIO.hpp"
 #include "utils.hpp"
 #include <SDL.h>
 #include <SDL_mixer.h>
+#include <cstddef>
 #include <cstring>
 
 namespace th06
 {
+
+namespace
+{
+void EnsureOggBackendReady()
+{
+    static bool initialized = false;
+    if (initialized)
+    {
+        return;
+    }
+    initialized = true;
+    int requested = MIX_INIT_OGG;
+    int got = Mix_Init(requested);
+    if ((got & MIX_INIT_OGG) != MIX_INIT_OGG)
+    {
+        utils::DebugPrint2("Mix_Init(MIX_INIT_OGG) failed: %s\n", Mix_GetError());
+    }
+}
+} // namespace
 
 CSoundManager::CSoundManager()
 {
@@ -237,7 +258,96 @@ HRESULT CWaveFile::Open(char *strFileName, WAVEFORMATEX *pwfx, DWORD dwFlags)
 
     Close();
 
-    SDL_RWops *rw = SDL_RWFromFile(strFileName, "rb");
+    // Try a sibling .ogg companion first; OGG Vorbis is decoded by SDL_mixer
+    // (Mix_LoadWAV_RW) into the device's native PCM format (16-bit stereo at
+    // 44100 Hz here), which matches our WAV pipeline byte-for-byte. Loop
+    // points stored in .pos files (sample-pair offsets * 4) therefore stay
+    // valid against the decoded buffer. If no .ogg sibling exists or it
+    // fails to decode, we fall back to the original WAV path below.
+    {
+        char oggPath[512];
+        size_t nameLen = std::strlen(strFileName);
+        if (nameLen > 0 && nameLen + 1 <= sizeof(oggPath))
+        {
+            std::memcpy(oggPath, strFileName, nameLen + 1);
+            char *ext = std::strrchr(oggPath, '.');
+            if (ext != NULL && (size_t)(ext - oggPath) + 4 < sizeof(oggPath))
+            {
+                ext[1] = 'o';
+                ext[2] = 'g';
+                ext[3] = 'g';
+                ext[4] = '\0';
+
+                SDL_RWops *probe = AssetIO::OpenRW(oggPath);
+                if (probe != NULL)
+                {
+                    EnsureOggBackendReady();
+                    Mix_Chunk *chunk = Mix_LoadWAV_RW(probe, 1);
+                    if (chunk != NULL && chunk->abuf != NULL && chunk->alen > 0)
+                    {
+                        // Sanity-check the device format actually matches what
+                        // the .pos loop points assume (44100/16/2 → 4 B/frame).
+                        // If not, the loop math will desync — log loud and continue.
+                        int qFreq = 0; Uint16 qFmt = 0; int qCh = 0;
+                        int querySpec = Mix_QuerySpec(&qFreq, &qFmt, &qCh);
+                        utils::DebugPrint2(
+                            "[OGG] decoded %s: alen=%u, dev=%dHz/%dch/%dbit (querySpec=%d)\n",
+                            oggPath, (unsigned)chunk->alen, qFreq, qCh,
+                            (int)SDL_AUDIO_BITSIZE(qFmt), querySpec);
+
+                        m_fileData = new u8[chunk->alen];
+                        std::memcpy(m_fileData, chunk->abuf, chunk->alen);
+                        m_pcmData = m_fileData;
+                        m_pcmDataSize = chunk->alen;
+                        m_dwSize = chunk->alen;
+
+                        // Synthesize a WAVEFORMATEX matching the device's
+                        // open audio format so callers that inspect m_pwfx
+                        // see consistent metadata.
+                        if (querySpec == 0)
+                        {
+                            qFreq = 44100;
+                            qFmt = AUDIO_S16LSB;
+                            qCh = 2;
+                        }
+                        std::memset(&m_wfxStorage, 0, sizeof(m_wfxStorage));
+                        m_wfxStorage.wFormatTag = 1; // WAVE_FORMAT_PCM
+                        m_wfxStorage.nChannels = (u16)qCh;
+                        m_wfxStorage.nSamplesPerSec = (u32)qFreq;
+                        m_wfxStorage.wBitsPerSample = (u16)SDL_AUDIO_BITSIZE(qFmt);
+                        m_wfxStorage.nBlockAlign =
+                            (u16)(m_wfxStorage.nChannels * (m_wfxStorage.wBitsPerSample / 8));
+                        m_wfxStorage.nAvgBytesPerSec =
+                            m_wfxStorage.nSamplesPerSec * m_wfxStorage.nBlockAlign;
+                        m_wfxStorage.cbSize = 0;
+                        m_pwfx = &m_wfxStorage;
+
+                        Mix_FreeChunk(chunk);
+                        return 0;
+                    }
+                    if (chunk != NULL)
+                    {
+                        utils::DebugPrint2(
+                            "[OGG] empty chunk for %s (alen=%u abuf=%p) — falling back to WAV\n",
+                            oggPath, chunk != NULL ? (unsigned)chunk->alen : 0u,
+                            chunk != NULL ? (void *)chunk->abuf : NULL);
+                        Mix_FreeChunk(chunk);
+                    }
+                    else
+                    {
+                        utils::DebugPrint2("[OGG] Mix_LoadWAV_RW failed for %s: %s\n", oggPath, Mix_GetError());
+                    }
+                    // Fall through to WAV fallback below.
+                }
+                else
+                {
+                    utils::DebugPrint2("[OGG] no sibling .ogg for %s (probe miss)\n", oggPath);
+                }
+            }
+        }
+    }
+
+    SDL_RWops *rw = AssetIO::OpenRW(strFileName);
     if (rw == NULL)
     {
         utils::DebugPrint2("error: cannot open %s\n", strFileName);

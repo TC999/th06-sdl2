@@ -2253,15 +2253,8 @@ i32 MainMenu::ReplayHandling()
                     g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
                     break;
                 }
-                for (cur = 0; cur < ARRAY_SIZE_SIGNED(this->currentReplay->stageReplayData); cur++)
-                {
-                    if (this->currentReplay->stageReplayData[cur] != NULL)
-                    {
-                        this->currentReplay->stageReplayData[cur] =
-                            (StageReplayData *)((u32)this->currentReplay +
-                                                (u32)this->currentReplay->stageReplayData[cur]);
-                    }
-                }
+                // LoadReplayData returns a buffer with stageReplayData[i] already
+                // pointing to real StageReplayData blocks (or NULL). No fixup needed.
 
                 while (this->replayFileData[this->chosenReplay].stageReplayData[this->cursor] == NULL)
                 {
