@@ -9,6 +9,7 @@
 
 #include <SDL.h>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include "imgui.h"
 
@@ -18,6 +19,9 @@ namespace THPrac { namespace TH06 {
     bool THPracIsMouseFollowEnabled();
     bool THPracIsMouseTouchDragEnabled();
 }}
+namespace THPrac {
+    bool THPracGuiIsReady();
+}
 
 extern th06::IRenderer *g_Renderer;
 
@@ -469,6 +473,16 @@ void AndroidTouchInput::Update()
         Uint32 now = SDL_GetTicks();
         if (s_LastUpdateMs != 0 && (now - s_LastUpdateMs) >= 500)
         {
+            std::fprintf(stderr,
+                "[touch/stall] recovery: gap=%u ms  movFinger=%d activePtrs=%d "
+                "dlgOverlay=%d isInMenu=%d guiReady=%d wantCapMouse=%d\n",
+                (unsigned)(now - s_LastUpdateMs),
+                g_MoveFingerActive ? 1 : 0,
+                g_ActivePointerCount,
+                g_DialogueOverlayActive ? 1 : 0,
+                (int)g_GameManager.isInMenu,
+                THPrac::THPracGuiIsReady() ? 1 : 0,
+                (ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse) ? 1 : 0);
             SDL_Log("[touch] stall recovery: %u ms since last Update; resetting touch state",
                     (unsigned)(now - s_LastUpdateMs));
             for (int i = 0; i < kMaxPointers; i++)
