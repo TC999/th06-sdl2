@@ -102,6 +102,16 @@ task syncGameAssets {
         if (fontSrc.exists()) {
             copy { from fontSrc; into new File(assetsDir, 'font') }
         }
+        // Sync compiled SPIR-V shaders. We wipe the destination first so a
+        // shader that disappears from the source tree (rename, retire) does
+        // not linger in the APK, and so newly added shaders such as
+        // v_tex1_diffuse_xyz_clip.vert.spv actually end up packaged.
+        def assetsShaders = new File(assetsDir, 'shaders_vk')
+        if (assetsShaders.exists()) { delete assetsShaders }
+        def shadersSrc = new File(winBuildDir, 'shaders_vk')
+        if (shadersSrc.exists()) {
+            copy { from shadersSrc; into assetsShaders }
+        }
     }
 }
 
