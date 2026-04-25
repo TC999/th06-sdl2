@@ -265,15 +265,21 @@ void AndroidTouchInput::Init()
 
 void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
 {
+    std::fprintf(stderr,
+        "[touch/dn] fid=%lld nx=%.3f ny=%.3f isInMenu=%d dlgOverlay=%d movFinger=%d activePtrs=%d\n",
+        (long long)event.fingerId, event.x, event.y,
+        (int)g_GameManager.isInMenu, g_DialogueOverlayActive ? 1 : 0,
+        g_MoveFingerActive ? 1 : 0, g_ActivePointerCount);
+
     // Check virtual buttons first — if a button is hit, consume the finger.
     {
         float gx, gy;
         NormalizedToGameCoords(event.x, event.y, gx, gy);
         if (TouchVirtualButtons::HandleFingerDown(event.fingerId, gx, gy))
-            return;
+        { std::fprintf(stderr, "[touch/dn]   -> consumed by virtual button\n"); return; }
         // Check menu-context buttons (OK / Cancel).
         if (MenuTouchButtons::HandleFingerDown(event.fingerId, gx, gy))
-            return;
+        { std::fprintf(stderr, "[touch/dn]   -> consumed by menu button\n"); return; }
     }
 
     // In gameplay, claim the first non-button finger as the movement finger.
@@ -375,6 +381,11 @@ void AndroidTouchInput::HandleFingerMotion(const SDL_TouchFingerEvent &event)
 
 void AndroidTouchInput::HandleFingerUp(const SDL_TouchFingerEvent &event)
 {
+    std::fprintf(stderr,
+        "[touch/up] fid=%lld movFinger=%d (id=%lld) activePtrs=%d\n",
+        (long long)event.fingerId, g_MoveFingerActive ? 1 : 0,
+        (long long)g_MoveFingerId, g_ActivePointerCount);
+
     // Check if this finger belonged to a virtual button.
     if (TouchVirtualButtons::HandleFingerUp(event.fingerId))
         return;
@@ -1092,6 +1103,12 @@ void AndroidTouchInput::HandleMouseButtonUp(const SDL_MouseButtonEvent &event, i
 
 void AndroidTouchInput::SetDialogueOverlay(bool active)
 {
+    if (g_DialogueOverlayActive != active)
+    {
+        std::fprintf(stderr, "[touch/dlg] overlay %d -> %d  movFinger=%d activePtrs=%d\n",
+            g_DialogueOverlayActive ? 1 : 0, active ? 1 : 0,
+            g_MoveFingerActive ? 1 : 0, g_ActivePointerCount);
+    }
     g_DialogueOverlayActive = active;
     if (!active)
     {
