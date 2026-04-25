@@ -114,11 +114,10 @@ void GameErrorContext::Flush()
 
         if (m_ShowMessageBox)
         {
-#ifdef _WIN32
-            MessageBoxA(NULL, m_Buffer, "log", MB_ICONERROR);
-#else
+            // SDL2 跨平台 MessageBox：Windows 内部使用 MessageBoxW + UTF-8→UTF-16，
+            // 不会像 MessageBoxA 那样把 UTF-8 字节当作 GBK/CP936 显示成乱码。
+            // 历史上这里在 _WIN32 走 MessageBoxA(m_Buffer)，i18n 中文/日文消息全花。
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "log", m_Buffer, NULL);
-#endif
         }
 
         char resolvedLogPath[512];
