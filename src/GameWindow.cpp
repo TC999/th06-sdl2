@@ -1,6 +1,7 @@
 #include "GameWindow.hpp"
 #include "AndroidTouchInput.hpp"
 #include "AnmManager.hpp"
+#include "AssetIO.hpp"
 #include "Controller.hpp"
 #include "GameErrorContext.hpp"
 #include "NetplaySession.hpp"
@@ -254,6 +255,7 @@ RenderResult GameWindow::Render()
     if (g_PendingRestart)
     {
         g_PendingRestart = false;
+        AssetIO::DiagLog("GW", "Render: g_PendingRestart was true -> RENDER_RESULT_RESTART");
         return RENDER_RESULT_RESTART;
     }
 
@@ -392,7 +394,20 @@ RenderResult GameWindow::Render()
 
     I_HAVE_NO_CLUE_WHY_BUT_I_MUST_JUMP_HERE:
         Present();
-        if (g_Supervisor.framerateMultiplier == 0.f)
+        // F11 → Unlock Frame Rate: bypass the original (refresh-rate-aware)
+        // sub-frame multiplier logic. With throttling off the loop rate is
+        // not a meaningful proxy for monitor refresh, and any cached
+        // multiplier (set during MainMenu sampling) becomes stale and makes
+        // game speed drift wildly. Force a 1:1 mapping (one logic tick per
+        // loop iteration, no sub-stepping) so logic and rendering accelerate
+        // together cleanly.
+        if (THPrac::g_adv_igi_options.th06_unlock_framerate)
+        {
+            g_Supervisor.framerateMultiplier          = 1.0f;
+            g_Supervisor.effectiveFramerateMultiplier = 1.0f;
+            g_TickCountToEffectiveFramerate = 0;
+        }
+        else if (g_Supervisor.framerateMultiplier == 0.f)
         {
             if (2 <= g_TickCountToEffectiveFramerate)
             {
@@ -447,7 +462,10 @@ void GameWindow::Present()
         // signal is suspended/unblocked while the activity is being swiped
         // to background, which used to let the game burst to ~90fps for a
         // moment. Keep the SDL_Delay-based limiter active on every backend.
-        if (g_GameWindow.screenWidth != 0)
+        // Honor the F11 advanced-tab "Unlock Frame Rate" toggle so users can
+        // benchmark the renderer with throttling fully disabled.
+        const bool unlockFps = THPrac::g_adv_igi_options.th06_unlock_framerate;
+        if (g_GameWindow.screenWidth != 0 && !unlockFps)
         {
             static u32 s_lastPresentTime = 0;
             static double s_frameBudget = 0.0;
@@ -986,6 +1004,7 @@ void SetWindowMode(bool windowed)
 void RequestRestart()
 {
     g_PendingRestart = true;
+    AssetIO::DiagLog("GW", "RequestRestart() called");
 }
 
 }; // namespace th06
