@@ -82,10 +82,20 @@ task syncGameAssets {
         // staged into assets/, so it doesn't end up packaged.
         def staleScore = new File(assetsDir, 'score.dat')
         if (staleScore.exists()) { staleScore.delete() }
-        // Sync BGM directory
+        // Sync BGM directory.
+        // Important:
+        //  1. Game code references the directory in lowercase ("bgm/..."),
+        //     and Android APK assets are case-sensitive — copying into "BGM/"
+        //     would silently fail to load on device.
+        //  2. We clean both old "bgm" and stale "BGM" subdirs first to avoid
+        //     packaging legacy WAV files (~664 MB) alongside the current OGGs.
+        def assetsBgmLower = new File(assetsDir, 'bgm')
+        def assetsBgmUpper = new File(assetsDir, 'BGM')
+        if (assetsBgmLower.exists()) { delete assetsBgmLower }
+        if (assetsBgmUpper.exists()) { delete assetsBgmUpper }
         def bgmSrc = new File(winBuildDir, 'BGM')
         if (bgmSrc.exists()) {
-            copy { from bgmSrc; into new File(assetsDir, 'BGM') }
+            copy { from bgmSrc; into assetsBgmLower }
         }
         // Sync font: copy CONTENTS of font/ into assets/font/ (no nesting)
         def fontSrc = new File(winBuildDir, 'font')
@@ -96,6 +106,15 @@ task syncGameAssets {
 }
 
 tasks.matching { it.name =~ /assemble.*Release/ }.configureEach {
+    dependsOn syncGameAssets
+}
+
+// syncGameAssets must run before any merge*Assets task, otherwise Gradle
+// packages a stale snapshot of app/src/main/assets/ (e.g. WAV BGM left over
+// from a previous OGG-conversion pass) into the APK alongside the fresh
+// files. mergeReleaseAssets drives the eventual APK contents, so wire the
+// dependency on every variant's merge task explicitly.
+tasks.matching { it.name =~ /merge.*Assets/ }.configureEach {
     dependsOn syncGameAssets
 }
 
