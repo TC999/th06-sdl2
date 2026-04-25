@@ -452,6 +452,42 @@ void AndroidTouchInput::HandleFingerUp(const SDL_TouchFingerEvent &event)
 
 void AndroidTouchInput::Update()
 {
+    // ── Main-thread stall recovery ──────────────────────────────────────
+    // If the previous Update() was >500ms ago, the main thread was blocked
+    // (e.g. BGM decode, asset load, GC pause). During the stall, Android
+    // kept pushing MotionEvents into SDL's queue, and they were all replayed
+    // in the catch-up frame — so g_Pointers, the movement finger, drag-
+    // accumulators and any pending tap/swipe are all in a corrupt state
+    // built from out-of-order events with timestamps that don't reflect
+    // reality. Treat this frame as "fresh start": discard all transient
+    // touch state so the player can re-touch from a clean slate. The
+    // alternative (trusting the replayed events) produces phantom long-
+    // press SKIPs, swipes from accumulated delta, and "stuck" fingers.
+    {
+        static Uint32 s_LastUpdateMs = 0;
+        Uint32 now = SDL_GetTicks();
+        if (s_LastUpdateMs != 0 && (now - s_LastUpdateMs) >= 500)
+        {
+            SDL_Log("[touch] stall recovery: %u ms since last Update; resetting touch state",
+                    (unsigned)(now - s_LastUpdateMs));
+            for (int i = 0; i < kMaxPointers; i++)
+                g_Pointers[i].active = false;
+            g_ActivePointerCount = 0;
+            g_TwoFingerTapCount = 0;
+            g_MoveFingerActive = false;
+            g_MoveDeltaX = 0.0f;
+            g_MoveDeltaY = 0.0f;
+            g_TapPending = false;
+            g_SwipeYPending = false;
+            g_SwipeXPending = false;
+            g_DragSwipeAccumY = 0.0f;
+            g_DragSwipeAccumX = 0.0f;
+            g_PendingButtons = 0;
+            std::memset(g_PendingScancodes, 0, sizeof(g_PendingScancodes));
+        }
+        s_LastUpdateMs = now;
+    }
+
     g_TouchButtonsPrev = g_TouchButtonsCur;
     std::memcpy(g_TouchScancodesPrev, g_TouchScancodes, sizeof(g_TouchScancodes));
 
