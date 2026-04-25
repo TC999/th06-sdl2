@@ -8,6 +8,8 @@
 #include <SDL_mixer.h>
 #include <cstddef>
 #include <cstring>
+#include <cstdio>
+#include <thread>
 
 namespace th06
 {
@@ -74,7 +76,12 @@ HRESULT CSoundManager::CreateStreaming(CStreamingSound **ppStreamingSound, char 
         return -1;
 
     CWaveFile *pWaveFile = new CWaveFile();
-    if (pWaveFile->Open(strWaveFileName, NULL, WAVEFILE_READ) != 0)
+    // Asynchronous decode: returns immediately after spawning a worker
+    // thread. The MusicHookCallback emits silence until the decode
+    // finishes (typically 1–3 s on Android). This avoids the main-thread
+    // stall that otherwise compounds during dialogue SKIP, where multiple
+    // MSG_OPCODE_MUSIC instructions execute in a single frame.
+    if (pWaveFile->OpenAsync(strWaveFileName) != 0)
     {
         delete pWaveFile;
         return -1;
@@ -82,8 +89,10 @@ HRESULT CSoundManager::CreateStreaming(CStreamingSound **ppStreamingSound, char 
 
     CStreamingSound *pStream = new CStreamingSound();
     pStream->m_pWaveFile = pWaveFile;
-    pStream->m_pcmData = pWaveFile->m_pcmData;
-    pStream->m_pcmDataSize = pWaveFile->m_pcmDataSize;
+    // m_pcmData/m_pcmDataSize stay null for the async path; the callback
+    // reads PCM from pWaveFile->m_async once state==1.
+    pStream->m_pcmData = nullptr;
+    pStream->m_pcmDataSize = 0;
     pStream->m_playPosition = 0;
     pStream->m_isPlaying = 0;
 
@@ -116,7 +125,35 @@ CStreamingSound::~CStreamingSound()
 void CStreamingSound::MusicHookCallback(void *udata, u8 *stream, int len)
 {
     CStreamingSound *self = (CStreamingSound *)udata;
-    if (self == NULL || self->m_pcmData == NULL || !self->m_isPlaying)
+    if (self == NULL || !self->m_isPlaying)
+    {
+        memset(stream, 0, len);
+        return;
+    }
+
+    // Async path: PCM lives on the AsyncDecodeData attached to m_pWaveFile.
+    // Synchronous path (legacy WAV / future fallbacks): PCM lives on self.
+    u8 *pcm = NULL;
+    u32 pcmSize = 0;
+    if (self->m_pWaveFile != NULL && self->m_pWaveFile->m_async)
+    {
+        int s = self->m_pWaveFile->m_async->state.load(std::memory_order_acquire);
+        if (s != 1)
+        {
+            // Decode either still running (0) or failed/cancelled (2).
+            // Output silence so the audio device keeps draining cleanly.
+            memset(stream, 0, len);
+            return;
+        }
+        pcm = self->m_pWaveFile->m_async->pcm;
+        pcmSize = self->m_pWaveFile->m_async->pcmSize;
+    }
+    else
+    {
+        pcm = self->m_pcmData;
+        pcmSize = self->m_pcmDataSize;
+    }
+    if (pcm == NULL || pcmSize == 0)
     {
         memset(stream, 0, len);
         return;
@@ -130,7 +167,7 @@ void CStreamingSound::MusicHookCallback(void *udata, u8 *stream, int len)
         loopStart = self->m_pWaveFile->m_loopStartPoint;
     }
 
-    u32 effectiveEnd = (loopEnd > 0 && (u32)loopEnd <= self->m_pcmDataSize) ? (u32)loopEnd : self->m_pcmDataSize;
+    u32 effectiveEnd = (loopEnd > 0 && (u32)loopEnd <= pcmSize) ? (u32)loopEnd : pcmSize;
 
     int bytesWritten = 0;
     while (bytesWritten < len)
@@ -140,7 +177,7 @@ void CStreamingSound::MusicHookCallback(void *udata, u8 *stream, int len)
         if ((u32)toWrite > available)
             toWrite = available;
 
-        memcpy(stream + bytesWritten, self->m_pcmData + self->m_playPosition, toWrite);
+        memcpy(stream + bytesWritten, pcm + self->m_playPosition, toWrite);
         self->m_playPosition += toWrite;
         bytesWritten += toWrite;
 
@@ -413,8 +450,131 @@ HRESULT CWaveFile::Open(char *strFileName, WAVEFORMATEX *pwfx, DWORD dwFlags)
     return 0;
 }
 
+HRESULT CWaveFile::OpenAsync(char *strFileName)
+{
+    if (strFileName == NULL)
+        return -1;
+
+    Close();
+
+    // Optimistic format guess so callers that touch m_pwfx synchronously
+    // (e.g. for sample-rate inspection) don't see NULL. Mix_OpenAudio is
+    // configured for 44100 Hz / 16-bit / stereo and the OGG decoder will
+    // resample to that, so this is correct in practice.
+    std::memset(&m_wfxStorage, 0, sizeof(m_wfxStorage));
+    m_wfxStorage.wFormatTag = 1; // WAVE_FORMAT_PCM
+    m_wfxStorage.nChannels = 2;
+    m_wfxStorage.nSamplesPerSec = 44100;
+    m_wfxStorage.wBitsPerSample = 16;
+    m_wfxStorage.nBlockAlign = 4;
+    m_wfxStorage.nAvgBytesPerSec = 44100 * 4;
+    m_wfxStorage.cbSize = 0;
+    m_pwfx = &m_wfxStorage;
+
+    // Make sure the OGG backend is registered before we hand the path to
+    // a worker thread (Mix_Init isn't thread-safe — call it on the main
+    // thread first).
+    EnsureOggBackendReady();
+
+    m_async = std::make_shared<AsyncDecodeData>();
+    std::shared_ptr<AsyncDecodeData> jobData = m_async;
+
+    size_t pathLen = std::strlen(strFileName);
+    if (pathLen + 1 > sizeof(jobData->path))
+        pathLen = sizeof(jobData->path) - 1;
+    std::memcpy(jobData->path, strFileName, pathLen);
+    jobData->path[pathLen] = '\0';
+
+    std::thread worker([jobData]() {
+        // Cooperative early-exit: if Close() already cancelled this job,
+        // skip the (expensive) decode entirely.
+        if (jobData->state.load(std::memory_order_acquire) == 2)
+            return;
+
+        // Try the .ogg sibling first — same convention as the synchronous
+        // Open(): swap the extension and ask AssetIO.
+        char oggPath[512];
+        size_t nameLen = std::strlen(jobData->path);
+        if (nameLen == 0 || nameLen + 1 > sizeof(oggPath))
+        {
+            jobData->state.store(2, std::memory_order_release);
+            return;
+        }
+        std::memcpy(oggPath, jobData->path, nameLen + 1);
+        char *ext = std::strrchr(oggPath, '.');
+        if (ext != NULL && (size_t)(ext - oggPath) + 4 < sizeof(oggPath))
+        {
+            ext[1] = 'o';
+            ext[2] = 'g';
+            ext[3] = 'g';
+            ext[4] = '\0';
+        }
+
+        SDL_RWops *probe = AssetIO::OpenRW(oggPath);
+        if (probe == NULL)
+        {
+            utils::DebugPrint2("[OGG/async] no sibling .ogg for %s\n", jobData->path);
+            jobData->state.store(2, std::memory_order_release);
+            return;
+        }
+
+        Mix_Chunk *chunk = Mix_LoadWAV_RW(probe, 1);
+        if (chunk == NULL || chunk->abuf == NULL || chunk->alen == 0)
+        {
+            utils::DebugPrint2("[OGG/async] decode failed for %s: %s\n", oggPath,
+                               chunk == NULL ? Mix_GetError() : "(empty)");
+            if (chunk != NULL)
+                Mix_FreeChunk(chunk);
+            jobData->state.store(2, std::memory_order_release);
+            return;
+        }
+
+        // Copy decoded PCM out before we hand the chunk back. The mixer
+        // owns the chunk's buffer until Mix_FreeChunk is called.
+        unsigned char *pcm = new unsigned char[chunk->alen];
+        std::memcpy(pcm, chunk->abuf, chunk->alen);
+        unsigned int pcmSize = chunk->alen;
+
+        int qFreq = 44100;
+        Uint16 qFmt = AUDIO_S16LSB;
+        int qCh = 2;
+        Mix_QuerySpec(&qFreq, &qFmt, &qCh);
+        Mix_FreeChunk(chunk);
+
+        // Publish results, then state. Acquire/release pairs with the
+        // audio callback's load(acquire). If the requester cancelled
+        // mid-decode (state==2), drop the buffer ourselves.
+        jobData->pcm = pcm;
+        jobData->pcmSize = pcmSize;
+        jobData->freq = qFreq;
+        jobData->bits = SDL_AUDIO_BITSIZE(qFmt);
+        jobData->channels = qCh;
+
+        int prev = 0;
+        // CAS 0 → 1; if state was 2 it stays 2 and we delete[] pcm in dtor.
+        if (!jobData->state.compare_exchange_strong(prev, 1, std::memory_order_acq_rel))
+        {
+            // Already cancelled. AsyncDecodeData destructor will free pcm.
+        }
+        utils::DebugPrint2("[OGG/async] %s decoded: %u bytes (%dHz/%dch/%dbit)\n",
+                           oggPath, pcmSize, qFreq, qCh, (int)SDL_AUDIO_BITSIZE(qFmt));
+    });
+    worker.detach();
+
+    return 0;
+}
+
 HRESULT CWaveFile::Close()
 {
+    // Detach any in-flight async decode: mark cancelled and drop our
+    // shared_ptr ref. The worker will see state==2 (or set state==1 right
+    // before we marked it; either way the AsyncDecodeData destructor
+    // releases the PCM buffer once both refs go away).
+    if (m_async)
+    {
+        m_async->state.store(2, std::memory_order_release);
+        m_async.reset();
+    }
     if (m_fileData != NULL)
     {
         delete[] m_fileData;
