@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ Game Mode 配置（android.game_mode_config）。
+  声明本应用为游戏，并接受系统的"性能/省电/标准/电池"模式切换。
+  https://developer.android.com/games/gamemode/gamemode-api
+-->
+<game-mode-config
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsBatteryGameMode="true"
+    android:supportsPerformanceGameMode="true"
+    android:allowGameAngleDriver="true"
+    android:allowGameDownscaling="false"
+    android:allowGameFpsOverride="false" />

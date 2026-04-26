@@ -95,7 +95,14 @@ task syncGameAssets {
         if (assetsBgmUpper.exists()) { delete assetsBgmUpper }
         def bgmSrc = new File(winBuildDir, 'BGM')
         if (bgmSrc.exists()) {
-            copy { from bgmSrc; into assetsBgmLower }
+            // Source tree contains a legacy 'wav/' sub-folder with the
+            // original ~700MB WAV BGM. The Android build only ships OGG, so
+            // exclude the wav/ subtree explicitly.
+            copy {
+                from bgmSrc
+                into assetsBgmLower
+                exclude 'wav/**', 'wav'
+            }
         }
         // Sync font: copy CONTENTS of font/ into assets/font/ (no nesting)
         def fontSrc = new File(winBuildDir, 'font')

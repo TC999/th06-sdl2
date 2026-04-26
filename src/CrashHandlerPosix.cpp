@@ -614,6 +614,51 @@ static char s_crashDir[512] = "";
 
 static bool EnsureCrashDir()
 {
+    // 优先尝试 Java 端 SessionLogCollector 写入的会话目录路径。
+    // 这一步只发生在 Init() 阶段（非信号处理器内），所以可以正常读文件。
+    {
+        const char *userPath = GamePaths::GetUserPath();
+        if (userPath != nullptr && userPath[0] != '\0')
+        {
+            char marker[700];
+            int wp = 0;
+            while (userPath[wp] != '\0' && wp < 600) { marker[wp] = userPath[wp]; ++wp; }
+            const char *suf = "current_session.txt";
+            int si = 0;
+            while (suf[si] != '\0' && wp + 1 < (int)sizeof(marker)) marker[wp++] = suf[si++];
+            marker[wp] = '\0';
+            int mfd = open(marker, O_RDONLY);
+            if (mfd >= 0)
+            {
+                char tmp[480];
+                ssize_t n = read(mfd, tmp, sizeof(tmp) - 1);
+                close(mfd);
+                if (n > 0)
+                {
+                    tmp[n] = '\0';
+                    // 截掉行尾换行
+                    while (n > 0 && (tmp[n - 1] == '\n' || tmp[n - 1] == '\r' || tmp[n - 1] == ' '))
+                    {
+                        tmp[--n] = '\0';
+                    }
+                    if (n > 0)
+                    {
+                        // 拷到 s_crashDir 并加 '/'
+                        int dp = 0;
+                        for (int i = 0; i < n && dp + 2 < (int)sizeof(s_crashDir); ++i)
+                        {
+                            s_crashDir[dp++] = tmp[i];
+                        }
+                        s_crashDir[dp++] = '/';
+                        s_crashDir[dp] = '\0';
+                        // 目录已经被 Java 端建好，这里不必再 mkdir
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     const char *userPath = GamePaths::GetUserPath();
     int len = 0;
     while (userPath[len] != '\0' && len < 480)

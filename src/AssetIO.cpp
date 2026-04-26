@@ -2,6 +2,7 @@
 // AssetIO.cpp — see AssetIO.hpp for design notes.
 // =============================================================================
 #include "AssetIO.hpp"
+#include "GamePaths.hpp"
 
 #include <SDL.h>
 #include <cstdarg>
@@ -297,7 +298,43 @@ void DiagLog(const char *tag, const char *fmt, ...)
     static FILE *s_f = NULL;
     if (s_f == NULL)
     {
-        s_f = std::fopen("diag_log.txt", "a");
+        const char *userPath = ::th06::GamePaths::GetUserPath();
+        char fullPath[800];
+        // 优先用 Java 端 SessionLogCollector 写入的会话目录
+        char sessionDir[600];
+        sessionDir[0] = '\0';
+        if (userPath != NULL && userPath[0] != '\0')
+        {
+            char markerPath[700];
+            std::snprintf(markerPath, sizeof(markerPath),
+                          "%scurrent_session.txt", userPath);
+            FILE *mf = std::fopen(markerPath, "r");
+            if (mf != NULL)
+            {
+                if (std::fgets(sessionDir, sizeof(sessionDir), mf) != NULL)
+                {
+                    size_t L = std::strlen(sessionDir);
+                    while (L > 0 && (sessionDir[L - 1] == '\n' || sessionDir[L - 1] == '\r'))
+                    {
+                        sessionDir[--L] = '\0';
+                    }
+                }
+                std::fclose(mf);
+            }
+        }
+        if (sessionDir[0] != '\0')
+        {
+            std::snprintf(fullPath, sizeof(fullPath), "%s/diag.log", sessionDir);
+        }
+        else if (userPath != NULL && userPath[0] != '\0')
+        {
+            std::snprintf(fullPath, sizeof(fullPath), "%sdiag_log.txt", userPath);
+        }
+        else
+        {
+            std::snprintf(fullPath, sizeof(fullPath), "diag_log.txt");
+        }
+        s_f = std::fopen(fullPath, "a");
         if (s_f == NULL)
         {
             return;
