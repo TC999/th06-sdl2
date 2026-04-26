@@ -548,10 +548,25 @@ u16 Controller::GetInput(void)
         // lockstep delay buffer (see Netplay::RouteAnalogInputsToPlayers),
         // so skip the immediate override here.
         const AnalogInput &touchAnalog = AndroidTouchInput::GetAnalogInput();
+#ifdef __ANDROID__
+        AndroidTouchInput::DiagLog("touch/ctrl",
+            "GetInput touchAnalog active=%d x=%.2f y=%.2f mode=%d remote=%d -> %s",
+            touchAnalog.active ? 1 : 0, touchAnalog.x, touchAnalog.y,
+            (int)touchAnalog.mode,
+            Session::IsRemoteNetplaySession() ? 1 : 0,
+            (touchAnalog.active && !Session::IsRemoteNetplaySession()) ? "COPY" : "SKIP");
+#endif
         if (touchAnalog.active && !Session::IsRemoteNetplaySession())
         {
             g_AnalogInput = touchAnalog;
         }
+#ifdef __ANDROID__
+        // Drain so the next game tick starts from zero. Without this, the
+        // last displacement value would re-fire every tick when the finger
+        // holds still, sliding the player off across the screen. The
+        // accumulator side lives in AndroidTouchInput::Update().
+        AndroidTouchInput::ConsumeAnalogReset();
+#endif
     }
 
     // ── Synthesize analog vector from discrete buttons if no analog source ──

@@ -4,6 +4,7 @@
 #include "AssetIO.hpp"
 #include "Controller.hpp"
 #include "GameErrorContext.hpp"
+#include "GameManager.hpp"
 #include "NetplaySession.hpp"
 #include "OnlineMenu.hpp"
 #include "PortableGameplayRestore.hpp"
@@ -224,6 +225,9 @@ static void ApplyPendingWindowMode()
 #pragma var_order(res, viewport, slowdown, local_34, delta, curtime)
 RenderResult GameWindow::Render()
 {
+    Uint32 _renderStartMs = SDL_GetTicks();
+    Uint32 _drawCostMs = 0;
+    Uint32 _calcCostMs = 0;
     i32 res;
     f64 slowdown;
     D3DVIEWPORT8 viewport;
@@ -295,6 +299,7 @@ RenderResult GameWindow::Render()
                 g_Renderer->BeginScene();
                 g_Chain.RunDrawChain();
                 g_Renderer->EndScene();
+                _drawCostMs = SDL_GetTicks() - _renderStartMs;
                 g_Renderer->SetTexture(0);
                 // Invalidate AnmManager's texture cache so it stays in sync
                 // with the renderer.  Without this, the next frame's first
@@ -312,7 +317,9 @@ RenderResult GameWindow::Render()
         g_Supervisor.viewport.Width = 640;
         g_Supervisor.viewport.Height = 480;
         g_Renderer->SetViewport(0, 0, 640, 480);
+        Uint32 _calcStart = SDL_GetTicks();
         res = g_Chain.RunCalcChain();
+        _calcCostMs = SDL_GetTicks() - _calcStart;
         THPrac::THPracGuiUpdate();
         if (res == 0)
         {
@@ -443,6 +450,16 @@ RenderResult GameWindow::Render()
         this->curFrame = 0;
         g_TickCountToEffectiveFramerate = g_TickCountToEffectiveFramerate + 1;
     }
+    {
+        Uint32 _renderTotal = SDL_GetTicks() - _renderStartMs;
+        if (_renderTotal >= 100)
+        {
+            std::fprintf(stderr,
+                "[gw/slow] Render total=%u ms (calc=%u draw=%u)\n",
+                (unsigned)_renderTotal, (unsigned)_calcCostMs, (unsigned)_drawCostMs);
+            std::fflush(stderr);
+        }
+    }
     return RENDER_RESULT_KEEP_RUNNING;
 }
 
@@ -521,6 +538,16 @@ i32 GameWindow::InitD3dInterface(void)
 {
 #ifdef __ANDROID__
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+    // NOTE: Leave SDL_HINT_TOUCH_MOUSE_EVENTS at default (synthesized) so
+    // ImGui (which only listens to mouse events) can still receive touch
+    // input on thprac panels. The risk that ImGui's WantCaptureMouse gets
+    // stuck at 1 is mitigated by:
+    //   1) GameWindow's SDL_FINGERUP dispatch never being filtered by
+    //      WantCap (see event loop below).
+    //   2) GameWindow's DN/MOTION dispatch bypassing the WantCap filter
+    //      whenever isInMenu != 0 (gameplay).
+    //   3) AndroidTouchInput::Update() force-clears ImGui's MouseDown[]
+    //      on stall recovery and when no fingers are physically down.
 #endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) < 0)
     {
@@ -719,16 +746,69 @@ void GameWindow_ProcessEvents()
             Controller::ResetInputState();
             break;
         case SDL_FINGERDOWN:
-            if (!THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
+        {
+            // Bypass the ImGui-WantCaptureMouse filter during actual gameplay
+            // (`isInMenu != 0` paradoxically means "playing", not in menu).
+            // ImGui can falsely hold WantCaptureMouse=1 if a touch landed on
+            // a thprac panel and the matching UP got swallowed; without this
+            // bypass the player would lose all touch control. ImGui still
+            // receives the event independently via THPracGuiProcessEvent.
+            const bool wantCap = THPrac::THPracGuiIsReady() && ImGui::GetIO().WantCaptureMouse;
+            const bool inGameplay = (g_GameManager.isInMenu != 0);
+            const bool deliver = !wantCap || inGameplay;
+            const Uint32 nowTicks = SDL_GetTicks();
+            const int lagMs = (int)((Sint64)nowTicks - (Sint64)event.tfinger.timestamp);
+            AndroidTouchInput::DiagLog("touch/sdl",
+                "DN  fid=%lld ts=%u now=%u lag=%dms nx=%.3f ny=%.3f p=%.2f guiReady=%d wantCap=%d inGameplay=%d FILTERED=%d",
+                (long long)event.tfinger.fingerId, event.tfinger.timestamp,
+                nowTicks, lagMs,
+                event.tfinger.x, event.tfinger.y, event.tfinger.pressure,
+                THPrac::THPracGuiIsReady() ? 1 : 0,
+                ImGui::GetIO().WantCaptureMouse ? 1 : 0,
+                inGameplay ? 1 : 0,
+                deliver ? 0 : 1);
+            if (deliver)
                 AndroidTouchInput::HandleFingerDown(event.tfinger);
             break;
+        }
         case SDL_FINGERMOTION:
-            if (!THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
+        {
+            const bool wantCap = THPrac::THPracGuiIsReady() && ImGui::GetIO().WantCaptureMouse;
+            const bool inGameplay = (g_GameManager.isInMenu != 0);
+            const bool deliver = !wantCap || inGameplay;
+            const Uint32 nowTicks = SDL_GetTicks();
+            const int lagMs = (int)((Sint64)nowTicks - (Sint64)event.tfinger.timestamp);
+            AndroidTouchInput::DiagLog("touch/sdl",
+                "MV  fid=%lld ts=%u now=%u lag=%dms nx=%.3f ny=%.3f dx=%.3f dy=%.3f wantCap=%d inGameplay=%d FILTERED=%d",
+                (long long)event.tfinger.fingerId, event.tfinger.timestamp,
+                nowTicks, lagMs,
+                event.tfinger.x, event.tfinger.y, event.tfinger.dx, event.tfinger.dy,
+                ImGui::GetIO().WantCaptureMouse ? 1 : 0,
+                inGameplay ? 1 : 0,
+                deliver ? 0 : 1);
+            if (deliver)
                 AndroidTouchInput::HandleFingerMotion(event.tfinger);
             break;
+        }
         case SDL_FINGERUP:
-            if (!THPrac::THPracGuiIsReady() || !ImGui::GetIO().WantCaptureMouse)
-                AndroidTouchInput::HandleFingerUp(event.tfinger);
+        {
+            const Uint32 nowTicks = SDL_GetTicks();
+            const int lagMs = (int)((Sint64)nowTicks - (Sint64)event.tfinger.timestamp);
+            AndroidTouchInput::DiagLog("touch/sdl",
+                "UP  fid=%lld ts=%u now=%u lag=%dms nx=%.3f ny=%.3f FILTERED=%d",
+                (long long)event.tfinger.fingerId, event.tfinger.timestamp,
+                nowTicks, lagMs,
+                event.tfinger.x, event.tfinger.y,
+                0);
+            // FINGERUP is ALWAYS delivered to the game pipeline, even when
+            // ImGui has WantCaptureMouse=1. Filtering UP creates a feedback
+            // loop where ImGui receives DN (sets WantCap=1), then we filter
+            // UP, ImGui never sees the release, WantCap stays stuck at 1
+            // forever, and every subsequent finger is dropped → "自机
+            // 完全不响应触控". HandleFingerUp must run so we can clean up
+            // our own pointer state and movement finger.
+            AndroidTouchInput::HandleFingerUp(event.tfinger);
+        }
             break;
 #ifndef __ANDROID__
         case SDL_MOUSEBUTTONDOWN:

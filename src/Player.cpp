@@ -1,5 +1,6 @@
 #include "Player.hpp"
 
+#include "AndroidTouchInput.hpp"
 #include "AnmManager.hpp"
 #include "AnmVm.hpp"
 #include "BombData.hpp"
@@ -1205,8 +1206,20 @@ ZunResult Player::HandlePlayerInputs()
         // AndroidTouchInput, matching the replay i8 encoding exactly.
         // In netplay, RouteAnalogInputsToPlayers ensures each player reads
         // the correct analog from the lockstep delay buffer.
+        float prevX = this->positionCenter[0];
+        float prevY = this->positionCenter[1];
         this->positionCenter[0] += analog.x * g_Supervisor.effectiveFramerateMultiplier;
         this->positionCenter[1] += analog.y * g_Supervisor.effectiveFramerateMultiplier;
+#ifdef __ANDROID__
+        if (std::fabs(analog.x) > 0.5f || std::fabs(analog.y) > 0.5f)
+        {
+            AndroidTouchInput::DiagLog("touch/player",
+                "MOVE ax=%.1f ay=%.1f fmul=%.3f pos %.1f,%.1f -> %.1f,%.1f pType=%d",
+                analog.x, analog.y, g_Supervisor.effectiveFramerateMultiplier,
+                prevX, prevY, this->positionCenter[0], this->positionCenter[1],
+                this->playerType);
+        }
+#endif
     }
     else
     {

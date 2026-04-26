@@ -34,9 +34,20 @@ u16 GetTouchButtons();
 // Currently reserved for future gameplay touch (virtual joystick / touchpad mode).
 const AnalogInput &GetAnalogInput();
 
+// Drain accumulated touch analog: Controller::GetInput calls this once per
+// game tick after copying g_TouchAnalogInput to g_AnalogInput. Resets x,y to
+// 0 and active to false so the next game tick starts fresh. Without this,
+// stale displacement values would replay every tick when the finger holds
+// still, dragging the player away.
+void ConsumeAnalogReset();
+
 // Returns true if given scancode is virtually pressed by touch.
 bool IsTouchScancode(SDL_Scancode sc);
 bool IsTouchScancodeSingle(SDL_Scancode sc);
+
+// Persistent touch-pipeline diagnostic logger (writes to
+// ${userPath}/touch_diag/touch_<sessionStartMs>.log + stderr mirror).
+void DiagLog(const char *tag, const char *fmt, ...);
 
 // Consume the pending tap and return its game coordinates (640x480 space).
 // Returns false if no tap is pending.

@@ -11,7 +11,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 #include "imgui.h"
+
+#include "GamePaths.hpp"
+#include <cerrno>
+#ifdef __ANDROID__
+#include <sys/stat.h>
+#endif
 
 // Developer mode check (defined in thprac_th06.cpp).
 namespace THPrac { namespace TH06 {
@@ -27,6 +34,102 @@ extern th06::IRenderer *g_Renderer;
 
 namespace th06
 {
+
+// ────────────────────────────────────────────────────────────────────────────
+// Persistent diagnostic logger
+// ────────────────────────────────────────────────────────────────────────────
+//
+// All touch-pipeline events are written to a per-session file under
+// `${GetUserPath()}/touch_diag/touch_<startTimeMs>.log` so the trace can be
+// retrieved without `adb logcat`. Open lazily on first use; flush after every
+// line so a crash/freeze still yields the most recent state.
+//
+// Each line has the form:
+//     <ms>ms <tag> <message>
+// where `ms` is `SDL_GetTicks()` at write time. The same line is also echoed
+// to stderr (Android logcat) for live tailing.
+
+namespace TouchDiag
+{
+    static std::FILE *s_logFile = nullptr;
+    static bool s_initAttempted = false;
+
+    static void Init()
+    {
+        if (s_initAttempted)
+            return;
+        s_initAttempted = true;
+        const char *userPath = GamePaths::GetUserPath();
+        if (userPath == nullptr)
+            userPath = "";
+        char dirPath[600];
+        std::snprintf(dirPath, sizeof(dirPath), "%stouch_diag", userPath);
+#ifdef __ANDROID__
+        if (mkdir(dirPath, 0755) != 0 && errno != EEXIST)
+        {
+            // Fall back: try cwd.
+            std::snprintf(dirPath, sizeof(dirPath), "touch_diag");
+            mkdir(dirPath, 0755);
+        }
+#endif
+        char filePath[700];
+        std::snprintf(filePath, sizeof(filePath), "%s/touch_%u.log",
+                      dirPath, (unsigned)SDL_GetTicks());
+        s_logFile = std::fopen(filePath, "w");
+        if (s_logFile != nullptr)
+        {
+            std::fprintf(s_logFile,
+                "# touch_diag session start; ticks_at_open=%u\n",
+                (unsigned)SDL_GetTicks());
+            std::fflush(s_logFile);
+            std::fprintf(stderr, "[touch/diag] log file = %s\n", filePath);
+            std::fflush(stderr);
+        }
+        else
+        {
+            std::fprintf(stderr,
+                "[touch/diag] FAILED to open log file (path=%s, errno=%d)\n",
+                filePath, errno);
+            std::fflush(stderr);
+        }
+    }
+
+    static void Logv(const char *tag, const char *fmt, std::va_list ap)
+    {
+        Init();
+        char buf[512];
+        std::vsnprintf(buf, sizeof(buf), fmt, ap);
+        Uint32 ts = SDL_GetTicks();
+        if (s_logFile != nullptr)
+        {
+            std::fprintf(s_logFile, "%ums %s %s\n", (unsigned)ts, tag, buf);
+            std::fflush(s_logFile);
+        }
+        std::fprintf(stderr, "[%s] %s\n", tag, buf);
+        std::fflush(stderr);
+    }
+
+    static void Log(const char *tag, const char *fmt, ...)
+    {
+        std::va_list ap;
+        va_start(ap, fmt);
+        Logv(tag, fmt, ap);
+        va_end(ap);
+    }
+} // namespace TouchDiag
+
+// Convenience: fall through to stderr for non-Android too.
+#define TDIAG(tag, ...) TouchDiag::Log(tag, __VA_ARGS__)
+
+// Public re-export so other TUs (GameWindow, Player) can write into the same
+// per-session touch_diag log file (single source of truth for diagnostics).
+void AndroidTouchInput::DiagLog(const char *tag, const char *fmt, ...)
+{
+    std::va_list ap;
+    va_start(ap, fmt);
+    TouchDiag::Logv(tag, fmt, ap);
+    va_end(ap);
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Configuration
@@ -121,6 +224,13 @@ static constexpr Uint32 kMoveDebounceMs = 200;
 static Uint32 g_LastMoveUpMs = 0;
 static float g_LastMoveUpGameX = 0.0f;
 static float g_LastMoveUpGameY = 0.0f;
+
+// After a main-thread stall we discard touch events whose timestamp is
+// older than this watermark (ms in SDL_GetTicks units). This filters out
+// the burst of stale UP/DN events that Android's input dispatcher
+// re-injects once the app becomes responsive again, which would otherwise
+// teleport the player ship around for several seconds.
+static Uint32 g_StaleTouchCutoffMs = 0;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Coordinate conversion
@@ -277,9 +387,17 @@ void AndroidTouchInput::Init()
 
 void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
 {
-    std::fprintf(stderr,
-        "[touch/dn] fid=%lld nx=%.3f ny=%.3f isInMenu=%d dlgOverlay=%d movFinger=%d activePtrs=%d\n",
-        (long long)event.fingerId, event.x, event.y,
+    if (g_StaleTouchCutoffMs != 0 && event.timestamp != 0 &&
+        event.timestamp < g_StaleTouchCutoffMs)
+    {
+        TDIAG("touch/dn", "DROP-STALE fid=%lld ts=%u cutoff=%u",
+              (long long)event.fingerId, (unsigned)event.timestamp,
+              (unsigned)g_StaleTouchCutoffMs);
+        return;
+    }
+    TDIAG("touch/dn",
+        "fid=%lld nx=%.3f ny=%.3f ts=%u isInMenu=%d dlgOverlay=%d movFinger=%d activePtrs=%d",
+        (long long)event.fingerId, event.x, event.y, (unsigned)event.timestamp,
         (int)g_GameManager.isInMenu, g_DialogueOverlayActive ? 1 : 0,
         g_MoveFingerActive ? 1 : 0, g_ActivePointerCount);
 
@@ -288,10 +406,10 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
         float gx, gy;
         NormalizedToGameCoords(event.x, event.y, gx, gy);
         if (TouchVirtualButtons::HandleFingerDown(event.fingerId, gx, gy))
-        { std::fprintf(stderr, "[touch/dn]   -> consumed by virtual button\n"); return; }
+        { TDIAG("touch/dn", "  -> consumed by VIRTUAL BUTTON (gx=%.1f gy=%.1f)", gx, gy); return; }
         // Check menu-context buttons (OK / Cancel).
         if (MenuTouchButtons::HandleFingerDown(event.fingerId, gx, gy))
-        { std::fprintf(stderr, "[touch/dn]   -> consumed by menu button\n"); return; }
+        { TDIAG("touch/dn", "  -> consumed by MENU BUTTON (gx=%.1f gy=%.1f)", gx, gy); return; }
     }
 
     // In gameplay, claim the first non-button finger as the movement finger.
@@ -324,15 +442,18 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
 
             if (isReconnect)
             {
-                // Same drag continuing — accumulate position delta from the
-                // last UP into MoveDelta so the player keeps moving.
-                g_MoveDeltaX += (gx - g_LastMoveUpGameX);
-                g_MoveDeltaY += (gy - g_LastMoveUpGameY);
+                // Same drag continuing across a spurious UP/DN cycle.
+                // We deliberately DO NOT inject (newPos - oldPos) into
+                // MoveDelta: that gap is unrecoverable phantom motion —
+                // injecting it teleports the player ("闪现"). Just
+                // resume the drag from the new finger position.
+                float jumpDx = gx - g_LastMoveUpGameX;
+                float jumpDy = gy - g_LastMoveUpGameY;
                 g_MovePrevGameX = gx;
                 g_MovePrevGameY = gy;
-                std::fprintf(stderr,
-                    "[touch/dn]   -> movement reconnect dx=%.1f dy=%.1f (gap=%ums)\n",
-                    gx - g_LastMoveUpGameX, gy - g_LastMoveUpGameY,
+                TDIAG("touch/dn",
+                    "  -> movement RECONNECT (DROPPED jump dx=%.1f dy=%.1f gap=%ums)",
+                    jumpDx, jumpDy,
                     (unsigned)(now - g_LastMoveUpMs));
             }
             else
@@ -369,15 +490,26 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
 
 void AndroidTouchInput::HandleFingerMotion(const SDL_TouchFingerEvent &event)
 {
+    if (g_StaleTouchCutoffMs != 0 && event.timestamp != 0 &&
+        event.timestamp < g_StaleTouchCutoffMs)
+    {
+        return;
+    }
     // Movement finger: accumulate game-coordinate delta for gameplay.
     if (g_MoveFingerActive && event.fingerId == g_MoveFingerId)
     {
         float curGX, curGY;
         NormalizedToGameCoords(event.x, event.y, curGX, curGY);
-        g_MoveDeltaX += (curGX - g_MovePrevGameX);
-        g_MoveDeltaY += (curGY - g_MovePrevGameY);
+        float ddx = curGX - g_MovePrevGameX;
+        float ddy = curGY - g_MovePrevGameY;
+        g_MoveDeltaX += ddx;
+        g_MoveDeltaY += ddy;
         g_MovePrevGameX = curGX;
         g_MovePrevGameY = curGY;
+        TDIAG("touch/mv",
+            "MOTION fid=%lld ts=%u dGX=%.2f dGY=%.2f accum=(%.2f,%.2f) pos=(%.1f,%.1f)",
+            (long long)event.fingerId, (unsigned)event.timestamp,
+            ddx, ddy, g_MoveDeltaX, g_MoveDeltaY, curGX, curGY);
         return; // Don't process as gesture during gameplay
     }
 
@@ -420,9 +552,18 @@ void AndroidTouchInput::HandleFingerMotion(const SDL_TouchFingerEvent &event)
 
 void AndroidTouchInput::HandleFingerUp(const SDL_TouchFingerEvent &event)
 {
-    std::fprintf(stderr,
-        "[touch/up] fid=%lld movFinger=%d (id=%lld) activePtrs=%d\n",
-        (long long)event.fingerId, g_MoveFingerActive ? 1 : 0,
+    if (g_StaleTouchCutoffMs != 0 && event.timestamp != 0 &&
+        event.timestamp < g_StaleTouchCutoffMs)
+    {
+        TDIAG("touch/up", "DROP-STALE fid=%lld ts=%u cutoff=%u",
+              (long long)event.fingerId, (unsigned)event.timestamp,
+              (unsigned)g_StaleTouchCutoffMs);
+        return;
+    }
+    TDIAG("touch/up",
+        "fid=%lld ts=%u movFinger=%d (id=%lld) activePtrs=%d",
+        (long long)event.fingerId, (unsigned)event.timestamp,
+        g_MoveFingerActive ? 1 : 0,
         (long long)g_MoveFingerId, g_ActivePointerCount);
 
     // Check if this finger belonged to a virtual button.
@@ -510,6 +651,30 @@ void AndroidTouchInput::HandleFingerUp(const SDL_TouchFingerEvent &event)
 
 void AndroidTouchInput::Update()
 {
+    // ── Per-frame digest (throttled to ~once per 250ms) ─────────────────
+    {
+        static Uint32 s_LastDigestMs = 0;
+        Uint32 nowDigest = SDL_GetTicks();
+        if (nowDigest - s_LastDigestMs >= 250)
+        {
+            s_LastDigestMs = nowDigest;
+            float fmul = g_Supervisor.effectiveFramerateMultiplier;
+            TDIAG("touch/frame",
+                "ptrs=%d movFinger=%d (id=%d) prev=(%.1f,%.1f) accum=(%.1f,%.1f) "
+                "isInMenu=%d dlgOverlay=%d fmul=%.3f pendBtn=0x%x analog=(%.1f,%.1f,act=%d)",
+                g_ActivePointerCount,
+                g_MoveFingerActive ? 1 : 0, g_MoveFingerId,
+                g_MovePrevGameX, g_MovePrevGameY,
+                g_MoveDeltaX, g_MoveDeltaY,
+                (int)g_GameManager.isInMenu,
+                g_DialogueOverlayActive ? 1 : 0,
+                fmul,
+                (unsigned)g_PendingButtons,
+                g_TouchAnalogInput.x, g_TouchAnalogInput.y,
+                g_TouchAnalogInput.active ? 1 : 0);
+        }
+    }
+
     // ── Main-thread stall recovery ──────────────────────────────────────
     // If the previous Update() was >500ms ago, the main thread was blocked
     // (e.g. BGM decode, asset load, GC pause). During the stall, Android
@@ -526,16 +691,19 @@ void AndroidTouchInput::Update()
         Uint32 now = SDL_GetTicks();
         if (s_LastUpdateMs != 0 && (now - s_LastUpdateMs) >= 500)
         {
-            std::fprintf(stderr,
-                "[touch/stall] recovery: gap=%u ms  movFinger=%d activePtrs=%d "
-                "dlgOverlay=%d isInMenu=%d guiReady=%d wantCapMouse=%d\n",
+            TDIAG("touch/stall",
+                "RECOVERY gap=%ums movFinger=%d activePtrs=%d "
+                "dlgOverlay=%d isInMenu=%d guiReady=%d wantCapMouse=%d "
+                "tap=%d swipeY=%d swipeX=%d dragAccum=(%.1f,%.1f)",
                 (unsigned)(now - s_LastUpdateMs),
                 g_MoveFingerActive ? 1 : 0,
                 g_ActivePointerCount,
                 g_DialogueOverlayActive ? 1 : 0,
                 (int)g_GameManager.isInMenu,
                 THPrac::THPracGuiIsReady() ? 1 : 0,
-                (ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse) ? 1 : 0);
+                (ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse) ? 1 : 0,
+                g_TapPending ? 1 : 0, g_SwipeYPending ? 1 : 0, g_SwipeXPending ? 1 : 0,
+                g_DragSwipeAccumX, g_DragSwipeAccumY);
             SDL_Log("[touch] stall recovery: %u ms since last Update; resetting touch state",
                     (unsigned)(now - s_LastUpdateMs));
             for (int i = 0; i < kMaxPointers; i++)
@@ -575,6 +743,11 @@ void AndroidTouchInput::Update()
                     io.MouseDown[b] = false;
                 io.MouseDownDuration[0] = io.MouseDownDuration[1] = io.MouseDownDuration[2] = -1.0f;
             }
+
+            // Drop any touch event with a timestamp older than NOW. The
+            // dispatcher's backlog (collected during the stall) has stale
+            // timestamps and would otherwise drive the player around.
+            g_StaleTouchCutoffMs = now;
         }
         s_LastUpdateMs = now;
     }
@@ -588,8 +761,15 @@ void AndroidTouchInput::Update()
     g_PendingButtons = 0;
     std::memset(g_PendingScancodes, 0, sizeof(g_PendingScancodes));
 
-    // Clear analog state each frame; touch-drag or mouse-follow will set it if active.
-    g_TouchAnalogInput = {};
+    // NOTE: Do NOT clear g_TouchAnalogInput here. On Android, Update() runs
+    // at render rate (often 200+ Hz) while the game logic ticks at 60 Hz, so
+    // clearing per-Update would discard accumulated motion. Instead, the
+    // consume block below `+=` accumulates each MoveDelta into
+    // g_TouchAnalogInput, and Controller::GetInput drains it (via
+    // ConsumeAnalogReset) once per game tick after copying to g_AnalogInput.
+    // The mouse-follow code (`#ifndef __ANDROID__`) below still overwrites
+    // unconditionally, which is fine on desktop where Update() runs at game
+    // tick rate.
 
     // ── Discard stale taps during gameplay ──────────────────────────────
     // During gameplay (isInMenu != 0), no menus consume taps via
@@ -686,18 +866,28 @@ void AndroidTouchInput::Update()
             if (dx >  0.5f) dirButtons |= TH_BUTTON_RIGHT;
             g_TouchButtonsCur |= dirButtons;
 
-            g_TouchAnalogInput.x = dx;
-            g_TouchAnalogInput.y = dy;
+            // ACCUMULATE across multiple Update() calls within the same
+            // game tick (Update runs faster than 60 Hz on Android). The
+            // accumulated value is drained by Controller::GetInput once
+            // per game tick via ConsumeAnalogReset().
+            g_TouchAnalogInput.x += dx;
+            g_TouchAnalogInput.y += dy;
+            // Clamp to i8 range for replay encoding.
+            if (g_TouchAnalogInput.x < -127.0f) g_TouchAnalogInput.x = -127.0f;
+            if (g_TouchAnalogInput.x >  127.0f) g_TouchAnalogInput.x =  127.0f;
+            if (g_TouchAnalogInput.y < -127.0f) g_TouchAnalogInput.y = -127.0f;
+            if (g_TouchAnalogInput.y >  127.0f) g_TouchAnalogInput.y =  127.0f;
             g_TouchAnalogInput.active = true;
             g_TouchAnalogInput.mode = AnalogMode::Displacement;
+            TDIAG("touch/consume",
+                "MOVE dx=%.1f dy=%.1f acc=(%.1f,%.1f) buttons=0x%x fmul=%.3f",
+                dx, dy, g_TouchAnalogInput.x, g_TouchAnalogInput.y,
+                (unsigned)dirButtons, fmul);
         }
-        else
-        {
-            g_TouchAnalogInput.x = 0.0f;
-            g_TouchAnalogInput.y = 0.0f;
-            g_TouchAnalogInput.active = false;
-            g_TouchAnalogInput.mode = AnalogMode::Direction;
-        }
+        // else: no motion this Update — DON'T touch g_TouchAnalogInput.
+        // It either still holds accumulated motion from earlier in this
+        // tick (waiting for Player to read), or was already drained
+        // (active=false) by ConsumeAnalogReset.
 
         // Consume delta for this frame.
         g_MoveDeltaX = 0.0f;
@@ -706,6 +896,7 @@ void AndroidTouchInput::Update()
     else if (g_MoveFingerActive && g_GameManager.isInMenu == 0)
     {
         // Left gameplay (entered menu) — release movement finger.
+        TDIAG("touch/mv", "RELEASE movement finger (entered menu)");
         g_MoveFingerActive = false;
         g_MoveFingerId = -1;
         g_MoveDeltaX = 0.0f;
@@ -787,6 +978,16 @@ u16 AndroidTouchInput::GetTouchButtons()
 const AnalogInput &AndroidTouchInput::GetAnalogInput()
 {
     return g_TouchAnalogInput;
+}
+
+void AndroidTouchInput::ConsumeAnalogReset()
+{
+    // Drain accumulated displacement after Controller::GetInput has copied
+    // it into the per-tick g_AnalogInput. See AndroidTouchInput::Update()
+    // (consume block) for the accumulation half of this contract.
+    g_TouchAnalogInput.x = 0.0f;
+    g_TouchAnalogInput.y = 0.0f;
+    g_TouchAnalogInput.active = false;
 }
 
 bool AndroidTouchInput::IsTouchScancode(SDL_Scancode sc)
@@ -1155,7 +1356,7 @@ void AndroidTouchInput::SetDialogueOverlay(bool active)
 {
     if (g_DialogueOverlayActive != active)
     {
-        std::fprintf(stderr, "[touch/dlg] overlay %d -> %d  movFinger=%d activePtrs=%d\n",
+        TDIAG("touch/dlg", "overlay %d -> %d movFinger=%d activePtrs=%d",
             g_DialogueOverlayActive ? 1 : 0, active ? 1 : 0,
             g_MoveFingerActive ? 1 : 0, g_ActivePointerCount);
     }
