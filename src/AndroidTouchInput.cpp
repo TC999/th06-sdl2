@@ -62,8 +62,35 @@ namespace TouchDiag
         const char *userPath = GamePaths::GetUserPath();
         if (userPath == nullptr)
             userPath = "";
+
+        // 优先尝试使用 Java 端 SessionLogCollector 写入的会话目录
+        // ${userPath}/current_session.txt 的内容是会话目录的绝对路径。
         char dirPath[600];
-        std::snprintf(dirPath, sizeof(dirPath), "%stouch_diag", userPath);
+        dirPath[0] = '\0';
+        {
+            char markerPath[700];
+            std::snprintf(markerPath, sizeof(markerPath),
+                          "%scurrent_session.txt", userPath);
+            std::FILE *mf = std::fopen(markerPath, "r");
+            if (mf != nullptr)
+            {
+                if (std::fgets(dirPath, sizeof(dirPath), mf) != nullptr)
+                {
+                    // 去掉行尾换行
+                    size_t L = std::strlen(dirPath);
+                    while (L > 0 && (dirPath[L - 1] == '\n' || dirPath[L - 1] == '\r'))
+                    {
+                        dirPath[--L] = '\0';
+                    }
+                }
+                std::fclose(mf);
+            }
+        }
+        if (dirPath[0] == '\0')
+        {
+            // 兜底：旧路径 ${userPath}/touch_diag/
+            std::snprintf(dirPath, sizeof(dirPath), "%stouch_diag", userPath);
+        }
 #ifdef __ANDROID__
         if (mkdir(dirPath, 0755) != 0 && errno != EEXIST)
         {
@@ -72,10 +99,9 @@ namespace TouchDiag
             mkdir(dirPath, 0755);
         }
 #endif
-        char filePath[700];
-        std::snprintf(filePath, sizeof(filePath), "%s/touch_%u.log",
-                      dirPath, (unsigned)SDL_GetTicks());
-        s_logFile = std::fopen(filePath, "w");
+        char filePath[800];
+        std::snprintf(filePath, sizeof(filePath), "%s/touch_native.log", dirPath);
+        s_logFile = std::fopen(filePath, "a");
         if (s_logFile != nullptr)
         {
             std::fprintf(s_logFile,
@@ -232,6 +258,20 @@ static float g_LastMoveUpGameY = 0.0f;
 // teleport the player ship around for several seconds.
 static Uint32 g_StaleTouchCutoffMs = 0;
 
+// ── Joystick-style stall extrapolation ──────────────────────────────────
+// vivo OriginOS 6 等系统级"智能优化"会对第三方应用做 ~1Hz 的输入分发节流，
+// 应用侧无法绕过。表现为拖动中 Android 凭空停 800ms~1100ms 不投递任何 MOVE
+// 事件，玩家在那一秒"卡住"。cardanawandra 的 crossplatform 分支用虚拟摇杆
+// 规避了这个问题——摇杆按住即持续输出方向，不依赖 MOVE 事件流。
+// 我们在 native 层仿照同样思路：记录最近一次 MOVE 事件的瞬时速度，当 MOVE
+// 缺席但 movFinger 仍 active 时，按上次速度继续推进玩家（带线性衰减），
+// 真正的 MOVE 到达时立刻接管校准。
+static Uint32 g_LastMoveEventMs = 0;     // 最近一次真实 MOVE 事件的 wall-clock
+static float  g_LastMoveVx = 0.0f;       // 最近一次 MOVE 的瞬时速度 (game units / ms)
+static float  g_LastMoveVy = 0.0f;
+static Uint32 g_LastExtrapolateMs = 0;   // 上次外推 Update 的时间戳
+static float  g_StallExtrapolateBudgetX = 0.0f;  // 本次 stall 已外推累积位移
+static float  g_StallExtrapolateBudgetY = 0.0f;  // (真实 MOVE 到达时归零)
 // ────────────────────────────────────────────────────────────────────────────
 // Coordinate conversion
 // ────────────────────────────────────────────────────────────────────────────
@@ -396,10 +436,11 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
         return;
     }
     TDIAG("touch/dn",
-        "fid=%lld nx=%.3f ny=%.3f ts=%u isInMenu=%d dlgOverlay=%d movFinger=%d activePtrs=%d",
+        "fid=%lld nx=%.3f ny=%.3f ts=%u isInMenu=%d dlgOverlay=%d movFinger=%d activePtrs=%d plr=(%.1f,%.1f)",
         (long long)event.fingerId, event.x, event.y, (unsigned)event.timestamp,
         (int)g_GameManager.isInMenu, g_DialogueOverlayActive ? 1 : 0,
-        g_MoveFingerActive ? 1 : 0, g_ActivePointerCount);
+        g_MoveFingerActive ? 1 : 0, g_ActivePointerCount,
+        g_Player.positionCenter.x, g_Player.positionCenter.y);
 
     // Check virtual buttons first — if a button is hit, consume the finger.
     {
@@ -440,6 +481,15 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
             g_MoveFingerActive = true;
             g_MoveFingerId = event.fingerId;
 
+            // Reset stall extrapolation state on fresh DOWN — no velocity
+            // history yet, don't extrapolate from a previous drag.
+            g_LastMoveEventMs = 0;
+            g_LastMoveVx = 0.0f;
+            g_LastMoveVy = 0.0f;
+            g_LastExtrapolateMs = 0;
+            g_StallExtrapolateBudgetX = 0.0f;
+            g_StallExtrapolateBudgetY = 0.0f;
+
             if (isReconnect)
             {
                 // Same drag continuing across a spurious UP/DN cycle.
@@ -451,6 +501,10 @@ void AndroidTouchInput::HandleFingerDown(const SDL_TouchFingerEvent &event)
                 float jumpDy = gy - g_LastMoveUpGameY;
                 g_MovePrevGameX = gx;
                 g_MovePrevGameY = gy;
+                // 清掉上一次 UP 后可能残留的 burst-smooth carry，
+                // 否则 reconnect 后下一帧会消费一个错向的几像素 → 自机微跳。
+                g_MoveDeltaX = 0.0f;
+                g_MoveDeltaY = 0.0f;
                 TDIAG("touch/dn",
                     "  -> movement RECONNECT (DROPPED jump dx=%.1f dy=%.1f gap=%ums)",
                     jumpDx, jumpDy,
@@ -506,10 +560,28 @@ void AndroidTouchInput::HandleFingerMotion(const SDL_TouchFingerEvent &event)
         g_MoveDeltaY += ddy;
         g_MovePrevGameX = curGX;
         g_MovePrevGameY = curGY;
+
+        // Track instantaneous velocity for stall extrapolation: if Android
+        // pauses MOVE delivery (vivo 1Hz throttle), we keep injecting this
+        // velocity until the next real MOVE arrives.
+        Uint32 nowMs = SDL_GetTicks();
+        Uint32 dtMs = (g_LastMoveEventMs != 0) ? (nowMs - g_LastMoveEventMs) : 0;
+        if (dtMs > 0 && dtMs < 200)
+        {
+            g_LastMoveVx = ddx / (float)dtMs;
+            g_LastMoveVy = ddy / (float)dtMs;
+        }
+        g_LastMoveEventMs = nowMs;
+        g_LastExtrapolateMs = nowMs;  // reset extrapolation window
+        // 真实 MOVE 到达，本次 stall 结束，归零外推累积预算
+        g_StallExtrapolateBudgetX = 0.0f;
+        g_StallExtrapolateBudgetY = 0.0f;
+
         TDIAG("touch/mv",
-            "MOTION fid=%lld ts=%u dGX=%.2f dGY=%.2f accum=(%.2f,%.2f) pos=(%.1f,%.1f)",
+            "MOTION fid=%lld ts=%u dGX=%.2f dGY=%.2f accum=(%.2f,%.2f) pos=(%.1f,%.1f) plr=(%.1f,%.1f)",
             (long long)event.fingerId, (unsigned)event.timestamp,
-            ddx, ddy, g_MoveDeltaX, g_MoveDeltaY, curGX, curGY);
+            ddx, ddy, g_MoveDeltaX, g_MoveDeltaY, curGX, curGY,
+            g_Player.positionCenter.x, g_Player.positionCenter.y);
         return; // Don't process as gesture during gameplay
     }
 
@@ -561,10 +633,11 @@ void AndroidTouchInput::HandleFingerUp(const SDL_TouchFingerEvent &event)
         return;
     }
     TDIAG("touch/up",
-        "fid=%lld ts=%u movFinger=%d (id=%lld) activePtrs=%d",
+        "fid=%lld ts=%u movFinger=%d (id=%lld) activePtrs=%d plr=(%.1f,%.1f)",
         (long long)event.fingerId, (unsigned)event.timestamp,
         g_MoveFingerActive ? 1 : 0,
-        (long long)g_MoveFingerId, g_ActivePointerCount);
+        (long long)g_MoveFingerId, g_ActivePointerCount,
+        g_Player.positionCenter.x, g_Player.positionCenter.y);
 
     // Check if this finger belonged to a virtual button.
     if (TouchVirtualButtons::HandleFingerUp(event.fingerId))
@@ -661,7 +734,7 @@ void AndroidTouchInput::Update()
             float fmul = g_Supervisor.effectiveFramerateMultiplier;
             TDIAG("touch/frame",
                 "ptrs=%d movFinger=%d (id=%d) prev=(%.1f,%.1f) accum=(%.1f,%.1f) "
-                "isInMenu=%d dlgOverlay=%d fmul=%.3f pendBtn=0x%x analog=(%.1f,%.1f,act=%d)",
+                "isInMenu=%d dlgOverlay=%d fmul=%.3f pendBtn=0x%x analog=(%.1f,%.1f,act=%d) plr=(%.1f,%.1f)",
                 g_ActivePointerCount,
                 g_MoveFingerActive ? 1 : 0, g_MoveFingerId,
                 g_MovePrevGameX, g_MovePrevGameY,
@@ -671,7 +744,8 @@ void AndroidTouchInput::Update()
                 fmul,
                 (unsigned)g_PendingButtons,
                 g_TouchAnalogInput.x, g_TouchAnalogInput.y,
-                g_TouchAnalogInput.active ? 1 : 0);
+                g_TouchAnalogInput.active ? 1 : 0,
+                g_Player.positionCenter.x, g_Player.positionCenter.y);
         }
     }
 
@@ -839,8 +913,112 @@ void AndroidTouchInput::Update()
     // preventing the "ice puck" overshoot at variable frame rates.
     if (AndroidTouchInput::IsEnabled() && g_GameManager.isInMenu != 0 && g_MoveFingerActive)
     {
+        // ── Joystick-style stall extrapolation ─────────────────────────────
+        // 当 vivo OriginOS 6 等系统级智能优化在拖动中凭空停掉 ~1000ms 的
+        // MOVE 投递时，按"最近一次 MOVE 的瞬时速度"持续注入位移，让玩家
+        // 沿上次方向继续滑行。新的真实 MOVE 一到达就立即重置
+        // g_LastExtrapolateMs，外推自动停止。
+        //
+        // 实测 vivo 节流的 sinceLast 均匀分布到 ~800ms，所以 window 必须
+        // 覆盖完整 1Hz 周期 (1500ms)。fade 不归零，保持 40% 底速度，避免
+        // 断流后期玩家完全停下，恢复时又被真实事件冲倒造成顿挫。
+        //
+        // 精度保护：
+        //   1) guard 30ms：超过正常事件间隔 (~16ms)，避开正常事件流。
+        //   2) 速度阈值 0.05 units/ms：精调时速度几乎为 0，自动跳过。
+        //   3) 单次 stall 位移上限 g_StallExtrapolateBudget：从最后一次
+        //      真实 MOVE 起算，外推累积总位移不超过 200 units，防止失控。
+        //   4) 速度上限 0.5 units/ms：极端 flick 后不会失控冲出去。
+        //
+        // 2026-04-26 更新：发现 1Hz 节流真因是 vivo PEM (Process Energy
+        // Management) cgroup-freeze（详见 GamePerformanceService.java）。
+        // 启动 foreground service 后真实 MOVE 流恢复正常，外推反而和真实
+        // 流冲突导致自机乱飞。默认禁用此外推，仅作历史保留。
+        // 如需在异常机型上重新启用，把下面的 0 改成 1。
+#if 0
+        {
+            constexpr Uint32 kExtrapolateGuardMs    = 30;     // 至少这么久没新事件才外推
+            constexpr Uint32 kExtrapolateWindowMs   = 1500;   // 最多外推这么久
+            constexpr float  kExtrapolateMinSpeed   = 0.05f;  // 速度下限（精调保护）
+            constexpr float  kExtrapolateMaxPerMs   = 0.5f;   // 速度安全上限
+            constexpr float  kExtrapolateFadeFloor  = 0.40f;  // fade 不归零，保留 40% 底速
+            constexpr float  kStallBudgetMaxUnits   = 200.0f; // 单次 stall 位移上限
+            Uint32 nowMs = SDL_GetTicks();
+            Uint32 sinceLast = (g_LastMoveEventMs != 0) ? (nowMs - g_LastMoveEventMs) : 0;
+            float  speedMag = std::sqrt(g_LastMoveVx * g_LastMoveVx + g_LastMoveVy * g_LastMoveVy);
+            if (sinceLast > kExtrapolateGuardMs && sinceLast < kExtrapolateWindowMs &&
+                speedMag >= kExtrapolateMinSpeed && g_LastExtrapolateMs != 0 &&
+                std::abs(g_StallExtrapolateBudgetX) < kStallBudgetMaxUnits &&
+                std::abs(g_StallExtrapolateBudgetY) < kStallBudgetMaxUnits)
+            {
+                Uint32 stepMs = nowMs - g_LastExtrapolateMs;
+                if (stepMs > 0 && stepMs < 100)
+                {
+                    // 渐变 fade：从 guard 时刻的 1.0 线性插值到 window 时刻
+                    // 的 kExtrapolateFadeFloor (0.4)，不归零，避免断流末期
+                    // 玩家完全停下、恢复时被真实事件冲倒的顿挫感。
+                    float t = (float)(sinceLast - kExtrapolateGuardMs)
+                            / (float)(kExtrapolateWindowMs - kExtrapolateGuardMs);
+                    if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+                    float fade = 1.0f + (kExtrapolateFadeFloor - 1.0f) * t;
+                    float vx = g_LastMoveVx * fade;
+                    float vy = g_LastMoveVy * fade;
+                    if (vx >  kExtrapolateMaxPerMs) vx =  kExtrapolateMaxPerMs;
+                    if (vx < -kExtrapolateMaxPerMs) vx = -kExtrapolateMaxPerMs;
+                    if (vy >  kExtrapolateMaxPerMs) vy =  kExtrapolateMaxPerMs;
+                    if (vy < -kExtrapolateMaxPerMs) vy = -kExtrapolateMaxPerMs;
+                    float exDx = vx * (float)stepMs;
+                    float exDy = vy * (float)stepMs;
+                    if (std::abs(exDx) > 0.01f || std::abs(exDy) > 0.01f)
+                    {
+                        g_MoveDeltaX += exDx;
+                        g_MoveDeltaY += exDy;
+                        // 同步 prev 位置，避免下一个真实 MOVE 用 prev 算出的
+                        // delta 把外推过的部分再加一遍（双重计算 = 跳）。
+                        g_MovePrevGameX += exDx;
+                        g_MovePrevGameY += exDy;
+                        // 累积本次 stall 已外推的总量（HandleFingerMotion 收
+                        // 到真实 MOVE 时归零），超阈值后停止外推防失控。
+                        g_StallExtrapolateBudgetX += exDx;
+                        g_StallExtrapolateBudgetY += exDy;
+                        TDIAG("touch/extra",
+                            "STALL EXTRAPOLATE sinceLast=%ums step=%ums fade=%.2f "
+                            "v=(%.3f,%.3f) inj=(%.2f,%.2f) budget=(%.1f,%.1f)",
+                            (unsigned)sinceLast, (unsigned)stepMs, fade,
+                            vx, vy, exDx, exDy,
+                            g_StallExtrapolateBudgetX, g_StallExtrapolateBudgetY);
+                    }
+                }
+            }
+            g_LastExtrapolateMs = nowMs;
+        }
+#endif
+
+        // ── Burst smoothing: cap per-Update consumption with carry-over ──
+        // Android InputDispatcher periodically stalls touch delivery for
+        // 300ms~1000ms, then dumps the queued events as a single batched
+        // MotionEvent (with historicalEvents). HandleFingerMotion sums all
+        // those deltas into g_MoveDeltaX/Y. Without a cap, the next
+        // Update() would consume the full burst (e.g. 115 game-units in
+        // one frame) — Player.cpp applies that as one teleport, which the
+        // user perceives as "卡住 → 闪现". By limiting per-Update consume
+        // to kMaxConsumePerUpdate and saving the remainder back into
+        // g_MoveDelta, the burst is smoothed across several Updates so
+        // the player slides smoothly to the catch-up position instead of
+        // teleporting. Choose 16 game-units: at 250Hz Update this is
+        // 4000 units/s — well above any plausible finger speed, so normal
+        // motion has zero added latency, but worst-case bursts get split
+        // over ~7 Updates (≈30ms) instead of one.
+        constexpr float kMaxConsumePerUpdate = 16.0f;
         float dx = g_MoveDeltaX;
         float dy = g_MoveDeltaY;
+        if (dx >  kMaxConsumePerUpdate) dx =  kMaxConsumePerUpdate;
+        if (dx < -kMaxConsumePerUpdate) dx = -kMaxConsumePerUpdate;
+        if (dy >  kMaxConsumePerUpdate) dy =  kMaxConsumePerUpdate;
+        if (dy < -kMaxConsumePerUpdate) dy = -kMaxConsumePerUpdate;
+        // Save unconsumed remainder for the next Update.
+        float carryX = g_MoveDeltaX - dx;
+        float carryY = g_MoveDeltaY - dy;
 
         // Compensate for the framerate multiplier that Player.cpp applies.
         float fmul = g_Supervisor.effectiveFramerateMultiplier;
@@ -889,9 +1067,10 @@ void AndroidTouchInput::Update()
         // tick (waiting for Player to read), or was already drained
         // (active=false) by ConsumeAnalogReset.
 
-        // Consume delta for this frame.
-        g_MoveDeltaX = 0.0f;
-        g_MoveDeltaY = 0.0f;
+        // Consume delta for this frame, keeping any over-cap remainder
+        // so the next Update can drain the burst smoothly.
+        g_MoveDeltaX = carryX;
+        g_MoveDeltaY = carryY;
     }
     else if (g_MoveFingerActive && g_GameManager.isInMenu == 0)
     {
