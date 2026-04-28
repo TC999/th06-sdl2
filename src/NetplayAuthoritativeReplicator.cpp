@@ -1,4 +1,5 @@
 #include "NetplayAuthoritativeReplicator.hpp"
+#include <new>
 
 #include "MainMenu.hpp"
 
@@ -71,7 +72,8 @@ u16 ReadRawEnemyFlags(const Enemy &enemy)
 
 void CapturePlayerState(const Player &player, bool isPlayer1, ReplicatedPlayerState &outState)
 {
-    outState = {};
+    outState.~ReplicatedPlayerState();
+    new (&outState) ReplicatedPlayerState();
     outState.positionCenter = player.positionCenter;
     outState.orbsPosition[0] = player.orbsPosition[0];
     outState.orbsPosition[1] = player.orbsPosition[1];
@@ -102,7 +104,8 @@ template <typename TPlayerState> void ApplyPlayerState(Player &player, const TPl
 
 void CaptureHudState(ReplicatedHudState &outHud)
 {
-    outHud = {};
+    outHud.~ReplicatedHudState();
+    new (&outHud) ReplicatedHudState();
     outHud.guiScore = g_GameManager.guiScore;
     outHud.score = g_GameManager.score;
     outHud.highScore = g_GameManager.highScore;
@@ -124,7 +127,8 @@ void CaptureHudState(ReplicatedHudState &outHud)
 
 void CaptureUiState(ReplicatedUiState &outUi)
 {
-    outUi = {};
+    outUi.~ReplicatedUiState();
+    new (&outUi) ReplicatedUiState();
     outUi.supervisorCurState = g_Supervisor.curState;
     outUi.supervisorWantedState = g_Supervisor.wantedState;
     outUi.mainMenuGameState = (i32)g_MainMenu.gameState;
@@ -574,7 +578,8 @@ void ApplyItems(const AuthoritativeFrameState &state)
 void Reset()
 {
     g_State.authoritativeFrameHashes.clear();
-    g_State.latestAuthoritativeFrameState = {};
+    g_State.latestAuthoritativeFrameState.~AuthoritativeFrameState();
+    new (&g_State.latestAuthoritativeFrameState) AuthoritativeFrameState();
     g_State.lastAuthoritativeHashComparedFrame = -1;
     g_State.authoritativeHashMismatchPending = false;
     std::memset(g_PreviousMirroredBullets, 0, sizeof(g_PreviousMirroredBullets));
@@ -585,7 +590,8 @@ void Reset()
 
 bool CaptureCurrentReplicatedWorldState(int serverFrame, ReplicatedWorldState &outState)
 {
-    outState = {};
+    outState.~ReplicatedWorldState();
+    new (&outState) ReplicatedWorldState();
     outState.valid = true;
     outState.serverFrame = serverFrame;
     outState.ackedInputFrameP1 = std::max(0, serverFrame - g_State.delay);

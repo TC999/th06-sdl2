@@ -353,6 +353,7 @@ static void EnsureFontLoaded()
 {
     if (s_fontInitAttempted) return;
     s_fontInitAttempted = true;
+    Uint32 _ensureFontStartMs = SDL_GetTicks();
 
     // Try local font first (font/ directory next to exe), then system fonts.
     static const char *fontPaths[] = {
@@ -434,6 +435,9 @@ static void EnsureFontLoaded()
             break;
         }
     }
+    fprintf(stderr, "[font] EnsureFontLoaded total = %u ms\n",
+            (unsigned)(SDL_GetTicks() - _ensureFontStartMs));
+    fflush(stderr);
 }
 
 // =========================================================================

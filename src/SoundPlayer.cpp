@@ -141,16 +141,6 @@ void SoundPlayer::StopBGM()
 ZunResult SoundPlayer::LoadWav(char *path)
 {
     HRESULT res;
-    CWaveFile waveFile;
-    u32 startTime;
-    u32 curTime;
-    u32 waitTime;
-    u32 blockAlign;
-    u32 numSamplesPerSec;
-    u32 notifySize;
-    u32 startTime2;
-    u32 curTime2;
-    u32 waitTime2;
 
     if (this->manager == NULL)
     {
@@ -173,40 +163,32 @@ ZunResult SoundPlayer::LoadWav(char *path)
     this->bgmReloadSuppressed = 0;
     this->StopBGM();
     utils::DebugPrint2("load BGM\n");
-    res = waveFile.Open(path, NULL, WAVEFILE_READ);
-    if (res < 0)
-    {
-        utils::DebugPrint2("error : wav file load error %s\n", path);
-        waveFile.Close();
-        return ZUN_ERROR;
-    }
-    if (waveFile.GetSize() == 0)
-    {
-        waveFile.Close();
-        return ZUN_ERROR;
-    }
-    startTime = SDL_GetTicks();
-    curTime = startTime;
-    waitTime = 100;
-    while (curTime < startTime + waitTime && curTime >= startTime)
-    {
-        curTime = SDL_GetTicks();
-    }
-    waveFile.Close();
+    // NOTE: the original PE first did `waveFile.Open(path)` here purely to
+    // run a `GetSize() == 0` sanity check and then closed/discarded it
+    // before calling `manager->CreateStreaming(path, ...)` below — which
+    // re-opens the same file from scratch. On Win98/DirectSound that pre-
+    // open was cheap (RIFF header parse only). With our SDL_mixer-backed
+    // OGG path that pre-open invokes `Mix_LoadWAV_RW`, which fully decodes
+    // the *entire* compressed track to PCM (e.g. 4-minute BGM ≈ 40 MB on
+    // Android ≈ 2–5 seconds CPU). Doing it twice per BGM swap is purely
+    // wasteful; on Android it caused 5–7 second main-thread stalls during
+    // dialogue SKIP (MSG_OPCODE_MUSIC processed in one frame). Skip the
+    // pre-open and rely on CreateStreaming to fail for missing/empty files.
+    Uint32 loadStartMs = SDL_GetTicks();
     res = this->manager->CreateStreaming(&this->backgroundMusic, path, 0, GUID(), 4, 0, NULL);
     if (res < 0)
     {
         utils::DebugPrint2(TH_ERR_SOUNDPLAYER_FAILED_TO_CREATE_BGM_SOUND_BUFFER);
         return ZUN_ERROR;
     }
-    utils::DebugPrint2("comp\n");
-    startTime2 = SDL_GetTicks();
-    curTime2 = startTime2;
-    waitTime2 = 100;
-    while (curTime2 < startTime2 + waitTime2 && curTime2 >= startTime2)
-    {
-        curTime2 = SDL_GetTicks();
-    }
+    utils::DebugPrint2("comp (load took %u ms)\n", (unsigned)(SDL_GetTicks() - loadStartMs));
+    // The original PE had two 100 ms busy-wait spins here (one between the
+    // pre-open and CreateStreaming, one after), almost certainly to let the
+    // DirectSound streaming buffer prime. SDL_mixer's hook-music path needs
+    // no such warm-up — the music callback is driven by the audio device's
+    // own clock — and these spins added 200 ms per BGM swap to the main
+    // thread, which during a SKIPped dialogue compounds across multiple
+    // MUSIC opcodes. Removed.
     CopyBgmPath(this->currentBgmPath, path);
     this->currentPosPath[0] = '\0';
     this->bgmPlaybackStarted = 0;

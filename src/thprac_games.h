@@ -71,6 +71,9 @@ struct AdvancedGameOptions {
     bool th06_enable_manual_dump_hotkey = false;
     bool th06_enable_recovery_auto_dump = false;
     bool th06_enable_debug_logs = false;
+    // Log verbosity for SDL_Log* and TH06_DIAG output.
+    // 0=Off, 1=Error, 2=Warn (default), 3=Info, 4=Debug, 5=Verbose.
+    uint8_t th06_log_level = 2;
     bool th06_enable_astrobot = false;
     uint8_t th06_astrobot_target = 0;
     bool th06_astrobot_auto_shoot = true;
@@ -83,6 +86,10 @@ struct AdvancedGameOptions {
     char th06_autoname_name[12] = {0};
     bool show_keyboard_monitor = false;
     KeyRectStyle keyboard_style;
+    // Disables the SDL_Delay-based software frame limiter so the game loop
+    // runs as fast as the host can sustain. Useful for benchmarking the
+    // batcher / renderer changes; intended for advanced users only.
+    bool th06_unlock_framerate = false;
 };
 extern AdvancedGameOptions g_adv_igi_options;
 

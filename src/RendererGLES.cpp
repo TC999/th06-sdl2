@@ -9,6 +9,7 @@
 #include "TouchVirtualButtons.hpp"
 #include "MenuTouchButtons.hpp"
 #include "thprac_gui_integration.h"
+#include "thprac_th06.h"
 #include "gles_shaders.h"
 #include <imgui.h>
 #include <SDL_image.h>
@@ -1720,7 +1721,9 @@ u32 RendererGLES::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR 
     this->stats.textureUploadBytes += (u64)rgba->w * rgba->h * 4;
 
 #ifdef __ANDROID__
-    // Diagnostic: dump alpha values at key positions for texture analysis
+    // Diagnostic: dump alpha values at key positions for texture analysis.
+    // Gated by Developer tab → Log Level (>= Debug) to avoid logcat spam.
+    if (THPrac::TH06::THPracGetLogLevel() >= 4)
     {
         static i32 texLoadCount = 0;
         texLoadCount++;

@@ -11,12 +11,16 @@
 
 // Diagnostic for point item rendering bug
 #include <stdio.h>
+#include "thprac_th06.h"
+// Gated by the user-selected log level (>= Warn).
+// Per-sprite per-frame firehose: only emit at Verbose(5).
+#define TH06_ITEMDIAG_LEVEL_OK() (THPrac::TH06::THPracGetLogLevel() >= 5)
 #ifdef __ANDROID__
 #include <android/log.h>
-#define ITEM_DIAG(fmt, ...) __android_log_print(ANDROID_LOG_WARN, "TH06_DIAG", fmt, ##__VA_ARGS__)
+#define ITEM_DIAG(fmt, ...) do { if (TH06_ITEMDIAG_LEVEL_OK()) __android_log_print(ANDROID_LOG_WARN, "TH06_DIAG", fmt, ##__VA_ARGS__); } while(0)
 #else
 extern FILE* _diag_get_file();
-#define ITEM_DIAG(fmt, ...) do { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } while(0)
+#define ITEM_DIAG(fmt, ...) do { if (TH06_ITEMDIAG_LEVEL_OK()) { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } } while(0)
 #endif
 
 #include "sdl2_compat.hpp"

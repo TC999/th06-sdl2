@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+
 #include "inttypes.hpp"
 
 namespace th06
@@ -69,6 +71,77 @@ struct ReplayData
     StageReplayData *stageReplayData[7];
 };
 ZUN_ASSERT_SIZE(ReplayData, 0x50);
+
+// =============================================================================
+//  On-disk replay layouts (architecture-independent, stable wire formats).
+//
+//  These structs are byte-identical on x86 (sizeof(void*)==4) and x64
+//  (sizeof(void*)==8). They are NEVER allocated as in-memory game state —
+//  they only appear briefly inside LoadReplayData/SaveReplay as the bridge
+//  between the file bytes and the in-memory ReplayData.
+//
+//  Replay files written by 32-bit TH06 builds reuse the pointer slots in
+//  ReplayData::stageReplayData / LegacyReplayData::stageReplayData as 32-bit
+//  file offsets (relative to start of file). On 64-bit those slots would
+//  occupy 8 bytes, breaking byte compatibility, so we model the wire format
+//  with explicit u32 offset arrays.
+//
+//  Layouts are kept identical to what the 32-bit build produces:
+//    OnDiskReplayData       : 84 bytes (= 0x54), current format with
+//                              shottypeChara2 (post-vanilla addition).
+//    OnDiskLegacyReplayData : 80 bytes (= 0x50), original ZUN format.
+// =============================================================================
+struct OnDiskReplayData
+{
+    char magic[4];          // 0..3
+    u16 version;            // 4..5
+    u8 shottypeChara;       // 6
+    u8 shottypeChara2;      // 7
+    u8 difficulty;          // 8
+                            // 9..11 padding
+    i32 checksum;           // 12..15
+    u8 rngValue1;           // 16
+    u8 rngValue2;           // 17
+    i8 key;                 // 18
+    i8 rngValue3;           // 19
+    char date[9];           // 20..28
+    char name[8];           // 29..36
+                            // 37..39 padding
+    i32 score;              // 40..43
+    f32 slowdownRate2;      // 44..47
+    f32 slowdownRate;       // 48..51
+    f32 slowdownRate3;      // 52..55
+    u32 stageOffset[7];     // 56..83 (file offsets, 0 == absent)
+};
+static_assert(sizeof(OnDiskReplayData) == 0x54, "OnDiskReplayData wire format must be 84 bytes");
+static_assert(offsetof(OnDiskReplayData, key) == 18, "OnDiskReplayData key offset");
+static_assert(offsetof(OnDiskReplayData, rngValue3) == 19, "OnDiskReplayData rngValue3 offset");
+static_assert(offsetof(OnDiskReplayData, stageOffset) == 56, "OnDiskReplayData stageOffset position");
+
+struct OnDiskLegacyReplayData
+{
+    char magic[4];          // 0..3
+    u16 version;            // 4..5
+    u8 shottypeChara;       // 6
+    u8 difficulty;          // 7
+    i32 checksum;           // 8..11
+    u8 rngValue1;           // 12
+    u8 rngValue2;           // 13
+    i8 key;                 // 14
+    i8 rngValue3;           // 15
+    char date[9];           // 16..24
+    char name[8];           // 25..32
+                            // 33..35 padding
+    i32 score;              // 36..39
+    f32 slowdownRate2;      // 40..43
+    f32 slowdownRate;       // 44..47
+    f32 slowdownRate3;      // 48..51
+    u32 stageOffset[7];     // 52..79 (file offsets, 0 == absent)
+};
+static_assert(sizeof(OnDiskLegacyReplayData) == 0x50, "OnDiskLegacyReplayData wire format must be 80 bytes");
+static_assert(offsetof(OnDiskLegacyReplayData, key) == 14, "OnDiskLegacyReplayData key offset");
+static_assert(offsetof(OnDiskLegacyReplayData, rngValue3) == 15, "OnDiskLegacyReplayData rngValue3 offset");
+static_assert(offsetof(OnDiskLegacyReplayData, stageOffset) == 52, "OnDiskLegacyReplayData stageOffset position");
 
 // Check if a replay version is one we can load (0x102 original or 0x103 analog).
 inline bool IsValidReplayVersion(u16 version)

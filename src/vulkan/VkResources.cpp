@@ -2,6 +2,7 @@
 // Phase 3 — see VkResources.hpp for design. All allocations via VMA (no carve-out).
 #include "VkResources.hpp"
 
+#include "../AssetIO.hpp"
 #include "VkContext.hpp"
 
 #include <cstdio>
@@ -238,10 +239,10 @@ void VkDefaultTexture::Shutdown(VkContext& ctx) {
 // =========================================================================================
 
 bool LoadSpvFile(const std::string& path, std::vector<uint32_t>& outWords) {
-    // Phase 5b.3: use SDL_RWFromFile so Android can resolve the path through
-    // the APK AAssetManager when given a relative path (e.g. "shaders_vk/x.spv").
-    // On desktop SDL_RWFromFile happily takes absolute paths too.
-    SDL_RWops* rw = SDL_RWFromFile(path.c_str(), "rb");
+    // Routed through AssetIO so the same call works on every platform:
+    //   - desktop: searches cwd then exe-dir (handles launches from any dir)
+    //   - Android: SDL_RWFromFile reads the SPV from APK assets/
+    SDL_RWops* rw = th06::AssetIO::OpenRW(path.c_str());
     if (!rw) {
         std::fprintf(stderr, "[LoadSpvFile] cannot open %s (%s)\n",
                      path.c_str(), SDL_GetError());

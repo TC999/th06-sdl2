@@ -1,5 +1,6 @@
 #include "NetplayInternal.hpp"
 #include "NetplayAuthoritativeTransport.hpp"
+#include <new>
 #include "AndroidTouchInput.hpp"
 
 namespace th06::Netplay
@@ -989,7 +990,10 @@ void ClearRuntimeCaches()
     g_State.reconnectStartTick = 0;
     g_State.desyncStartTick = 0;
     g_State.reconnectReason = AuthoritativeRecoveryReason_None;
-    g_State.latestAuthoritativeFrameState = {};
+    // GCC ICE on `= AuthoritativeFrameState{}` for this large struct (gimplify
+    // crashes on the brace-init temporary). Reconstruct in-place to avoid it.
+    g_State.latestAuthoritativeFrameState.~AuthoritativeFrameState();
+    new (&g_State.latestAuthoritativeFrameState) AuthoritativeFrameState();
     g_State.lastAuthoritativeHashComparedFrame = -1;
     g_State.authoritativeHashMismatchPending = false;
     g_State.authoritativeHashCheckEnabled = false;
@@ -1023,7 +1027,8 @@ void ClearRemoteRuntimeCaches()
     g_State.lastLatentRetrySourceFrame = -1;
     g_State.seedValidationIgnoreUntilFrame = -1;
     g_State.lastSeedRetryMismatchFrame = -1;
-    g_State.latestAuthoritativeFrameState = {};
+    g_State.latestAuthoritativeFrameState.~AuthoritativeFrameState();
+    new (&g_State.latestAuthoritativeFrameState) AuthoritativeFrameState();
     g_State.lastAuthoritativeHashComparedFrame = -1;
     g_State.authoritativeHashMismatchPending = false;
     g_State.lastSeedRetryOlderThanSnapshotFrame = -1;

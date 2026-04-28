@@ -11,11 +11,20 @@
 
 // Diagnostic logging for point item texture bug investigation
 #include <stdio.h>
+#include "thprac_th06.h"
+// Gate diagnostic output on the user-selected log level (Developer tab → Log Level).
+// Warn macros emit at level >= 2 (Warn); Info macros emit at level >= 3 (Info).
+// Diagnostic logs are firehose-class (per-sprite per-frame). Default level
+// Warn(2) MUST stay quiet, otherwise diag_log.txt fills in seconds.
+//   - DIAG (per-sprite draw)         → Verbose(5) only
+//   - DIAG_INFO (per-sprite state)   → Debug(4)+
+#define TH06_DIAG_LEVEL_OK_WARN() (THPrac::TH06::THPracGetLogLevel() >= 5)
+#define TH06_DIAG_LEVEL_OK_INFO() (THPrac::TH06::THPracGetLogLevel() >= 4)
 #ifdef __ANDROID__
 #include <android/log.h>
 #include <GLES2/gl2.h>
-#define DIAG_LOG(fmt, ...) __android_log_print(ANDROID_LOG_WARN, "TH06_DIAG", fmt, ##__VA_ARGS__)
-#define DIAG_LOG_INFO(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "TH06_DIAG", fmt, ##__VA_ARGS__)
+#define DIAG_LOG(fmt, ...) do { if (TH06_DIAG_LEVEL_OK_WARN()) __android_log_print(ANDROID_LOG_WARN, "TH06_DIAG", fmt, ##__VA_ARGS__); } while(0)
+#define DIAG_LOG_INFO(fmt, ...) do { if (TH06_DIAG_LEVEL_OK_INFO()) __android_log_print(ANDROID_LOG_INFO, "TH06_DIAG", fmt, ##__VA_ARGS__); } while(0)
 #else
 #include <SDL_opengl.h>
 FILE* _diag_get_file() {
@@ -23,8 +32,8 @@ FILE* _diag_get_file() {
     if (!f) { f = fopen("diag_log.txt", "w"); }
     return f;
 }
-#define DIAG_LOG(fmt, ...) do { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } while(0)
-#define DIAG_LOG_INFO(fmt, ...) do { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG_INFO] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } while(0)
+#define DIAG_LOG(fmt, ...) do { if (TH06_DIAG_LEVEL_OK_WARN()) { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } } while(0)
+#define DIAG_LOG_INFO(fmt, ...) do { if (TH06_DIAG_LEVEL_OK_INFO()) { FILE* _f = _diag_get_file(); if(_f) { fprintf(_f, "[TH06_DIAG_INFO] " fmt "\n", ##__VA_ARGS__); fflush(_f); } } } while(0)
 #endif
 
 #include <cmath>

@@ -32,8 +32,8 @@ import android.util.SparseArray;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.InputDevice;
-import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.PointerIcon;
 import android.view.Surface;
 import android.view.View;
@@ -51,6 +51,9 @@ import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import android.content.SharedPreferences;
+import com.th06.game.CompatTouchOverlay;
+
 import java.util.Hashtable;
 import java.util.Locale;
 
@@ -60,10 +63,9 @@ import java.util.Locale;
 */
 public class SDLActivity extends Activity implements View.OnSystemUiVisibilityChangeListener {
     private static final String TAG = "SDL";
-    private static final String INPUT_TRACE_TAG = "SDLInputTrace";
     private static final int SDL_MAJOR_VERSION = 2;
-    private static final int SDL_MINOR_VERSION = 30;
-    private static final int SDL_MICRO_VERSION = 0;
+    private static final int SDL_MINOR_VERSION = 32;
+    private static final int SDL_MICRO_VERSION = 8;
 /*
     // Display InputType.SOURCE/CLASS of events and devices
     //
@@ -91,7 +93,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                 | InputDevice.SOURCE_CLASS_POSITION
                 | InputDevice.SOURCE_CLASS_TRACKBALL);
 
-        if (s2 != 0) cls += "Some_Unkown";
+        if (s2 != 0) cls += "Some_Unknown";
 
         s2 = s_copy & InputDevice.SOURCE_ANY; // keep source only, no class;
 
@@ -165,7 +167,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         if (s == FLAG_TAINTED) src += " FLAG_TAINTED";
         s2 &= ~FLAG_TAINTED;
 
-        if (s2 != 0) src += " Some_Unkown";
+        if (s2 != 0) src += " Some_Unknown";
 
         Log.v(TAG, prefix + "int=" + s_copy + " CLASS={" + cls + " } source(s):" + src);
     }
@@ -220,8 +222,15 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     protected static int mLastCursorID;
     protected static SDLGenericMotionListener_API12 mMotionListener;
     protected static HIDDeviceManager mHIDDeviceManager;
-    protected static final int SOFT_DIRECTION_KEY_RELEASE_TIMEOUT_MS = 750;
-    protected static final SparseArray<Runnable> mSoftDirectionKeyReleaseTasks = new SparseArray<>();
+
+    // === [Compat Touch Patch] =================================================
+    // 兼容触摸 overlay：覆盖在 SDL surface 上接管触摸，绕开 SurfaceView 在
+    // Android 12+ BLAST 渲染管线下的事件分发卡顿，并修补 historical events
+    // 丢失。详见 com.th06.game.CompatTouchOverlay 的注释。
+    protected static CompatTouchOverlay mCompatTouchOverlay;
+    private static final String COMPAT_TOUCH_PREFS = "th06_compat_touch";
+    private static final String COMPAT_TOUCH_KEY = "enabled";
+    // ==========================================================================
 
     // This is what SDL runs in. It invokes SDL_main(), eventually
     protected static Thread mSDLThread;
@@ -285,7 +294,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     // Load the .so
     public void loadLibraries() {
        for (String lib : getLibraries()) {
-          SDL.loadLibrary(lib);
+          SDL.loadLibrary(lib, this);
        }
     }
 
@@ -314,11 +323,69 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         mHasFocus = true;
         mNextNativeState = NativeState.INIT;
         mCurrentNativeState = NativeState.INIT;
+        // [Compat Touch Patch] reset overlay singleton
+        mCompatTouchOverlay = null;
     }
     
     protected SDLSurface createSDLSurface(Context context) {
         return new SDLSurface(context);
     }
+
+    // === [Compat Touch Patch] =================================================
+    /**
+     * 是否启用 Java 兼容触摸 overlay。
+     * 决策顺序：
+     *   1) SharedPreferences 里有显式设置 → 用之；
+     *   2) 否则按 SDK 版本默认：Android 15+（API 35）→ 开；其他 → 关。
+     */
+    protected boolean isCompatTouchModeEnabledDefault()
+    {
+        SharedPreferences prefs = getSharedPreferences(COMPAT_TOUCH_PREFS, MODE_PRIVATE);
+        if (prefs.contains(COMPAT_TOUCH_KEY))
+        {
+            return prefs.getBoolean(COMPAT_TOUCH_KEY, false);
+        }
+        // 默认策略：Android 15+ 上启用，规避 BLAST SurfaceView 触摸事件分发问题
+        return Build.VERSION.SDK_INT >= 35; /* Android 15 (VANILLA_ICE_CREAM) */
+    }
+
+    /**
+     * 由 native 端调用，切换兼容触摸模式并持久化。
+     * 切换 overlay 可见性需要在 UI 线程上执行。
+     */
+    public static void setCompatTouchMode(final boolean enabled)
+    {
+        if (mSingleton == null) return;
+        // 持久化
+        SharedPreferences prefs = mSingleton.getSharedPreferences(
+                COMPAT_TOUCH_PREFS, MODE_PRIVATE);
+        prefs.edit().putBoolean(COMPAT_TOUCH_KEY, enabled).apply();
+        // UI 线程上挂/卸 overlay
+        mSingleton.runOnUiThread(new Runnable()
+        {
+            @Override
+            public void run()
+            {
+                if (mLayout == null) return;
+                if (enabled && mCompatTouchOverlay == null)
+                {
+                    mCompatTouchOverlay = new CompatTouchOverlay(mSingleton);
+                    mLayout.addView(mCompatTouchOverlay,
+                            new RelativeLayout.LayoutParams(
+                                    RelativeLayout.LayoutParams.MATCH_PARENT,
+                                    RelativeLayout.LayoutParams.MATCH_PARENT));
+                    Log.v(TAG, "[CompatTouch] runtime ENABLE");
+                }
+                else if (!enabled && mCompatTouchOverlay != null)
+                {
+                    mLayout.removeView(mCompatTouchOverlay);
+                    mCompatTouchOverlay = null;
+                    Log.v(TAG, "[CompatTouch] runtime DISABLE");
+                }
+            }
+        });
+    }
+    // ==========================================================================
 
     // Setup
     @Override
@@ -327,6 +394,294 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         Log.v(TAG, "Model: " + Build.MODEL);
         Log.v(TAG, "onCreate()");
         super.onCreate(savedInstanceState);
+
+        // [Compat Touch Patch] 早期建立会话日志目录 + 抓 logcat
+        com.th06.game.SessionLogCollector.start(this);
+
+        // [Anti-PEM] vivo OriginOS PEM 即使在前台也会把进程冻结到 /background cgroup，
+        // 导致 ~1Hz 的 input MOVE 节流。启动 foreground service + WakeLock，
+        // 强制系统把我们当前台 service 对待，避免 cgroup-freeze。
+        try {
+            com.th06.game.GamePerformanceService.start(this);
+            Log.i(TAG, "[Anti-PEM] GamePerformanceService.start() dispatched");
+            try { com.th06.game.CompatTouchOverlay.staticWriteLog("[Anti-PEM] start() dispatched"); } catch (Throwable ignore) {}
+        } catch (Throwable t) {
+            Log.w(TAG, "[Anti-PEM] start failed: " + t);
+            try { com.th06.game.CompatTouchOverlay.staticWriteLog("[Anti-PEM] start FAILED: " + t); } catch (Throwable ignore) {}
+        }
+
+        // [Compat Touch Patch] 把主线程（UI 线程，也是 InputDispatcher 投递的
+        // 目标线程）优先级提升到 DISPLAY 级。Android 默认 main thread 是
+        // THREAD_PRIORITY_DEFAULT (0)；DISPLAY = -4 表示比 default 更高，
+        // 仅次于 URGENT_DISPLAY/AUDIO，能显著降低输入事件分发的调度延迟，
+        // 减少 InputDispatcher → Activity.dispatchTouchEvent 之间的卡顿。
+        try
+        {
+            android.os.Process.setThreadPriority(
+                    android.os.Process.myTid(),
+                    android.os.Process.THREAD_PRIORITY_DISPLAY);
+            Log.v(TAG, "[CompatTouch] main thread boosted to THREAD_PRIORITY_DISPLAY");
+        }
+        catch (Throwable t)
+        {
+            Log.w(TAG, "[CompatTouch] failed to boost main thread priority: " + t);
+        }
+
+        // [Compat Touch Patch] 静态文件日志（顶层 dispatchTouchEvent 共享）
+        com.th06.game.CompatTouchOverlay.ensureStaticLogInited(this);
+
+        // [Compat Touch Patch] 反系统级 1Hz 输入节流：
+        //   日志显示 vivo Android 16 上每隔正好 ~1000ms 会出现一次 1Hz 输入分发
+        //   断流（compat_touch / touch_native 均有相邻 MV 事件 ts==now 但 gap=1000ms）。
+        //   推断是省电策略把"看起来 idle 的"主线程 down-clock，导致 InputDispatcher
+        //   投递回调被延后。三层反制：
+        //   1) 关闭 CPU/GPU 热节流 (setSustainedPerformanceMode, API 24+)
+        //   2) Choreographer 自循环 postFrameCallback，让主线程永远在每一 vsync
+        //      都被唤醒一次，调度器不会把它判定为 idle。
+        //   3) 同时持有 FLAG_KEEP_SCREEN_ON 防屏幕休眠。
+        try
+        {
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N /* 24 */)
+            {
+                getWindow().setSustainedPerformanceMode(true);
+                Log.v(TAG, "[CompatTouch] sustainedPerformanceMode=ON");
+            }
+        }
+        catch (Throwable t)
+        {
+            Log.w(TAG, "[CompatTouch] sustainedPerformanceMode failed: " + t);
+        }
+        try
+        {
+            final android.view.Choreographer choreographer = android.view.Choreographer.getInstance();
+            choreographer.postFrameCallback(new android.view.Choreographer.FrameCallback()
+            {
+                @Override
+                public void doFrame(long frameTimeNanos)
+                {
+                    // 自循环：保持主线程每一 vsync 都被调度一次，避免被系统
+                    // 判定为 idle 后输入分发被节流到 1Hz。空回调，无渲染开销。
+                    android.view.Choreographer.getInstance().postFrameCallback(this);
+                }
+            });
+            Log.v(TAG, "[CompatTouch] vsync keep-alive callback armed");
+        }
+        catch (Throwable t)
+        {
+            Log.w(TAG, "[CompatTouch] choreographer keep-alive failed: " + t);
+        }
+
+        // [Compat Touch Patch] 主动向系统宣告"我是高优先级游戏"，
+        // 让 OriginOS 6 的"蓝河流畅引擎/蓝心智能"等系统级智能调度把我们
+        // 纳入游戏白名单，停止后台节流。
+        //   - GameManager.setGameState (API 31+): 标记当前处于 ACTIVE_GAMEPLAY，
+        //     并请求 GAME_MODE_PERFORMANCE 性能模式。
+        //   - PerformanceHintManager (API 33+): 创建 hint session 报告目标
+        //     16ms 帧时间，让 CPU governor 维持高频。
+        try
+        {
+            if (Build.VERSION.SDK_INT >= 31 /* Build.VERSION_CODES.S */)
+            {
+                Object gmObj = getSystemService("game");
+                if (gmObj != null)
+                {
+                    // 反射调用以兼容更低编译 SDK 不识别 GameManager
+                    try
+                    {
+                        Class<?> stateCls = Class.forName("android.app.GameState");
+                        // GameState(boolean isLoading, int mode) -- mode 1 = MODE_GAMEPLAY
+                        java.lang.reflect.Constructor<?> ctor =
+                                stateCls.getConstructor(boolean.class, int.class);
+                        Object state = ctor.newInstance(false, 1 /* MODE_GAMEPLAY */);
+                        gmObj.getClass()
+                                .getMethod("setGameState", stateCls)
+                                .invoke(gmObj, state);
+                        Log.v(TAG, "[CompatTouch] GameManager.setGameState(MODE_GAMEPLAY) sent");
+                    }
+                    catch (Throwable inner)
+                    {
+                        Log.w(TAG, "[CompatTouch] GameManager.setGameState failed: " + inner);
+                    }
+                }
+            }
+        }
+        catch (Throwable t)
+        {
+            Log.w(TAG, "[CompatTouch] GameManager API not available: " + t);
+        }
+        try
+        {
+            if (Build.VERSION.SDK_INT >= 33 /* Build.VERSION_CODES.TIRAMISU */)
+            {
+                Object phmObj = getSystemService("performance_hint");
+                if (phmObj != null)
+                {
+                    // PerformanceHintManager.createHintSession(int[] tids, long targetWorkDurationNanos)
+                    int tid = android.os.Process.myTid();
+                    Object session = phmObj.getClass()
+                            .getMethod("createHintSession", int[].class, long.class)
+                            .invoke(phmObj, new int[] { tid }, 16_666_666L /* 60Hz */);
+                    if (session != null)
+                    {
+                        Log.v(TAG, "[CompatTouch] PerformanceHintManager session armed (60Hz)");
+                    }
+                }
+            }
+        }
+        catch (Throwable t)
+        {
+            Log.w(TAG, "[CompatTouch] PerformanceHintManager unavailable: " + t);
+        }
+
+        // [GameSignal] 进一步把"我是游戏"信号拉满，覆盖 OEM 私有 API。
+        // 这些反射调用全部 try/catch，OEM 上不存在不影响其他设备。
+        // 每个成功命中的 OEM 信号都会打印 "[GameSignal] HIT: xxx"，
+        // 最后输出 "[GameSignal] TOTAL HITS: N" 汇总，便于在日志里搜索。
+        java.util.List<String> gameSignalHits = new java.util.ArrayList<>();
+        try {
+            // 1. 显示偏好高刷：通知 WindowManager 我们想要 120Hz/最高刷新率
+            // （改自 60→120：vivo V2323A 等设备屏幕支持 120Hz，触摸采样
+            //  率通常跟随屏幕刷新率。60Hz 时实测 batched dispatch 间隔
+            //  ~60ms，提升到 120Hz 可让单批样本数更密集。）
+            try {
+                android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
+                lp.preferredRefreshRate = 120.0f;
+                getWindow().setAttributes(lp);
+                gameSignalHits.add("WindowManager.preferredRefreshRate=120");
+                Log.i(TAG, "[GameSignal] HIT: WindowManager.preferredRefreshRate=120");
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: preferredRefreshRate (" + t + ")");
+            }
+
+            // 2. Surface frame rate hint (API 30+)：标记我们是游戏内容
+            try {
+                if (Build.VERSION.SDK_INT >= 30 && mSurface != null && mSurface.getHolder() != null
+                        && mSurface.getHolder().getSurface() != null) {
+                    android.view.Surface surf = mSurface.getHolder().getSurface();
+                    surf.getClass().getMethod("setFrameRate", float.class, int.class)
+                            .invoke(surf, 120.0f, 0 /* FRAME_RATE_COMPATIBILITY_DEFAULT */);
+                    gameSignalHits.add("Surface.setFrameRate(120)");
+                    Log.i(TAG, "[GameSignal] HIT: Surface.setFrameRate(120)");
+                }
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: Surface.setFrameRate (" + t + ")");
+            }
+
+            // 3. vivo VGame SDK：很多 vivo 游戏会反射调一下这个空方法触发识别
+            try {
+                Class<?> vgameCls = Class.forName("com.vivo.vgamehelper.VGameHelper");
+                vgameCls.getMethod("notifyGameStart", android.content.Context.class)
+                        .invoke(null, this);
+                gameSignalHits.add("vivo.VGameHelper.notifyGameStart");
+                Log.i(TAG, "[GameSignal] HIT: vivo.VGameHelper.notifyGameStart");
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: vivo VGameHelper (" + t + ")");
+            }
+
+            // 4. 小米 GameTurbo：发广播声明自己是游戏前台
+            try {
+                android.content.Intent miuiGameIntent = new android.content.Intent(
+                        "miui.intent.action.GAME_BOOSTER_STATE");
+                miuiGameIntent.putExtra("package", getPackageName());
+                miuiGameIntent.putExtra("game_state", "active");
+                sendBroadcast(miuiGameIntent);
+                gameSignalHits.add("MIUI.GAME_BOOSTER_STATE broadcast");
+                Log.i(TAG, "[GameSignal] HIT: MIUI.GAME_BOOSTER_STATE broadcast sent");
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: MIUI broadcast (" + t + ")");
+            }
+
+            // 5. 华为 GameKit：反射初始化（如果 HMS Core 存在）
+            try {
+                Class<?> gkCls = Class.forName("com.huawei.hms.jos.JosApps");
+                gkCls.getMethod("getGamesClient", android.app.Activity.class)
+                        .invoke(null, this);
+                gameSignalHits.add("Huawei.HMS.GamesClient");
+                Log.i(TAG, "[GameSignal] HIT: Huawei HMS GamesClient");
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: Huawei GameKit (" + t + ")");
+            }
+
+            // 6. OPPO/realme 游戏空间：发广播
+            try {
+                android.content.Intent oppoGameIntent = new android.content.Intent(
+                        "com.coloros.gamespace.GAME_START");
+                oppoGameIntent.putExtra("pkg", getPackageName());
+                sendBroadcast(oppoGameIntent);
+                gameSignalHits.add("ColorOS.GAME_START broadcast");
+                Log.i(TAG, "[GameSignal] HIT: ColorOS GAME_START broadcast sent");
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: ColorOS broadcast (" + t + ")");
+            }
+
+            // 7. ActivityManager.setProcessStateSummary：声明高优先级
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    android.app.ActivityManager am =
+                            (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                    if (am != null) {
+                        am.getClass()
+                                .getMethod("setProcessStateSummary", byte[].class)
+                                .invoke(am, new byte[]{1 /* GAME */});
+                        gameSignalHits.add("ActivityManager.setProcessStateSummary");
+                        Log.i(TAG, "[GameSignal] HIT: ActivityManager.setProcessStateSummary");
+                    }
+                }
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: setProcessStateSummary (" + t + ")");
+            }
+
+            // 8. 检查 PackageManager 是否能查询到我们的 game_mode_config 资源
+            // （间接验证 Manifest 静态声明被系统读到）
+            try {
+                android.content.pm.ApplicationInfo ai = getApplicationInfo();
+                int catField = -1;
+                try {
+                    java.lang.reflect.Field f =
+                            android.content.pm.ApplicationInfo.class.getField("category");
+                    catField = f.getInt(ai);
+                } catch (Throwable ignore) {}
+                if (catField == 0 /* CATEGORY_GAME */) {
+                    gameSignalHits.add("ApplicationInfo.category==CATEGORY_GAME");
+                    Log.i(TAG, "[GameSignal] HIT: system reads us as CATEGORY_GAME (appCategory=game)");
+                } else {
+                    Log.w(TAG, "[GameSignal] WARN: ApplicationInfo.category=" + catField
+                            + " (expected 0=CATEGORY_GAME)");
+                }
+            } catch (Throwable t) {
+                Log.v(TAG, "[GameSignal] miss: ApplicationInfo.category check (" + t + ")");
+            }
+
+            // 9. 确认前面已经调用的 GameManager / PerformanceHintManager 是否成功
+            //    （它们在前两个 try 块里，把它们的结果统一登记进汇总）
+            try {
+                if (Build.VERSION.SDK_INT >= 31 && getSystemService("game") != null) {
+                    gameSignalHits.add("GameManager service present");
+                }
+            } catch (Throwable ignore) {}
+            try {
+                if (Build.VERSION.SDK_INT >= 33 && getSystemService("performance_hint") != null) {
+                    gameSignalHits.add("PerformanceHintManager service present");
+                }
+            } catch (Throwable ignore) {}
+
+            // 汇总：日志关键字 "GameSignal] TOTAL HITS"
+            StringBuilder sb = new StringBuilder();
+            sb.append("[GameSignal] TOTAL HITS: ").append(gameSignalHits.size()).append(" -> ");
+            for (int i = 0; i < gameSignalHits.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(gameSignalHits.get(i));
+            }
+            Log.i(TAG, sb.toString());
+
+            // 同时写一份到 session 日志，方便没 logcat 时查
+            try {
+                com.th06.game.CompatTouchOverlay.staticWriteLog(sb.toString());
+            } catch (Throwable ignore) {}
+        } catch (Throwable t) {
+            Log.w(TAG, "[GameSignal] block failed: " + t);
+        }
 
         try {
             Thread.currentThread().setName("SDLActivity");
@@ -401,6 +756,27 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         mLayout = new RelativeLayout(this);
         mLayout.addView(mSurface);
+
+        // === [Compat Touch Patch] ==========================================
+        // 决定是否启用 Java 兼容触摸 overlay：默认 Android 15+ (SDK 35) 开启，
+        // 用户偏好优先（SharedPreferences）。开启时把透明 overlay 加到 layout
+        // 顶部接管所有触摸；关闭时仍走原 SDLSurface 路径。
+        if (isCompatTouchModeEnabledDefault())
+        {
+            mCompatTouchOverlay = new CompatTouchOverlay(this);
+            mLayout.addView(mCompatTouchOverlay,
+                    new RelativeLayout.LayoutParams(
+                            RelativeLayout.LayoutParams.MATCH_PARENT,
+                            RelativeLayout.LayoutParams.MATCH_PARENT));
+            Log.v(TAG, "[CompatTouch] overlay attached (SDK="
+                    + Build.VERSION.SDK_INT + ")");
+        }
+        else
+        {
+            Log.v(TAG, "[CompatTouch] overlay disabled (SDK="
+                    + Build.VERSION.SDK_INT + ")");
+        }
+        // ===================================================================
 
         // Get our current screen orientation and pass it down.
         mCurrentOrientation = SDLActivity.getCurrentOrientation();
@@ -530,6 +906,52 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         return result;
     }
 
+    // ── [Compat Touch Patch] Activity 层最顶层触摸拦截 ─────────────────────
+    // 比任何 View（包括 SDLSurface、CompatTouchOverlay）都更早收到 MotionEvent。
+    // InputDispatcher → ViewRootImpl → Activity.dispatchTouchEvent → ...
+    // 我们在这里就把事件转发给 native 并 return true，整条 View 子树根本不会
+    // 收到 ACTION_DOWN/MOVE/UP，避免 SurfaceView BLAST 渲染线程阻塞触摸分发、
+    // 也避免任何子 View（对话框、弹窗、ImGui 之类）误吃事件。
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev)
+    {
+        if (mBrokenLibraries) return super.dispatchTouchEvent(ev);
+        // 只有兼容触摸模式开启时才接管
+        if (!isCompatTouchModeEnabledDefault())
+        {
+            return super.dispatchTouchEvent(ev);
+        }
+        try
+        {
+            // ACTION_DOWN 时申请非批处理调度；getDecorView 总是存在
+            if (ev.getActionMasked() == MotionEvent.ACTION_DOWN)
+            {
+                try
+                {
+                    View dv = getWindow().getDecorView();
+                    if (dv != null) dv.requestUnbufferedDispatch(ev);
+                }
+                catch (Throwable ignore) { /* API < 21 不会进来 */ }
+            }
+            // 用 SDL surface 的真实尺寸归一化（mSurface 已 attach 到 layout）
+            int w = (mSurface != null) ? mSurface.getWidth()  : 0;
+            int h = (mSurface != null) ? mSurface.getHeight() : 0;
+            if (w <= 1 || h <= 1)
+            {
+                // surface 还没测量出来时退到 decor view 尺寸
+                View dv = getWindow().getDecorView();
+                if (dv != null) { w = dv.getWidth(); h = dv.getHeight(); }
+            }
+            boolean consumed = com.th06.game.CompatTouchOverlay.dispatchToNative(ev, w, h);
+            if (consumed) return true;
+        }
+        catch (Throwable t)
+        {
+            Log.w(TAG, "[CompatTouch] dispatchTouchEvent forward failed: " + t);
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
@@ -586,6 +1008,12 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     @Override
     protected void onDestroy() {
         Log.v(TAG, "onDestroy()");
+
+        // [Compat Touch Patch] 停掉 logcat 抓取线程
+        try { com.th06.game.SessionLogCollector.stop(); } catch (Throwable ignore) {}
+
+        // [Anti-PEM] 停止 foreground service
+        try { com.th06.game.GamePerformanceService.stop(this); } catch (Throwable ignore) {}
 
         if (mHIDDeviceManager != null) {
             HIDDeviceManager.release(mHIDDeviceManager);
@@ -794,6 +1222,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                                 window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
                                 SDLActivity.mFullscreenModeActive = false;
                             }
+                            if (Build.VERSION.SDK_INT >= 28 /* Android 9 (Pie) */) {
+                                window.getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                            }
                         }
                     } else {
                         Log.e(TAG, "error handling message, getContext() returned no Activity");
@@ -999,8 +1430,8 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         /* No valid hint, nothing is explicitly allowed */
         if (!is_portrait_allowed && !is_landscape_allowed) {
             if (resizable) {
-                /* All orientations are allowed */
-                req = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR;
+                /* All orientations are allowed, respecting user orientation lock setting */
+                req = ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
             } else {
                 /* Fixed window and nothing specified. Get orientation from w/h of created window */
                 req = (w > h ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
@@ -1009,8 +1440,8 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             /* At least one orientation is allowed */
             if (resizable) {
                 if (is_portrait_allowed && is_landscape_allowed) {
-                    /* hint allows both landscape and portrait, promote to full sensor */
-                    req = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR;
+                    /* hint allows both landscape and portrait, promote to full user */
+                    req = ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
                 } else {
                     /* Use the only one allowed "orientation" */
                     req = (is_landscape_allowed ? orientation_landscape : orientation_portrait);
@@ -1312,99 +1743,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         return event.isPrintingKey() || event.getKeyCode() == KeyEvent.KEYCODE_SPACE;
     }
 
-    private static boolean isSoftKeyboardEvent(KeyEvent event) {
-        if ((event.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) != 0) {
-            return true;
-        }
-
-        if (event.getDeviceId() == KeyCharacterMap.VIRTUAL_KEYBOARD) {
-            return true;
-        }
-
-        InputDevice device = InputDevice.getDevice(event.getDeviceId());
-        return device != null && device.isVirtual();
-    }
-
-    private static boolean isDirectionalPadKey(int keyCode) {
-        return keyCode == KeyEvent.KEYCODE_DPAD_UP ||
-               keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
-               keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
-               keyCode == KeyEvent.KEYCODE_DPAD_RIGHT;
-    }
-
-    private static String describeKeyAction(int action) {
-        switch (action) {
-        case KeyEvent.ACTION_DOWN:
-            return "DOWN";
-        case KeyEvent.ACTION_UP:
-            return "UP";
-        case KeyEvent.ACTION_MULTIPLE:
-            return "MULTIPLE";
-        default:
-            return "UNKNOWN(" + action + ")";
-        }
-    }
-
-    private static String describeKeyEventForLog(int keyCode, KeyEvent event, int source, boolean isSoftDirectionalEvent,
-                                                 boolean isTextInputEvent, boolean isJoystickDevice) {
-        return "action=" + describeKeyAction(event.getAction())
-                + " key=" + KeyEvent.keyCodeToString(keyCode) + "(" + keyCode + ")"
-                + " repeat=" + event.getRepeatCount()
-                + " unicode=" + event.getUnicodeChar()
-                + " flags=0x" + Integer.toHexString(event.getFlags())
-                + " source=" + SDLControllerManager.describeSourceForLog(source)
-                + " deviceId=" + event.getDeviceId()
-                + " device={" + SDLControllerManager.describeDeviceForLog(event.getDeviceId()) + "}"
-                + " softDirectional=" + isSoftDirectionalEvent
-                + " textInput=" + isTextInputEvent
-                + " joystickDevice=" + isJoystickDevice;
-    }
-
-    private static void cancelSoftDirectionKeyRelease(int keyCode) {
-        if (mSingleton == null) {
-            return;
-        }
-
-        Runnable pending = mSoftDirectionKeyReleaseTasks.get(keyCode);
-        if (pending != null) {
-            mSingleton.commandHandler.removeCallbacks(pending);
-            mSoftDirectionKeyReleaseTasks.remove(keyCode);
-            Log.d(INPUT_TRACE_TAG, "soft-direction cancel key=" + KeyEvent.keyCodeToString(keyCode) + "(" + keyCode + ")");
-        }
-    }
-
-    private static boolean hasSoftDirectionKeyRelease(int keyCode) {
-        return mSoftDirectionKeyReleaseTasks.get(keyCode) != null;
-    }
-
-    private static void scheduleSoftDirectionKeyRelease(final int keyCode) {
-        if (mSingleton == null) {
-            return;
-        }
-
-        cancelSoftDirectionKeyRelease(keyCode);
-
-        Runnable releaseTask = new Runnable() {
-            @Override
-            public void run() {
-                mSoftDirectionKeyReleaseTasks.remove(keyCode);
-                Log.d(INPUT_TRACE_TAG, "soft-direction timeout key=" + KeyEvent.keyCodeToString(keyCode)
-                        + "(" + keyCode + ") -> native key up");
-                SDLActivity.onNativeKeyUp(keyCode);
-            }
-        };
-
-        mSoftDirectionKeyReleaseTasks.put(keyCode, releaseTask);
-        mSingleton.commandHandler.postDelayed(releaseTask, SOFT_DIRECTION_KEY_RELEASE_TIMEOUT_MS);
-        Log.d(INPUT_TRACE_TAG, "soft-direction schedule key=" + KeyEvent.keyCodeToString(keyCode)
-                + "(" + keyCode + ") timeoutMs=" + SOFT_DIRECTION_KEY_RELEASE_TIMEOUT_MS);
-    }
-
     public static boolean handleKeyEvent(View v, int keyCode, KeyEvent event, InputConnection ic) {
         int deviceId = event.getDeviceId();
         int source = event.getSource();
-        boolean isSoftDirectionalEvent = isDirectionalPadKey(keyCode) && isSoftKeyboardEvent(event);
-        boolean isTextInput = isTextInputEvent(event);
 
         if (source == InputDevice.SOURCE_UNKNOWN) {
             InputDevice device = InputDevice.getDevice(deviceId);
@@ -1413,6 +1754,12 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             }
         }
 
+//        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+//            Log.v("SDL", "key down: " + keyCode + ", deviceId = " + deviceId + ", source = " + source);
+//        } else if (event.getAction() == KeyEvent.ACTION_UP) {
+//            Log.v("SDL", "key up: " + keyCode + ", deviceId = " + deviceId + ", source = " + source);
+//        }
+
         // Dispatch the different events depending on where they come from
         // Some SOURCE_JOYSTICK, SOURCE_DPAD or SOURCE_GAMEPAD are also SOURCE_KEYBOARD
         // So, we try to process them as JOYSTICK/DPAD/GAMEPAD events first, if that fails we try them as KEYBOARD
@@ -1420,24 +1767,14 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         // Furthermore, it's possible a game controller has SOURCE_KEYBOARD and
         // SOURCE_JOYSTICK, while its key events arrive from the keyboard source
         // So, retrieve the device itself and check all of its sources
-        boolean isJoystickDevice = SDLControllerManager.isDeviceSDLJoystick(deviceId);
-        Log.d(INPUT_TRACE_TAG, "handleKeyEvent " + describeKeyEventForLog(keyCode, event, source,
-                isSoftDirectionalEvent, isTextInput, isJoystickDevice));
-
-        if (isJoystickDevice) {
+        if (SDLControllerManager.isDeviceSDLJoystick(deviceId)) {
             // Note that we process events with specific key codes here
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                int nativeResult = SDLControllerManager.onNativePadDown(deviceId, keyCode);
-                Log.d(INPUT_TRACE_TAG, "dispatch padDown key=" + KeyEvent.keyCodeToString(keyCode)
-                        + "(" + keyCode + ") deviceId=" + deviceId + " nativeResult=" + nativeResult);
-                if (nativeResult == 0) {
+                if (SDLControllerManager.onNativePadDown(deviceId, keyCode) == 0) {
                     return true;
                 }
             } else if (event.getAction() == KeyEvent.ACTION_UP) {
-                int nativeResult = SDLControllerManager.onNativePadUp(deviceId, keyCode);
-                Log.d(INPUT_TRACE_TAG, "dispatch padUp key=" + KeyEvent.keyCodeToString(keyCode)
-                        + "(" + keyCode + ") deviceId=" + deviceId + " nativeResult=" + nativeResult);
-                if (nativeResult == 0) {
+                if (SDLControllerManager.onNativePadUp(deviceId, keyCode) == 0) {
                     return true;
                 }
             }
@@ -1452,52 +1789,26 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                 case KeyEvent.ACTION_UP:
                     // mark the event as handled or it will be handled by system
                     // handling KEYCODE_BACK by system will call onBackPressed()
-                    Log.d(INPUT_TRACE_TAG, "ignore mouse navigation key=" + KeyEvent.keyCodeToString(keyCode)
-                            + "(" + keyCode + ") deviceId=" + deviceId);
                     return true;
                 }
             }
         }
 
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            if (isSoftDirectionalEvent) {
-                Log.d(INPUT_TRACE_TAG, "dispatch native key down via soft-direction path key="
-                        + KeyEvent.keyCodeToString(keyCode) + "(" + keyCode + ")");
-                onNativeKeyDown(keyCode);
-                scheduleSoftDirectionKeyRelease(keyCode);
-                return true;
-            }
-            if (isTextInput) {
+            if (isTextInputEvent(event)) {
                 if (ic != null) {
                     ic.commitText(String.valueOf((char) event.getUnicodeChar()), 1);
                 } else {
                     SDLInputConnection.nativeCommitText(String.valueOf((char) event.getUnicodeChar()), 1);
                 }
-                Log.d(INPUT_TRACE_TAG, "commit text key=" + KeyEvent.keyCodeToString(keyCode)
-                        + "(" + keyCode + ") unicode=" + event.getUnicodeChar());
             }
-            Log.d(INPUT_TRACE_TAG, "dispatch native key down key=" + KeyEvent.keyCodeToString(keyCode)
-                    + "(" + keyCode + ")");
             onNativeKeyDown(keyCode);
             return true;
         } else if (event.getAction() == KeyEvent.ACTION_UP) {
-            if (isSoftDirectionalEvent) {
-                boolean hadPendingRelease = hasSoftDirectionKeyRelease(keyCode);
-                cancelSoftDirectionKeyRelease(keyCode);
-                Log.d(INPUT_TRACE_TAG, "soft-direction key up key=" + KeyEvent.keyCodeToString(keyCode)
-                        + "(" + keyCode + ") hadPendingRelease=" + hadPendingRelease);
-                if (!hadPendingRelease) {
-                    return true;
-                }
-            }
-            Log.d(INPUT_TRACE_TAG, "dispatch native key up key=" + KeyEvent.keyCodeToString(keyCode)
-                    + "(" + keyCode + ")");
             onNativeKeyUp(keyCode);
             return true;
         }
 
-        Log.d(INPUT_TRACE_TAG, "unhandled key event " + describeKeyEventForLog(keyCode, event, source,
-                isSoftDirectionalEvent, isTextInput, isJoystickDevice));
         return false;
     }
 

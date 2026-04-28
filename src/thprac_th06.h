@@ -121,6 +121,11 @@ namespace TH06 {
     bool THPracIsManualDumpHotkeyEnabled();
     bool THPracIsRecoveryAutoDumpEnabled();
     bool THPracIsDebugLogEnabled();
+    // Log verbosity controls (UI in Developer tab).
+    // Levels: 0=Off, 1=Error, 2=Warn, 3=Info, 4=Debug, 5=Verbose.
+    uint8_t THPracGetLogLevel();
+    void THPracSetLogLevel(uint8_t level);
+    void THPracApplyLogLevel();
     bool THPracIsDeveloperModeEnabled();
     bool THPracIsNewTouchEnabled();
     bool THPracIsMouseFollowEnabled();

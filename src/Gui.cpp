@@ -647,6 +647,8 @@ ZunResult GuiImpl::RunMsg()
     while ((i32)(this->msg.timer.current >= msgTime(this->msg.currentInstr)))
     {
         const u8 *curArgs = msgArgs(this->msg.currentInstr);
+        Uint32 _opStart = SDL_GetTicks();
+        int _opcode = msgOpcode(this->msg.currentInstr);
 
         switch (msgOpcode(this->msg.currentInstr))
         {
@@ -802,6 +804,15 @@ ZunResult GuiImpl::RunMsg()
         case MSG_OPCODE_WAITSKIPPABLE:
             this->msg.dialogueSkippable = utils::ReadUnaligned<i32>(curArgs);
             break;
+        }
+        {
+            Uint32 _opCost = SDL_GetTicks() - _opStart;
+            if (_opCost >= 50)
+            {
+                fprintf(stderr, "[msg/slow] opcode=%d cost=%u ms\n",
+                        _opcode, (unsigned)_opCost);
+                fflush(stderr);
+            }
         }
         this->msg.currentInstr = nextMsgInstr(this->msg.currentInstr);
     }

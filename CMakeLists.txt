@@ -22,6 +22,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(th06_sdl2 LANGUAGES C CXX)
 
+# Generate PDB even in Release (for VMProtect / debugging)
+if(MSVC)
+    add_compile_options($<$<CONFIG:Release>:/Zi>)
+    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+endif()
+
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -170,6 +176,7 @@ set(TH06_GAME_SOURCES
     src/Ending.cpp
     src/EnemyEclInstr.cpp
     src/EnemyManager.cpp
+    src/AssetIO.cpp
     src/FileSystem.cpp
     src/GameErrorContext.cpp
     src/GameManager.cpp
@@ -215,10 +222,6 @@ set(TH06_GAME_SOURCES
     src/Supervisor.cpp
     src/TextHelper.cpp
     src/utils.cpp
-    src/WatchdogWin.cpp
-    src/WatchdogPosix.cpp
-    src/CrashHandlerPosix.cpp
-    src/CrashHandlerWin.cpp
     src/ZunTimer.cpp
     src/zwave.cpp
     # pbg3 文件解析库
@@ -258,6 +261,15 @@ if(TH06_ENABLE_PREDICTION_ROLLBACK)
     list(APPEND TH06_GAME_SOURCES src/NetplayRecoveryHeuristics.cpp)
 else()
     list(APPEND TH06_GAME_SOURCES src/NetplayRecoveryHeuristicsDisabled.cpp)
+endif()
+
+# Platform-specific watchdog/crash-handler implementations. Both Watchdog*.cpp
+# files define the same `th06::WatchdogWin::Init/Shutdown/...` symbols (one as
+# stub, one as the real implementation), so they conflict if both are linked.
+if(WIN32)
+    list(APPEND TH06_GAME_SOURCES src/WatchdogWin.cpp src/CrashHandlerWin.cpp)
+else()
+    list(APPEND TH06_GAME_SOURCES src/WatchdogPosix.cpp src/CrashHandlerPosix.cpp)
 endif()
 
 add_executable(th06 ${TH06_GAME_SOURCES})
@@ -463,8 +475,10 @@ if(TH06_USE_VULKAN)
     message(STATUS "TH06_USE_VULKAN: loader = volk (runtime LoadLibrary)")
 
     # --- 3. Vulkan 源文件集 (Phase 5 主 target 也将复用) ---
+    # NOTE: RendererVulkan.cpp depends on thprac (HUD log level, unlock-framerate
+    # toggle, etc.). vk_smoketest does not link thprac, so it is excluded here
+    # and added separately to the main th06 target below.
     set(TH06_VULKAN_SOURCES
-        ${CMAKE_SOURCE_DIR}/src/RendererVulkan.cpp
         ${CMAKE_SOURCE_DIR}/src/vulkan/VkContext.cpp
         ${CMAKE_SOURCE_DIR}/src/vulkan/VkSwapchain.cpp
         ${CMAKE_SOURCE_DIR}/src/vulkan/VkFrameContext.cpp
@@ -498,6 +512,7 @@ if(TH06_USE_VULKAN)
     target_compile_definitions(vk_smoketest PRIVATE
         TH06_USE_VULKAN=1
         VK_NO_PROTOTYPES=1       # 强制全面走 volk 函数指针，避免 link 时跳到未定义的 stdcall 原型
+        TH06_VK_NO_THPRAC=1      # smoketest 不链 thprac_games，关掉 unlock-framerate 钩子
     )
     if(MSVC)
         # 新增 .cpp 是 UTF-8 (无 BOM)；告诉 cl 不要假设源是 codepage 936，消除 C4819
@@ -539,6 +554,7 @@ if(TH06_USE_VULKAN)
         v_tex1_diffuse_xyzrwh.vert
         v_tex1_diffuse_xyz.vert
         v_render_vertex_info.vert
+        v_tex1_diffuse_xyz_clip.vert
         f_color.frag
         f_textured.frag
     )
@@ -563,7 +579,7 @@ if(TH06_USE_VULKAN)
 
     # --- 6. Phase 5b: link Vulkan sources into main th06 game target so
     # `--backend=vulkan` actually creates RendererVulkan at runtime.
-    target_sources(th06 PRIVATE ${TH06_VULKAN_SOURCES})
+    target_sources(th06 PRIVATE ${TH06_VULKAN_SOURCES} ${CMAKE_SOURCE_DIR}/src/RendererVulkan.cpp)
     target_include_directories(th06 PRIVATE
         ${Vulkan_INCLUDE_DIR}
         ${TH06_VULKAN_VMA_DIR}
@@ -577,5 +593,17 @@ if(TH06_USE_VULKAN)
     add_dependencies(th06 th06_vk_shaders)
     target_compile_definitions(th06 PRIVATE
         "TH06_VK_SHADER_DIR=\"${TH06_VK_SHADER_OUT_DIR}\""
+    )
+
+    # Mirror compiled SPV files next to the executable so AssetIO's
+    # exe-dir-relative search root finds them. Without this, MSVC's
+    # per-config output (Release/) leaves shaders_vk one directory above
+    # the exe, and SPV loads fail at runtime.
+    add_custom_command(TARGET th06 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:th06>/shaders_vk"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${TH06_VK_SHADER_OUT_DIR}"
+            "$<TARGET_FILE_DIR:th06>/shaders_vk"
+        COMMENT "Deploying compiled SPV shaders to runtime directory"
     )
 endif()

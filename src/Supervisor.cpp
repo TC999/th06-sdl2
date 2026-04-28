@@ -1,6 +1,7 @@
 #include "Supervisor.hpp"
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
+#include "AssetIO.hpp"
 #include "thprac_th06.h"
 #include "Chain.hpp"
 #include "ChainPriorities.hpp"
@@ -648,7 +649,25 @@ static const wchar_t *FindDatBySuffixW(const char *filename, wchar_t *outBuf, si
         globfree(&g);
         return NULL;
     }
-    const char *found = g.gl_pathv[0];
+    // Prefer non-fallback archives (not TOLOL/TOTOL) so that th06c_CM.DAT wins
+    // over TOLOL_CM.DAT when both are present in the working directory.
+    const char *found = NULL;
+    for (size_t gi = 0; gi < g.gl_pathc; ++gi)
+    {
+        const char *cand = g.gl_pathv[gi];
+        // Strip leading directory components for the prefix check.
+        const char *base = strrchr(cand, '/');
+        base = base ? base + 1 : cand;
+        if (strncasecmp(base, "TOLOL", 5) != 0 && strncasecmp(base, "TOTOL", 5) != 0)
+        {
+            found = cand;
+            break;
+        }
+    }
+    if (!found)
+    {
+        found = g.gl_pathv[0];
+    }
     size_t nameLen = strlen(found);
     if (nameLen >= outBufLen)
     {
@@ -716,7 +735,9 @@ ZunResult Supervisor::LoadConfig(char *path)
 
     memset(&g_Supervisor.cfg, 0, sizeof(GameConfiguration));
     g_Supervisor.cfg.opts = g_Supervisor.cfg.opts | (1 << GCOS_USE_D3D_HW_TEXTURE_BLENDING);
+    AssetIO::DiagLog("Cfg", "LoadConfig: path=%s sizeof(cfg)=%zu", path ? path : "(null)", sizeof(GameConfiguration));
     data = (GameConfiguration *)FileSystem::OpenPath(path, 1);
+    AssetIO::DiagLog("Cfg", "LoadConfig: OpenPath -> data=%p g_LastFileSize=%u", (void*)data, g_LastFileSize);
     if (data == NULL)
     {
         g_Supervisor.cfg.lifeCount = 2;
@@ -726,9 +747,10 @@ ZunResult Supervisor::LoadConfig(char *path)
         g_Supervisor.cfg.padXAxis = 600;
         g_Supervisor.cfg.padYAxis = 600;
         {
-            // On Android, bgm/ lives inside APK assets — use SDL_RWFromFile
-            // which transparently reads from assets/ on Android.
-            SDL_RWops *rwCheck = SDL_RWFromFile("bgm/th06_01.wav", "rb");
+            // Route through AssetIO so the probe finds bgm/ regardless of
+            // launch directory (cwd-relative or exe-dir-relative on desktop,
+            // APK assets on Android).
+            SDL_RWops *rwCheck = AssetIO::OpenRW("bgm/th06_01.wav");
             if (rwCheck != NULL)
             {
                 g_Supervisor.cfg.musicMode = WAV;
@@ -750,6 +772,11 @@ ZunResult Supervisor::LoadConfig(char *path)
     else
     {
         g_Supervisor.cfg = *data;
+        AssetIO::DiagLog("Cfg", "LoadConfig: read OK ver=0x%x life=%u bomb=%u music=%u sound=%u diff=%u win=%u fs=%u opts=0x%x unk0=%d unk1=%d",
+                         g_Supervisor.cfg.version, g_Supervisor.cfg.lifeCount, g_Supervisor.cfg.bombCount,
+                         g_Supervisor.cfg.musicMode, g_Supervisor.cfg.playSounds, g_Supervisor.cfg.defaultDifficulty,
+                         g_Supervisor.cfg.windowed, g_Supervisor.cfg.frameskipConfig, g_Supervisor.cfg.opts,
+                         (int)g_Supervisor.cfg.unk[0], (int)g_Supervisor.cfg.unk[1]);
         if (IsUninitializedControllerMapping(g_Supervisor.cfg.controllerMapping))
         {
             g_Supervisor.cfg.controllerMapping = g_ControllerMapping;
@@ -761,6 +788,11 @@ ZunResult Supervisor::LoadConfig(char *path)
             (g_Supervisor.cfg.windowed >= 2) || (g_Supervisor.cfg.frameskipConfig >= 3) ||
             (g_Supervisor.cfg.version != GAME_VERSION) || (g_LastFileSize != 0x38))
         {
+            AssetIO::DiagLog("Cfg", "LoadConfig: VALIDATION FAIL -> RESET (life=%u bomb=%u music=%u diff=%u sound=%u win=%u fs=%u ver=0x%x lastSize=%u)",
+                             g_Supervisor.cfg.lifeCount, g_Supervisor.cfg.bombCount, g_Supervisor.cfg.musicMode,
+                             g_Supervisor.cfg.defaultDifficulty, g_Supervisor.cfg.playSounds,
+                             g_Supervisor.cfg.windowed, g_Supervisor.cfg.frameskipConfig,
+                             g_Supervisor.cfg.version, g_LastFileSize);
             g_Supervisor.cfg.lifeCount = 2;
             g_Supervisor.cfg.bombCount = 3;
             g_Supervisor.cfg.colorMode16bit = 0;
@@ -768,7 +800,7 @@ ZunResult Supervisor::LoadConfig(char *path)
             g_Supervisor.cfg.padXAxis = 600;
             g_Supervisor.cfg.padYAxis = 600;
             {
-                SDL_RWops *rwCheck2 = SDL_RWFromFile("bgm/th06_01.wav", "rb");
+                SDL_RWops *rwCheck2 = AssetIO::OpenRW("bgm/th06_01.wav");
                 if (rwCheck2 != NULL)
                 {
                     g_Supervisor.cfg.musicMode = WAV;

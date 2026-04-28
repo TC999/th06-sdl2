@@ -17,6 +17,7 @@
 #include "CrashHandler.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
+#include "AssetIO.hpp"
 #include "GamePaths.hpp"
 #include "GameWindow.hpp"
 #include "IRenderer.hpp"
@@ -160,32 +161,18 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef _WIN32
-    // Make the game portable: when launched via Explorer / shortcut / file
-    // association the CWD is not guaranteed to be the exe directory, which
-    // breaks all relative paths (PBG3 archives, th06.cfg, log.txt, etc.).
-    // Force CWD to the exe's directory so double-clicking works the same as
-    // `cd build_vk && th06.exe`.
-    {
-        wchar_t exePath[MAX_PATH];
-        DWORD n = GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        if (n > 0 && n < MAX_PATH)
-        {
-            for (DWORD i = n; i > 0; --i)
-            {
-                if (exePath[i - 1] == L'\\' || exePath[i - 1] == L'/')
-                {
-                    exePath[i - 1] = L'\0';
-                    break;
-                }
-            }
-            SetCurrentDirectoryW(exePath);
-        }
-    }
-#endif
-
-#ifdef _WIN32
     timeBeginPeriod(1);
 #endif
+
+    // Unified asset I/O bring-up. Replaces the old _WIN32-only
+    // SetCurrentDirectoryW(exe-dir) hack: now both Windows and Linux chdir to
+    // the exe directory at startup, so launching via Explorer, IDE F5, or a
+    // shortcut behaves the same as `cd build_dir && ./th06`. On Android this
+    // is a no-op (assets live in the APK and SDL2 routes them via
+    // AAssetManager). All read-only asset opens (shaders, .dat archives, raw
+    // files, OGG/WAV siblings, MIDI files) flow through AssetIO::OpenRW /
+    // AssetIO::ReadAll so platform branching lives in exactly one place.
+    th06::AssetIO::Init(argc, argv);
 
 #if defined(_MSC_VER) && defined(_M_IX86)
     ConfigureReplayCompatibleFloatingPoint();
@@ -231,6 +218,9 @@ int main(int argc, char *argv[])
 #endif
     }
 
+    // Apply user-selected log verbosity (Developer tab → Log Level).
+    THPrac::TH06::THPracApplyLogLevel();
+
     if (GameWindow::InitD3dInterface())
     {
         g_GameErrorContext.Flush();
@@ -240,6 +230,10 @@ int main(int argc, char *argv[])
     Session::UseLocalSession();
 
 restart:
+    th06::AssetIO::DiagLog("main", "restart-entry: cfg.unk[0]=%d g_SelectedBackend=%d cfg.musicMode=%d cfg.windowed=%d cfg.version=0x%x",
+        (int)g_Supervisor.cfg.unk[0], (int)th06::g_SelectedBackend,
+        (int)g_Supervisor.cfg.musicMode, (int)g_Supervisor.cfg.windowed,
+        (unsigned)g_Supervisor.cfg.version);
     // Phase 5b.2: Vulkan needs SDL_WINDOW_VULKAN at window-creation time,
     // which is decided by IsUsingVulkan() == (g_SelectedBackend==Vulkan).
     // GL ↔ GLES share SDL_WINDOW_OPENGL, so the legacy game-native restart
@@ -288,9 +282,12 @@ restart:
 
     if (GameWindow::InitD3dRendering())
     {
+        th06::AssetIO::DiagLog("main", "InitD3dRendering FAILED, exiting");
         g_GameErrorContext.Flush();
         return 1;
     }
+    th06::AssetIO::DiagLog("main", "after-init: backend=%d window=%p",
+        (int)th06::g_SelectedBackend, (void*)g_GameWindow.sdlWindow);
 
     g_SoundPlayer.InitializeDSound((HWND)g_GameWindow.sdlWindow);
     Controller::GetJoystickCaps();
@@ -337,12 +334,14 @@ stop:
     delete g_AnmManager;
     g_AnmManager = NULL;
 
-    // Clean up GL resources while the context is still valid.
-    // Phase 5b: skip ImGui shutdown + SDL_GL_DeleteContext on Vulkan path.
-    if (!th06::IsUsingVulkan())
-    {
-        THPrac::THPracGuiShutdown();
-    }
+    // Clean up GUI + renderer while the context is still valid.
+    // THPracGuiShutdown internally branches on IsUsingVulkan(): Vulkan path
+    // calls RendererVulkan::ShutdownImGui (which tears down ImplVulkan +
+    // ImplSDL2); GL path calls ImGui_ImplOpenGL{2,3}_Shutdown + ImplSDL2.
+    // It MUST run on every restart, otherwise s_initialized stays true and
+    // the next CreateGameWindow → THPracGuiInit early-returns, leaving the
+    // OpenGL3 backend uninitialised → CompileImGuiShader hits NULL g_gl*.
+    THPrac::THPracGuiShutdown();
     {
         SDL_GLContext ctx = g_Renderer ? g_Renderer->glContext : nullptr;
         if (g_Renderer)
@@ -356,6 +355,8 @@ stop:
 
     if (renderResult == 2)
     {
+        th06::AssetIO::DiagLog("main", "renderResult=2 (RESTART) — cleaning up for goto restart, cfg.unk[0]=%d",
+            (int)g_Supervisor.cfg.unk[0]);
         // Clean up resources that leak across restart cycles.
         // We cannot call Supervisor::DeletedCallback() here because
         // ReleasePbg3() has a built-in double-free (calls Release() then

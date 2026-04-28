@@ -18,6 +18,7 @@
 #include <memory>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 namespace th06::vk {
 class VkContext;
@@ -131,6 +132,148 @@ private:
                     int count,
                     uint32_t vertexStride);
 
+    // --- Sprite batcher (Phase 6) ---
+    // Coalesces consecutive draws that share PSO key + texture + push-constant
+    // state by converting their vertex streams to TRIANGLE_LIST and concatenating
+    // them. Reduces vkCmdDraw count from O(sprites) to O(state-changes/frame).
+    //
+    // Vertex bandwidth amplification: 4-vert quads (the dominant case) expand
+    // 1.5x (4 → 6 list verts); strips of length N expand by (3*(N-2))/N.
+    //
+    // CALL FlushBatch() before any non-draw GPU command (Clear, vkCmdSetViewport,
+    // EndFrame end-of-renderpass) and before any state change that would alter
+    // PSO/descriptor/push-constant identity. drawCommon does the second class
+    // automatically by comparing against the pending batch's snapshot.
+    struct PendingBatch {
+        bool     active            = false;
+        // PSO key fields
+        int      vertexLayoutEnum  = 0;
+        bool     hasTexture        = false;
+        bool     depthTest         = false;
+        uint8_t  blendMode         = 0;
+        uint8_t  colorOp           = 0;
+        uint8_t  zWriteDisable     = 0;
+        uint8_t  depthFuncAlways   = 0;
+        // Descriptor binding inputs
+        uint32_t texture           = 0;
+        bool     textureStageDiffuseOnly = false;
+        // Push-constant inputs (must be identical across the batch)
+        uint32_t textureFactor     = 0;
+        int      fogEnabled        = 0;
+        uint32_t fogColor          = 0;
+        float    fogStart          = 0.0f;
+        float    fogEnd            = 0.0f;
+        float    mvp[16]           {};
+        // 2D viewport (only meaningful for xyzrwh layouts)
+        int      viewportX = 0, viewportY = 0, viewportW = 0, viewportH = 0;
+        float    viewportMinZ = 0.0f, viewportMaxZ = 0.0f;
+        int      screenWidth = 0, screenHeight = 0;
+        // Vertex payload as TRIANGLE_LIST in the input layout's stride
+        std::vector<uint8_t> verts;
+        uint32_t vertexStride      = 0;
+        int      vertCount         = 0;
+        // Stats: how many input draws got merged into this batch.
+        int      mergedDraws       = 0;
+    };
+    PendingBatch pendingBatch_{};
+    // Per-frame stats (reset at BeginFrame); read by an optional DIAG print.
+    uint32_t statsInputDraws_ = 0;
+    uint32_t statsBatchFlush_ = 0;
+    uint32_t statsVertsOut_   = 0;
+    // ----- flush-reason histogram (Phase 6.1 diagnostic) -----
+    // Counts WHY each batch ended. Indexed by the field whose mismatch
+    // triggered the flush, plus catch-all buckets for non-draw-path flushes
+    // (Clear / SetViewport / EndFrame). Values reset every BeginFrame and
+    // dumped on the same cadence as the [Vk Batch] line.
+    enum FlushReason : uint32_t {
+        FR_None = 0,            // (placeholder, never counted)
+        FR_FirstDraw,           // pending batch was empty (frame start / post-flush)
+        FR_VertexLayout,
+        FR_HasTexture,
+        FR_DepthTest,
+        FR_BlendMode,
+        FR_ColorOp,
+        FR_ZWriteDisable,
+        FR_DepthFuncAlways,
+        FR_Texture,             // texture binding changed (likely top culprit)
+        FR_TextureStageDiffuseOnly,
+        FR_TextureFactor,
+        FR_FogEnabled,
+        FR_FogParams,
+        FR_Mvp,
+        FR_Viewport,
+        FR_ScreenSize,
+        FR_NonDraw_Clear,
+        FR_NonDraw_SetViewport,
+        FR_NonDraw_EndFrame,
+        FR_COUNT
+    };
+    uint32_t flushReasonHist_[FR_COUNT] = {};
+    // Per-layout flush reason histogram, indexed [layout 0..7][FR_COUNT].
+    // The layout dimension is the *outgoing* (just-flushed) batch's layout,
+    // so this attributes flushes to the work that was actually completed,
+    // matching how perf cost lands. Layout slot 7 reserved for future use.
+    static constexpr int kLayoutSlots_ = 8;
+    uint32_t flushReasonByLayout_[kLayoutSlots_][FR_COUNT] = {};
+    // Bump both the global and per-layout reason histograms in lockstep,
+    // attributing each flush to the OUTGOING (just-completing) batch's
+    // vertex layout. Caller must invoke this BEFORE FlushBatch() resets
+    // pendingBatch_.vertexLayoutEnum / .active.
+    inline void bumpFlushReason(uint32_t reason) {
+        if (reason >= FR_COUNT) return;
+        ++flushReasonHist_[reason];
+        const int li = pendingBatch_.vertexLayoutEnum;
+        if (li >= 0 && li < kLayoutSlots_) ++flushReasonByLayout_[li][reason];
+    }
+    // Most-recent mismatch reason from batchStateMatches (read by drawCommon
+    // immediately after the call to bump the histogram on actual flush).
+    mutable uint32_t lastMismatchReason_ = FR_None;
+
+    // Append `verts` (in input topology) to the pending batch as a triangle
+    // list, expanding each input primitive in place. Caller has already
+    // verified state matches the pending batch (or it is empty).
+    void appendAsTriangleList(int topologyEnum,
+                              const void* verts,
+                              int count,
+                              uint32_t vertexStride);
+    // Phase 6.2: layout-3 (VertexTex1DiffuseXyz) → layout-5 (Tex1DiffuseXyzClip)
+    // pretransform path. Multiplies each input vertex's pos through mvpMat_ on
+    // the CPU and stores the resulting clip-space vec4 alongside untouched
+    // diffuse/uv. Eliminates per-sprite mvp PushConstants delta — the dominant
+    // flush trigger for 3D-layout sprites.
+    void appendAsTriangleListPretransform3(int topologyEnum,
+                                           const void* verts,
+                                           int count);
+    // Phase 6.3: layout 4 (RenderVertexInfoXyz, vec3 pos + vec2 uv, NO
+    // per-vertex color) → layout 5 (Tex1DiffuseXyzClip) helper. In addition
+    // to pre-multiplying mvp, this helper folds the current `textureFactor`
+    // state into the per-vertex color slot. Layout 4's GL/old-Vulkan shader
+    // only output `v_color = pc.textureFactor`, so writing that color per
+    // vertex is functionally identical — and it lets adjacent draws with
+    // differing textureFactor share a single batch (eliminating the second-
+    // largest flush reason in Phase 6.2 telemetry: ~16% of all flushes).
+    void appendAsTriangleListPretransform4(int topologyEnum,
+                                           const void* verts,
+                                           int count);
+    // Returns true when the supplied draw description matches the in-flight
+    // pending batch (so vertices may be appended without flushing).
+    bool batchStateMatches(int vertexLayoutEnum,
+                           bool hasTexture,
+                           bool depthTest) const;
+    // Snapshot current renderer state into `pendingBatch_` (resets the vertex
+    // buffer to empty, mergedDraws to 0).
+    void beginPendingBatch(int vertexLayoutEnum,
+                           bool hasTexture,
+                           bool depthTest,
+                           uint32_t vertexStride);
+public:
+    // Flush any pending batched sprites to the command buffer. Safe to call
+    // when no batch is pending (becomes a no-op). Must be called before any
+    // command that mutates pipeline/descriptor/scissor/viewport state outside
+    // of drawCommon's scope (Clear, SetViewport, EndFrame, ImGui pass).
+    void FlushBatch();
+private:
+
     std::unique_ptr<vk::VkContext>         ctx_;
     std::unique_ptr<vk::VkSwapchain>       swap_;
     std::unique_ptr<vk::VkFrameContext>    frames_;
@@ -153,7 +296,7 @@ private:
     bool                  imguiFontsUploaded_    = false;
 
     // Shader modules (owned). Index by VertexLayout enum value (0..4).
-    VkShaderModule vertModules_[5] = {};
+    VkShaderModule vertModules_[6] = {};
     VkShaderModule fragColorMod_   = VK_NULL_HANDLE;
     VkShaderModule fragTexMod_     = VK_NULL_HANDLE;
 

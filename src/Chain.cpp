@@ -2,6 +2,8 @@
 #include "utils.hpp"
 
 #include <new>
+#include <cstdio>
+#include <SDL.h>
 
 namespace th06
 {
@@ -154,13 +156,25 @@ int Chain::RunCalcChain(void)
 restart_from_first_job:
     updatedCount = 0;
     current = &this->calcChain;
+    int _elemIdx = 0;
 
     while (current != NULL)
     {
         if (current->callback != NULL)
         {
         execute_again:
-            switch (current->callback(current->arg))
+            Uint32 _elStart = SDL_GetTicks();
+            int _result = current->callback(current->arg);
+            Uint32 _elCost = SDL_GetTicks() - _elStart;
+            if (_elCost >= 50)
+            {
+                std::fprintf(stderr,
+                    "[chain/calc/slow] idx=%d cb=%p arg=%p cost=%u ms\n",
+                    _elemIdx, (void *)current->callback, current->arg, (unsigned)_elCost);
+                std::fflush(stderr);
+            }
+            _elemIdx++;
+            switch (_result)
             {
             case CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB:
                 tmp1 = current;
@@ -206,13 +220,25 @@ int Chain::RunDrawChain(void)
 
     updatedCount = 0;
     current = &this->drawChain;
+    int _elemIdx = 0;
 
     while (current != NULL)
     {
         if (current->callback != NULL)
         {
         execute_again:
-            switch (current->callback(current->arg))
+            Uint32 _elStart = SDL_GetTicks();
+            int _result = current->callback(current->arg);
+            Uint32 _elCost = SDL_GetTicks() - _elStart;
+            if (_elCost >= 50)
+            {
+                std::fprintf(stderr,
+                    "[chain/draw/slow] idx=%d cb=%p arg=%p cost=%u ms\n",
+                    _elemIdx, (void *)current->callback, current->arg, (unsigned)_elCost);
+                std::fflush(stderr);
+            }
+            _elemIdx++;
+            switch (_result)
             {
             case CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB:
                 tmp1 = current;

@@ -754,9 +754,8 @@ GLuint RendererGL::CreateTextureFromMemory(const u8 *data, i32 dataLen, D3DCOLOR
         texLoadCount++;
         SDL_LockSurface(rgba);
         u8 *px = (u8 *)rgba->pixels;
-        // Use same diag file as AnmManager
-        extern FILE* _diag_get_file_sdl();
-        FILE* _df = _diag_get_file_sdl();
+        // Use same diag file as AnmManager (defined in global namespace above)
+        FILE* _df = ::_diag_get_file_sdl();
         if (_df) fprintf(_df, "[TH06_DIAG] CreateTex #%d size=%dx%d colorKey=0x%08X\n",
             texLoadCount, rgba->w, rgba->h, (unsigned)colorKey);
         for (i32 by = 0; by < 4 && by * 16 < rgba->h; by++) {

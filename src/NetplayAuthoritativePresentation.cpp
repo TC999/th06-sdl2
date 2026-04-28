@@ -1,4 +1,5 @@
 #include "NetplayAuthoritativePresentation.hpp"
+#include <new>
 
 namespace th06::Netplay::AuthoritativePresentation
 {
@@ -158,7 +159,8 @@ void AdvancePredictedPosition(Player &player, u16 inputBits, D3DXVECTOR3 &positi
 
 void Reset()
 {
-    g_LocalPredictionState = {};
+    g_LocalPredictionState.~LocalPredictionState();
+    new (&g_LocalPredictionState) LocalPredictionState();
 }
 
 void NoteLocalPredictedInput(int frame, u16 inputBits)

@@ -7,6 +7,8 @@
 #include "inttypes.hpp"
 #include "sdl2_compat.hpp"
 #include <SDL_mixer.h>
+#include <atomic>
+#include <memory>
 
 namespace th06
 {
@@ -14,6 +16,32 @@ namespace th06
 class CSoundManager;
 class CStreamingSound;
 class CWaveFile;
+
+// Out-of-band buffer for asynchronous BGM decode. The decoder thread owns
+// the only writable reference until it publishes `state == 1`; after that
+// the audio callback can read `pcm`/`pcmSize` lock-free under acquire.
+// State `2` means the requester has discarded interest in the result;
+// when the worker observes (or sets) state `2` the shared_ptr eventually
+// drops to refcount 0 and the destructor releases the PCM buffer.
+struct AsyncDecodeData
+{
+    std::atomic<int> state; // 0=running, 1=ready, 2=cancelled/failed
+    char path[512];
+    unsigned char *pcm;
+    unsigned int pcmSize;
+    int freq;
+    int bits;
+    int channels;
+    AsyncDecodeData()
+        : state(0), pcm(nullptr), pcmSize(0), freq(44100), bits(16), channels(2)
+    {
+        path[0] = '\0';
+    }
+    ~AsyncDecodeData()
+    {
+        delete[] pcm;
+    }
+};
 
 #define WAVEFILE_READ 1
 #define WAVEFILE_WRITE 2
@@ -92,10 +120,22 @@ class CWaveFile
     u32 m_pcmDataSize;
     WAVEFORMATEX m_wfxStorage;
 
+    // Set by OpenAsync, consumed by CStreamingSound::MusicHookCallback. When
+    // non-null, the audio callback reads the PCM buffer from this object
+    // (after observing state==1) instead of from m_pcmData/m_pcmDataSize.
+    // Lifetime is shared with the detached decoder worker so that swapping
+    // BGM mid-decode never blocks the main thread.
+    std::shared_ptr<AsyncDecodeData> m_async;
+
     CWaveFile();
     ~CWaveFile();
 
     HRESULT Open(char *strFileName, WAVEFORMATEX *pwfx, DWORD dwFlags);
+    // Asynchronous variant: kicks off a background OGG decode and returns
+    // immediately. The audio callback emits silence until decode completes.
+    // Used for BGM where a 1–3 s decode would otherwise stall the main
+    // thread (e.g. dialogue SKIP firing many MUSIC opcodes per frame).
+    HRESULT OpenAsync(char *strFileName);
     HRESULT Close();
     DWORD GetSize();
     HRESULT ResetFile(bool loop);

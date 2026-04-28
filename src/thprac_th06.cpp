@@ -41,6 +41,7 @@
 #include "IRenderer.hpp"
 #include "Supervisor.hpp"
 #include "FileSystem.hpp"
+#include <SDL_log.h>
 
 // extern "C" globals from other TUs (DIFFABLE_STATIC)
 extern "C" { extern i32 g_PlayerShot; }
@@ -368,6 +369,36 @@ namespace TH06 {
         return TrLocal("开启后，replay / portable restore / watchdog 等开发诊断日志会额外写入日志文件。关闭时只保留游戏原本的日志，不再输出这些附加调试记录。",
                        "When enabled, developer diagnostics such as replay / portable restore / watchdog tracing are written into the log files. When disabled, only the game's original log output remains and these extra debug records stay silent.",
                        "有効にすると、replay / portable restore / watchdog などの開発診断ログを追加でログファイルへ出力します。無効時はゲーム本来のログだけを残し、追加のデバッグ記録は出力しません。");
+    }
+
+    const char* LogLevelLabel()
+    {
+        return TrLocal("日志级别", "Log Level", "ログレベル");
+    }
+
+    const char* LogLevelDesc()
+    {
+        return TrLocal(
+            "控制 SDL_Log / TH06_DIAG 输出到 logcat 与日志文件的最低等级。等级越低输出越少。"
+            "Off = 完全静默；Error/Warn 适合日常运行；Info/Debug/Verbose 适合排查问题。",
+            "Minimum severity for SDL_Log and TH06_DIAG output (logcat / log files). Lower levels emit less. "
+            "Off silences everything; Error/Warn suit normal play; Info/Debug/Verbose are for investigation.",
+            "SDL_Log と TH06_DIAG の出力（logcat / ログファイル）の最低レベルを制御します。レベルが低いほど出力が減ります。"
+            "Off は完全に無音、Error/Warn は通常プレイ向け、Info/Debug/Verbose は調査向けです。");
+    }
+
+    const char* LogLevelName(int lv)
+    {
+        switch (lv)
+        {
+        case 0: return TrLocal("关闭", "Off", "オフ");
+        case 1: return TrLocal("错误", "Error", "エラー");
+        case 2: return TrLocal("警告", "Warn", "警告");
+        case 3: return TrLocal("信息", "Info", "情報");
+        case 4: return TrLocal("调试", "Debug", "デバッグ");
+        case 5: return TrLocal("详细", "Verbose", "詳細");
+        default: return "?";
+        }
     }
 
     const char* AstroBotSectionLabel()
@@ -2158,6 +2189,33 @@ namespace TH06 {
                     FpsSet();
                 EndOptGroup();
             }
+            // Unlock Frame Rate: skips the SDL_Delay-based 60Hz software
+            // limiter so the entire main loop (RunCalcChain + RunDrawChain
+            // + present) runs as fast as the host can sustain. Both LOGIC
+            // and rendering ticks accelerate together — the game will play
+            // back at "max possible speed". Intended for renderer/CPU
+            // benchmarking and replay turbo. Disable vsync at the OS or
+            // driver level for an unbounded reading.
+            ImGui::Checkbox(TrLocal(u8"解锁帧率（关闭节流）",
+                                    "Unlock Frame Rate (disable throttling)",
+                                    u8"フレームレート解放（スロットル解除）"),
+                            &g_adv_igi_options.th06_unlock_framerate);
+            ImGui::SameLine();
+            HelpMarker(TrLocal(
+                u8"启用后跳过软件帧率限制，主循环（逻辑+渲染+呈现）跑满 CPU/GPU。\n"
+                u8"逻辑帧也会同步加速，游戏会以最高可达速度运行。\n"
+                u8"主要用于渲染/批处理基准测试或 Replay 加速。\n"
+                u8"vsync 由驱动强制时需配合显卡设置才能突破上限。",
+                "When enabled, skips the SDL_Delay frame limiter and lets the\n"
+                "WHOLE main loop (calc + draw + present) run as fast as the\n"
+                "host can sustain. Logic frames accelerate together with\n"
+                "rendering, so the game runs at its maximum possible speed.\n"
+                "Primarily useful for renderer benchmarks and replay turbo.\n"
+                "Disable vsync at the OS/driver level for an unbounded run.",
+                u8"有効化するとフレーム制限をスキップし、メインループ全体\n"
+                u8"（calc + draw + present）をホストの能力上限で回します。\n"
+                u8"ロジックフレームも同期して加速するため、ゲームは最高速度で\n"
+                u8"進行します。レンダラーベンチマーク／リプレイ早送り向け。"));
             {
                 if (ImGui::Checkbox(S(TH06_RANKLOCK_DOWN), &g_adv_igi_options.th06_disable_drop_rank)){
 
@@ -2285,6 +2343,27 @@ namespace TH06 {
         ImGui::Checkbox(DebugLogOutputLabel(), &g_adv_igi_options.th06_enable_debug_logs);
             ImGui::SameLine();
             HelpMarker(DebugLogOutputDesc());
+
+        // Log level selector — applies to SDL_Log* and TH06_DIAG output.
+        // Using RadioButton row (Combo dropdown popups have shown layering
+        // issues inside the THPrac advanced child window).
+        {
+            int level = std::clamp<int>(g_adv_igi_options.th06_log_level, 0, 5);
+            const int prevLevel = level;
+            ImGui::Text("%s:", LogLevelLabel());
+            ImGui::SameLine();
+            HelpMarker(LogLevelDesc());
+            for (int i = 0; i <= 5; ++i)
+            {
+                ImGui::SameLine();
+                ImGui::RadioButton(LogLevelName(i), &level, i);
+            }
+            if (level != prevLevel)
+            {
+                g_adv_igi_options.th06_log_level = static_cast<uint8_t>(level);
+                THPracApplyLogLevel();
+            }
+        }
 
 #ifndef _WIN32
             ImGui::BeginDisabled();
@@ -2765,6 +2844,33 @@ namespace TH06 {
 
         void OnContentUpdate() override
         {
+            using th06::BackendKind;
+            const BackendKind backend = th06::g_SelectedBackend;
+            const bool isGL     = (backend == BackendKind::GL);
+            const bool isVulkan = (backend == BackendKind::Vulkan);
+
+            // Tooltip helper: show "(?)" right after the previous widget that
+            // explains why an option is disabled on the current backend.
+            auto disabledHint = [](const char* msg) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", msg);
+            };
+
+            const char* hintVulkanIgnored = TrLocal(
+                "当前 Vulkan 后端未读取该标志，无效。",
+                "Current Vulkan backend ignores this flag.",
+                "現在の Vulkan バックエンドはこのフラグを参照しません。");
+            const char* hintLegacyDead = TrLocal(
+                "D3D8 时代遗留选项，所有 SDL2 后端均无实现。",
+                "Legacy D3D8-era option, no SDL2 backend implements it.",
+                "D3D8 時代の名残で、どの SDL2 バックエンドにも実装はありません。");
+            const char* hintGLOnly = TrLocal(
+                "仅在 GL（fixed-function）后端生效。",
+                "Only effective on the GL (fixed-function) backend.",
+                "GL（固定機能）バックエンドでのみ有効です。");
+
             ImGui::TextUnformatted(S(TH06_CFG_TITLE));
             ImGui::Separator();
 
@@ -2772,17 +2878,21 @@ namespace TH06 {
             float footerH = ImGui::GetFrameHeightWithSpacing() * 2.f + 8.f;
             ImGui::BeginChild("cfgScroll", ImVec2(0, -footerH), false);
 
-            // Checkboxes for opts flags
+            // === Active rendering options (always meaningful) ===
             ImGui::Checkbox(S(TH06_CFG_NO_VERTEX_BUF), &mOptNoVertexBuf);
-            ImGui::Checkbox(S(TH06_CFG_NO_FOG), &mOptNoFog);
-            ImGui::Checkbox(S(TH06_CFG_FORCE_16BIT_TEX), &mOptForce16BitTex);
-            ImGui::Checkbox(S(TH06_CFG_NO_GOURAUD), &mOptNoGouraud);
-            ImGui::Checkbox(S(TH06_CFG_NO_COLOR_COMP), &mOptNoColorComp);
-            ImGui::Checkbox(S(TH06_CFG_REF_RASTERIZER), &mOptRefRasterizer);
-            ImGui::Checkbox(S(TH06_CFG_CLEAR_BACKBUF), &mOptClearBackbuf);
             ImGui::Checkbox(S(TH06_CFG_MIN_GRAPHICS), &mOptMinGraphics);
-            ImGui::Checkbox(S(TH06_CFG_NO_DEPTH_TEST), &mOptNoDepthTest);
+            ImGui::Checkbox(S(TH06_CFG_NO_COLOR_COMP), &mOptNoColorComp);
             ImGui::Checkbox(S(TH06_CFG_FORCE_60FPS), &mOptForce60FPS);
+
+            // NoFog: Vulkan backend does not read this flag → gray + tooltip.
+            if (isVulkan) ImGui::BeginDisabled();
+            ImGui::Checkbox(S(TH06_CFG_NO_FOG), &mOptNoFog);
+            if (isVulkan) { ImGui::EndDisabled(); disabledHint(hintVulkanIgnored); }
+
+            // NoDepthTest: same situation on Vulkan.
+            if (isVulkan) ImGui::BeginDisabled();
+            ImGui::Checkbox(S(TH06_CFG_NO_DEPTH_TEST), &mOptNoDepthTest);
+            if (isVulkan) { ImGui::EndDisabled(); disabledHint(hintVulkanIgnored); }
 
             ImGui::Separator();
 
@@ -2806,13 +2916,6 @@ namespace TH06 {
             ImGui::RadioButton(S(TH06_CFG_FRAMESKIP_HALF), &mFrameskip, 1);
             ImGui::SameLine();
             ImGui::RadioButton(S(TH06_CFG_FRAMESKIP_THIRD), &mFrameskip, 2);
-
-            // Color mode
-            ImGui::TextUnformatted(S(TH06_CFG_COLOR_MODE));
-            ImGui::SameLine();
-            ImGui::RadioButton(S(TH06_CFG_32BIT), &mColorMode, 0);
-            ImGui::SameLine();
-            ImGui::RadioButton(S(TH06_CFG_16BIT), &mColorMode, 1);
 
             ImGui::Separator();
 
@@ -2839,6 +2942,54 @@ namespace TH06 {
             if (th06::IsBackendAvailable(th06::BackendKind::Vulkan)) {
                 ImGui::SameLine();
                 ImGui::RadioButton(S(TH06_CFG_RENDERER_VULKAN), &mBackend, 2);
+            }
+
+            // === Legacy / Deprecated section ===
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader(TrLocal(
+                    "Legacy / 已废弃 选项",
+                    "Legacy / Deprecated Options",
+                    "Legacy / 廃止オプション")))
+            {
+                ImGui::Indent();
+                ImGui::TextDisabled("%s", TrLocal(
+                    "以下选项是 D3D8 时代的遗留 UI，在当前 SDL2/Vulkan/GLES 后端中没有实际作用，仅为兼容存档保留。",
+                    "These are D3D8-era UI knobs with no effect on the current SDL2/Vulkan/GLES backends. Kept only for save-file compatibility.",
+                    "これらは D3D8 時代の UI で、現在の SDL2/Vulkan/GLES バックエンドでは無効です。セーブ互換のために残しています。"));
+
+                // NoGouraud — only the GL fixed-function backend reads it.
+                const bool noGouraudActive = isGL;
+                if (!noGouraudActive) ImGui::BeginDisabled();
+                ImGui::Checkbox(S(TH06_CFG_NO_GOURAUD), &mOptNoGouraud);
+                if (!noGouraudActive) { ImGui::EndDisabled(); disabledHint(hintGLOnly); }
+
+                // Always-dead options.
+                ImGui::BeginDisabled();
+                ImGui::Checkbox(S(TH06_CFG_FORCE_16BIT_TEX), &mOptForce16BitTex);
+                ImGui::EndDisabled();
+                disabledHint(hintLegacyDead);
+
+                ImGui::BeginDisabled();
+                ImGui::Checkbox(S(TH06_CFG_REF_RASTERIZER), &mOptRefRasterizer);
+                ImGui::EndDisabled();
+                disabledHint(hintLegacyDead);
+
+                ImGui::BeginDisabled();
+                ImGui::Checkbox(S(TH06_CFG_CLEAR_BACKBUF), &mOptClearBackbuf);
+                ImGui::EndDisabled();
+                disabledHint(hintLegacyDead);
+
+                // Color mode 16/32: SDL2 backend skips validation; functionally inert.
+                ImGui::TextUnformatted(S(TH06_CFG_COLOR_MODE));
+                ImGui::SameLine();
+                ImGui::BeginDisabled();
+                ImGui::RadioButton(S(TH06_CFG_32BIT), &mColorMode, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton(S(TH06_CFG_16BIT), &mColorMode, 1);
+                ImGui::EndDisabled();
+                disabledHint(hintLegacyDead);
+
+                ImGui::Unindent();
             }
 
             ImGui::EndChild(); // end scrollable region
@@ -5091,6 +5242,38 @@ namespace TH06 {
     bool THPracIsDebugLogEnabled()
     {
         return g_adv_igi_options.th06_enable_debug_logs;
+    }
+
+    uint8_t THPracGetLogLevel()
+    {
+        uint8_t lv = g_adv_igi_options.th06_log_level;
+        return lv > 5 ? 5 : lv;
+    }
+
+    void THPracSetLogLevel(uint8_t level)
+    {
+        if (level > 5)
+            level = 5;
+        g_adv_igi_options.th06_log_level = level;
+        THPracApplyLogLevel();
+    }
+
+    void THPracApplyLogLevel()
+    {
+        // Map our level (0..5) to SDL_LogPriority. Off => silence everything by
+        // pinning above CRITICAL (NUM_LOG_PRIORITIES is the conventional sentinel).
+        SDL_LogPriority pri;
+        switch (THPracGetLogLevel())
+        {
+        case 0: pri = SDL_NUM_LOG_PRIORITIES;     break;
+        case 1: pri = SDL_LOG_PRIORITY_ERROR;     break;
+        case 2: pri = SDL_LOG_PRIORITY_WARN;      break;
+        case 3: pri = SDL_LOG_PRIORITY_INFO;      break;
+        case 4: pri = SDL_LOG_PRIORITY_DEBUG;     break;
+        case 5: pri = SDL_LOG_PRIORITY_VERBOSE;   break;
+        default: pri = SDL_LOG_PRIORITY_WARN;     break;
+        }
+        SDL_LogSetAllPriority(pri);
     }
 
     bool THPracConsumeEndingShortcut()

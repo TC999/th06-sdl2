@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:versionCode="1"
     android:versionName="1.0"
     android:installLocation="auto">
@@ -12,6 +13,14 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
+    <!-- 多点触控：游戏典型特征 -->
+    <uses-feature
+        android:name="android.hardware.touchscreen.multitouch"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen.multitouch.distinct"
+        android:required="false" />
+
     <!-- Game controller support -->
     <uses-feature
         android:name="android.hardware.gamepad"
@@ -19,27 +28,100 @@
 
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- 反 vivo PEM 冻结：foreground service + wakelock -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+        tools:targetApi="34" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
-        android:hardwareAccelerated="true" >
+        android:appCategory="game"
+        android:isGame="true"
+        android:hardwareAccelerated="true"
+        android:largeHeap="true"
+        android:resizeableActivity="false"
+        android:gwpAsanMode="never"
+        tools:targetApi="31">
+
+        <!-- ────────── OEM 游戏识别元数据（拉满识别概率） ────────── -->
+        <!-- vivo / 蓝河 OriginOS：vivo 系列商店与游戏中心 -->
+        <meta-data android:name="com.vivo.appcategory" android:value="game" />
+        <meta-data android:name="vivo.game" android:value="true" />
+        <meta-data android:name="VgameDeclaration" android:value="true" />
+        <meta-data android:name="vivo_game_engine" android:value="true" />
+
+        <!-- 小米 / MIUI / HyperOS：游戏工具箱与小米超神 -->
+        <meta-data android:name="com.miui.appgame" android:value="true" />
+        <meta-data android:name="miui.game" android:value="true" />
+        <meta-data android:name="miui.gamebooster" android:value="true" />
+
+        <!-- 华为 / 鸿蒙 / EMUI：HMS 游戏服务、华为应用市场 -->
+        <meta-data android:name="com.huawei.gameservice" android:value="true" />
+        <meta-data android:name="HwGameAssistantService" android:value="true" />
+        <meta-data android:name="hwc-theme" android:value="androidhwext:style/Theme.Emui.Light.NoActionBar" />
+
+        <!-- OPPO / ColorOS / 一加：游戏空间 -->
+        <meta-data android:name="com.oppo.gamekeeper.appcategory" android:value="game" />
+        <meta-data android:name="oppo.game" android:value="true" />
+        <meta-data android:name="com.coloros.gamespace" android:value="true" />
+
+        <!-- realme：与 OPPO 同源 ColorOS -->
+        <meta-data android:name="com.realme.gamekeeper.appcategory" android:value="game" />
+
+        <!-- 一加 OnePlus / OxygenOS：游戏模式 -->
+        <meta-data android:name="com.oneplus.gamemode" android:value="true" />
+
+        <!-- 魅族 Flyme：游戏模式 -->
+        <meta-data android:name="com.meizu.flyme.gamemode" android:value="true" />
+
+        <!-- 中兴 / 努比亚 -->
+        <meta-data android:name="cn.nubia.gamemode" android:value="true" />
+
+        <!-- 三星 Game Booster -->
+        <meta-data android:name="com.samsung.android.game" android:value="true" />
+        <meta-data android:name="GameSDK" android:value="true" />
+
+        <!-- 通用 Android Game Mode 偏好（Android 12+） -->
+        <meta-data android:name="android.game_mode_config" android:resource="@xml/game_mode_config" />
 
         <activity android:name="org.libsdl.app.SDLActivity"
             android:label="@string/app_name"
             android:alwaysRetainTaskState="true"
             android:launchMode="singleInstance"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density|fontScale"
             android:preferMinimalPostProcessing="true"
             android:windowSoftInputMode="adjustResize"
+            android:resizeableActivity="false"
+            android:supportsPictureInPicture="false"
+            android:immersive="true"
             android:exported="true"
             >
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- 游戏入口元数据 -->
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts_game" />
         </activity>
+
+        <!-- 反 vivo PEM (Process Energy Management) cgroup-freeze 的 foreground service。
+             vivo 即使在前台仍会把进程 oom_score_adj 拉到 ~430、放进 /background cpuset。
+             foreground service + 持久化通知会强制把进程拉回前台 cgroup，绕过 PEM 冻结。 -->
+        <service
+            android:name="com.th06.game.GamePerformanceService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Anti freeze for low-latency game input on vivo OriginOS PEM" />
+        </service>
     </application>
 
 </manifest>
+
