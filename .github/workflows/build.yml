@@ -60,6 +60,8 @@ jobs:
             libgl1-mesa-dev \
             libegl1-mesa-dev \
             libgles2-mesa-dev \
+            libjack-jackd2-0:i386 \
+            libjack-jackd2-dev:i386 \
             libsdl2-dev:i386 \
             libsdl2-image-dev:i386 \
             libsdl2-mixer-dev:i386

@@ -32,6 +32,10 @@
 #endif
 #endif
 
+#ifndef TH06_VK_UNLOCK_FRAMERATE
+#define TH06_VK_UNLOCK_FRAMERATE() (false)
+#endif
+
 #include <SDL_log.h>
 #include <SDL_image.h>
 #include <SDL_rwops.h>
@@ -611,18 +615,15 @@ void RendererVulkan::EndFrame() {
     // emitted once per second of game time (60 frames) so it doesn't dominate
     // the log even at INFO. Format:
     //   [Vk Batch] frame=N  inDraws=I  flushes=F  vertsOut=V  ratio=I/F
+#ifdef TH06_HAS_IMGUI
     if (THPrac::TH06::THPracGetLogLevel() >= 3 && (frameCounter_ % 60u == 0u) && statsBatchFlush_ > 0) {
         const double ratio = double(statsInputDraws_) / double(statsBatchFlush_);
-        // Compose a short flush-reason histogram so the user can tell which
-        // state field is dominating cache misses. Print only the top-5 reasons
-        // with non-zero counts, sorted descending.
         const char* names[FR_COUNT] = {
             "_none","FirstDraw","VtxLayout","HasTex","DepthTest","BlendMode",
             "ColorOp","ZWrite","DepthFunc","Texture","TexStgDiff","TexFactor",
             "FogEn","FogParams","Mvp","Viewport","ScreenSize",
             "ND_Clear","ND_SetVP","ND_EndFrame"
         };
-        // Sort indices by count desc.
         uint32_t idx[FR_COUNT];
         for (uint32_t i = 0; i < FR_COUNT; ++i) idx[i] = i;
         std::sort(idx, idx + FR_COUNT, [&](uint32_t a, uint32_t b) {
@@ -639,10 +640,6 @@ void RendererVulkan::EndFrame() {
         }
         hist[hp] = '\0';
 
-        // Per-layout flush attribution: rank layouts by total flushes this
-        // tick, then for each top layout list its top-2 reasons. This is the
-        // signal needed to pick the next pre-multiply target — Phase 6.2 fixed
-        // layout 3 but telemetry showed layout 4 was the actual hot path.
         char layHist[320]; int lp = 0;
         {
             uint32_t totalsByLayout[kLayoutSlots_] = {};
@@ -661,7 +658,6 @@ void RendererVulkan::EndFrame() {
                                       " L%d=%u(", li, totalsByLayout[li]);
                 if (n <= 0 || lp + n >= int(sizeof(layHist))) break;
                 lp += n;
-                // Top-2 reasons within this layout.
                 uint32_t ridx[FR_COUNT];
                 for (uint32_t i = 0; i < FR_COUNT; ++i) ridx[i] = i;
                 std::sort(ridx, ridx + FR_COUNT, [&](uint32_t a, uint32_t b) {
@@ -688,8 +684,6 @@ void RendererVulkan::EndFrame() {
             "[Vk Batch] f%u inDraws=%u flushes=%u vertsOut=%u merge=%.2fx |%s | byL%s\n",
             unsigned(frameCounter_),
             statsInputDraws_, statsBatchFlush_, statsVertsOut_, ratio, hist, layHist);
-        // GUI-subsystem builds don't show stderr, so also tee to a file
-        // next to the executable. Lazy-open on first hit; line-buffered.
         static FILE* s_batchLog = nullptr;
         if (!s_batchLog) {
             s_batchLog = std::fopen("vk_batch.log", "w");
@@ -702,6 +696,7 @@ void RendererVulkan::EndFrame() {
             std::fflush(s_batchLog);
         }
     }
+#endif
 }
 
 void RendererVulkan::Present() {

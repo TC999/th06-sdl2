@@ -36,11 +36,30 @@ The original project reconstructs the game source code from the binary to achiev
 
 ```bash
 # Windows (Win32, with GLES renderer)
-cmake -B build_sdl2 -A Win32 -DUSE_GLES=ON
+cmake -S . -B build_sdl2 -A Win32 -DUSE_GLES=ON
 cmake --build build_sdl2 --config Release
 
 # Linux (32-bit GLES)
-cmake -B build_linux_gles \
+sudo dpkg --add-architecture i386
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  gcc-multilib g++-multilib \
+  pkg-config \
+  cmake ninja-build \
+  libvulkan-dev \
+  libgl1-mesa-dev \
+  libegl1-mesa-dev \
+  libgles2-mesa-dev \
+  libjack-jackd2-0:i386 \
+  libjack-jackd2-dev:i386 \
+  libsdl2-dev:i386 \
+  libsdl2-image-dev:i386 \
+  libsdl2-mixer-dev:i386
+
+PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig \
+cmake -S . -B build_linux_gles -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUSE_GLES=ON \
   -DCMAKE_C_FLAGS="-m32" \
   -DCMAKE_CXX_FLAGS="-m32" \
   -DCMAKE_EXE_LINKER_FLAGS="-m32"
@@ -56,6 +75,10 @@ The executable needs access to the original game data. Place the game data files
 ```bash
 cd <path-to-game-data>
 <path-to>/build_sdl2/Release/th06.exe
+
+# Linux
+cd <path-to-game-data>
+<path-to>/build_linux_gles/th06
 ```
 
 ### Project Structure
@@ -133,12 +156,33 @@ android/                    # Android build (Gradle + NDK, WIP)
 
 ```bash
 # Windows（Win32，启用 GLES 渲染器）
-cmake -B build_sdl2 -A Win32 -DUSE_GLES=ON
+cmake -S . -B build_sdl2 -A Win32 -DUSE_GLES=ON
 cmake --build build_sdl2 --config Release
 
 # Linux（32 位 GLES）
+sudo dpkg --add-architecture i386
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  gcc-multilib g++-multilib \
+  pkg-config \
+  cmake ninja-build \
+  libvulkan-dev \
+  libgl1-mesa-dev \
+  libegl1-mesa-dev \
+  libgles2-mesa-dev \
+  libjack-jackd2-0:i386 \
+  libjack-jackd2-dev:i386 \
+  libsdl2-dev:i386 \
+  libsdl2-image-dev:i386 \
+  libsdl2-mixer-dev:i386
+
 PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig \
-cmake -B build_linux_gles -DCMAKE_BUILD_TYPE=Release -DUSE_GLES=ON
+cmake -S . -B build_linux_gles -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUSE_GLES=ON \
+  -DCMAKE_C_FLAGS="-m32" \
+  -DCMAKE_CXX_FLAGS="-m32" \
+  -DCMAKE_EXE_LINKER_FLAGS="-m32"
 cmake --build build_linux_gles
 ```
 
@@ -151,6 +195,10 @@ Windows 下 SDL2 库已内置于 `3rdparty/` 目录，自动链接。Linux 下�
 ```bash
 cd <游戏数据路径>
 <路径>/build_sdl2/Release/th06.exe
+
+# Linux
+cd <游戏数据路径>
+<路径>/build_linux_gles/th06
 ```
 
 ### 项目结构

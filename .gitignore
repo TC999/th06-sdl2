@@ -32,6 +32,7 @@ _build_sdl2_backup_*/
 # Vulkan backend build output
 build_vk/
 build_vk_*/
+build_linux_vk/
 
 # Android build
 android/SDL2_src/

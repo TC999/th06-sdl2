@@ -14,7 +14,9 @@
 // Phase 5b.2: Vulkan ImGui forwarding via the renderer (RendererVulkan owns the
 // imgui_impl_vulkan lifecycle so cmd buffer / render pass details stay private).
 #include "IRenderer.hpp"          // th06::IsUsingVulkan
+#ifdef TH06_USE_VULKAN
 #include "RendererVulkan.hpp"     // th06::GetRendererVulkan / RendererVulkan::RenderImGui
+#endif
 #include "TouchVirtualButtons.hpp"
 #include "MenuTouchButtons.hpp"
 #include <SDL.h>
@@ -77,9 +79,12 @@ void GameGuiBegin(game_gui_impl /*impl*/, bool game_nav)
 
     // Phase 5b.2: pick the matching ImGui backend NewFrame. On Vulkan we never
     // initialised the GL backend, so calling its NewFrame would deref unset state.
+#ifdef TH06_USE_VULKAN
     if (th06::IsUsingVulkan() && th06::g_Renderer) {
         static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->NewFrameImGui();
-    } else {
+    } else
+#endif
+    {
 #if defined(TH06_USE_GLES)
         ImGui_ImplOpenGL3_NewFrame();
 #else
@@ -309,12 +314,15 @@ void GameGuiRender(game_gui_impl /*impl*/)
         return;
     }
     ImGui::Render();
+#ifdef TH06_USE_VULKAN
     if (th06::IsUsingVulkan() && th06::g_Renderer) {
         // Phase 5b.2: Vulkan branch — RendererVulkan::EndFrame already opened the
         // offscreen render pass and is calling THPracGuiRender → here. Forward
         // into the renderer which records ImGui draws into the current cmd buffer.
         static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->RenderImGui();
-    } else {
+    } else
+#endif
+    {
 #if defined(TH06_USE_GLES)
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 #else

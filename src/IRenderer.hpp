@@ -117,11 +117,11 @@ extern IRenderer *g_Renderer;
 #ifndef __ANDROID__
 IRenderer *GetRendererGL();
 #endif
-// Vulkan backend is gated on TH06_USE_VULKAN (cross-platform — desktop OR Android
-// when the Vulkan toolchain is available).
-#ifdef TH06_USE_VULKAN
+// Vulkan backend declaration. Definition is provided when Vulkan backend
+// is compiled in; declare unconditionally so callers can reference the
+// symbol and the build can gate linking on whether the backend was
+// actually included.
 IRenderer *GetRendererVulkan();
-#endif
 IRenderer *GetRendererGLES();
 
 // Backend selection (Phase 5a / ADR-008).

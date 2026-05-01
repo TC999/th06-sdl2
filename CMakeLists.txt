@@ -12,7 +12,7 @@
 # 用法 (Linux 32-bit, 在 WSL 或原生 Linux 中):
 #   PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig cmake -B build_linux -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build_linux --target th06
-#   (需要: sudo apt install gcc-multilib g++-multilib libsdl2-dev:i386 libsdl2-image-dev:i386 libsdl2-mixer-dev:i386 libgl-dev:i386)
+#   (需要: sudo apt install gcc-multilib g++-multilib libsdl2-dev:i386 libsdl2-image-dev:i386 libsdl2-mixer-dev:i386 libgl-dev:i386 libjack-jackd2-0:i386 libjack-jackd2-dev:i386)
 #
 # 用法 (Android, 需要 NDK):
 #   cmake -B build_android -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a
@@ -27,6 +27,8 @@ if(MSVC)
     add_compile_options($<$<CONFIG:Release>:/Zi>)
     add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
 endif()
+
+
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
@@ -246,10 +248,6 @@ set(TH06_GAME_SOURCES
     # ImGui SDL2+OpenGL2 后端
     3rdparty/imgui/imgui_impl_sdl.cpp
     3rdparty/imgui/imgui_impl_opengl2.cpp
-    # Phase 5b.2: ImGui Vulkan backend (always built; gated at runtime via IsUsingVulkan).
-    # imgui_impl_vulkan.cpp pulls vulkan.h after volk.h has set VK_NO_PROTOTYPES,
-    # so it auto-switches to its own dispatch table populated via LoadFunctions().
-    3rdparty/imgui/imgui_impl_vulkan.cpp
 )
 
 # Always compile both renderers and both ImGui GL backends for runtime switching
@@ -273,6 +271,7 @@ else()
 endif()
 
 add_executable(th06 ${TH06_GAME_SOURCES})
+
 
 # Always define TH06_USE_GLES so both backends are available at runtime
 target_compile_definitions(th06 PRIVATE TH06_USE_GLES=1)
@@ -312,6 +311,7 @@ target_include_directories(th06 PRIVATE
     ${CMAKE_SOURCE_DIR}/3rdparty/rapidjson/include
     ${CMAKE_SOURCE_DIR}/3rdparty/imgui
     ${CMAKE_SOURCE_DIR}/3rdparty/zstd
+    ${CMAKE_SOURCE_DIR}/3rdparty/volk
 )
 
 # MSVC: i18n.hpp and thprac files contain UTF-8 CJK strings.
@@ -461,8 +461,17 @@ if(TH06_USE_VULKAN)
     endif()
     message(STATUS "TH06_USE_VULKAN: headers = ${Vulkan_INCLUDE_DIR}")
 
-    set(TH06_VULKAN_VMA_DIR "${Vulkan_INCLUDE_DIR}" CACHE PATH
+    if(EXISTS "${CMAKE_SOURCE_DIR}/3rdparty/Vulkan/include/vma/vk_mem_alloc.h")
+        set(_TH06_VMA_DEFAULT_DIR "${CMAKE_SOURCE_DIR}/3rdparty/Vulkan/include")
+    else()
+        set(_TH06_VMA_DEFAULT_DIR "${Vulkan_INCLUDE_DIR}")
+    endif()
+    set(TH06_VULKAN_VMA_DIR "${_TH06_VMA_DEFAULT_DIR}" CACHE PATH
         "Directory whose <vma/vk_mem_alloc.h> resolves the VMA single header.")
+    if(NOT EXISTS "${TH06_VULKAN_VMA_DIR}/vma/vk_mem_alloc.h")
+        set(TH06_VULKAN_VMA_DIR "${_TH06_VMA_DEFAULT_DIR}" CACHE PATH
+            "Directory whose <vma/vk_mem_alloc.h> resolves the VMA single header." FORCE)
+    endif()
 
     # --- 2. Loader: 用 vendored volk 运行期 LoadLibrary + GetProcAddress。
     # 该方案彻底避开 32-bit Windows 上 stdcall 名装饰与手生 import lib 不匹配的问题
@@ -496,6 +505,9 @@ if(TH06_USE_VULKAN)
     add_executable(vk_smoketest
         ${CMAKE_SOURCE_DIR}/tools/vk_smoketest.cpp
         ${TH06_VULKAN_SOURCES}
+        ${CMAKE_SOURCE_DIR}/src/RendererVulkan.cpp
+        ${CMAKE_SOURCE_DIR}/src/AssetIO.cpp
+        ${CMAKE_SOURCE_DIR}/src/GamePaths.cpp
     )
     target_include_directories(vk_smoketest PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -509,6 +521,15 @@ if(TH06_USE_VULKAN)
         SDL2::SDL2
         SDL2_image::SDL2_image    # Phase 3: CreateTextureFromMemory uses IMG_Load_RW
     )
+    if(NOT WIN32)
+        find_library(TH06_VULKAN_LOADER NAMES vulkan PATHS /usr/lib/i386-linux-gnu NO_DEFAULT_PATH)
+        if(NOT TH06_VULKAN_LOADER)
+            find_file(TH06_VULKAN_LOADER NAMES libvulkan.so.1 PATHS /usr/lib/i386-linux-gnu NO_DEFAULT_PATH)
+        endif()
+        if(TH06_VULKAN_LOADER)
+            target_link_libraries(vk_smoketest PRIVATE ${TH06_VULKAN_LOADER})
+        endif()
+    endif()
     target_compile_definitions(vk_smoketest PRIVATE
         TH06_USE_VULKAN=1
         VK_NO_PROTOTYPES=1       # 强制全面走 volk 函数指针，避免 link 时跳到未定义的 stdcall 原型
@@ -577,14 +598,19 @@ if(TH06_USE_VULKAN)
         "TH06_VK_SHADER_DIR=\"${TH06_VK_SHADER_OUT_DIR}\""
     )
 
-    # --- 6. Phase 5b: link Vulkan sources into main th06 game target so
-    # `--backend=vulkan` actually creates RendererVulkan at runtime.
+    # Link Vulkan sources into the main th06 target so Vulkan runtime paths
+    # have concrete definitions (RendererVulkan, VkContext, volk, etc.).
     target_sources(th06 PRIVATE ${TH06_VULKAN_SOURCES} ${CMAKE_SOURCE_DIR}/src/RendererVulkan.cpp)
+    # ImGui Vulkan backend is only needed when Vulkan support is compiled in.
+    target_sources(th06 PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/imgui/imgui_impl_vulkan.cpp)
     target_include_directories(th06 PRIVATE
         ${Vulkan_INCLUDE_DIR}
         ${TH06_VULKAN_VMA_DIR}
         ${TH06_VOLK_DIR}
     )
+    if(NOT WIN32 AND TH06_VULKAN_LOADER)
+        target_link_libraries(th06 PRIVATE ${TH06_VULKAN_LOADER})
+    endif()
     target_compile_definitions(th06 PRIVATE
         TH06_USE_VULKAN=1
         VK_NO_PROTOTYPES=1
