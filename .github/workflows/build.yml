@@ -1,0 +1,21 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dependencies
+        run: |
+          sudo add-architecture i386
+          sudo apt-get update
+          sudo apt install gcc-multilib g++-multilib libsdl2-dev:i386 libsdl2-image-dev:i386 libsdl2-mixer-dev:i386 libgl-dev:i386 -y
+
+      - name: Build
+        run: |
+           PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig \
+           cmake -B build_linux_gles -DCMAKE_BUILD_TYPE=Release
+           cmake --build build_linux_gles --target th06
