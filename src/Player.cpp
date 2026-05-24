@@ -1887,10 +1887,8 @@ i32 Player::CalcItemBoxCollision(D3DXVECTOR3 *itemCenter, D3DXVECTOR3 *itemSize)
     {
         return 0;
     }
-    D3DXVECTOR3 itemTopLeft;
-    memcpy(&itemTopLeft, &(*itemCenter - *itemSize / 2.0f), sizeof(D3DXVECTOR3));
-    D3DXVECTOR3 itemBottomRight;
-    memcpy(&itemBottomRight, &(*itemCenter + *itemSize / 2.0f), sizeof(D3DXVECTOR3));
+    D3DXVECTOR3 itemTopLeft = *itemCenter - *itemSize / 2.0f;
+    D3DXVECTOR3 itemBottomRight = *itemCenter + *itemSize / 2.0f;
 
     if (this->grabItemTopLeft.x > itemBottomRight.x || this->grabItemBottomRight.x < itemTopLeft.x ||
         this->grabItemTopLeft.y > itemBottomRight.y || this->grabItemBottomRight.y < itemTopLeft.y)

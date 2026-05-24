@@ -493,7 +493,7 @@ ZunResult Stage::UpdateObjects()
                 {
                     vmsNotFinished++;
                 }
-                objQuad = (RawStageQuadBasic *)((i32)&objQuad->type + objQuad->byteSize);
+                objQuad = (RawStageQuadBasic *)((u8 *)objQuad + objQuad->byteSize);
             }
             if (vmsNotFinished == 0)
             {
@@ -692,7 +692,7 @@ ZunResult Stage::RenderObjects(i32 zLevel)
                     }
                     break;
                 }
-                curQuad = (RawStageQuadBasic *)((i32)&curQuad->type + curQuad->byteSize);
+                curQuad = (RawStageQuadBasic *)((u8 *)curQuad + curQuad->byteSize);
             }
             instancesDrawn++;
         }

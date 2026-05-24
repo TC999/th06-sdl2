@@ -857,29 +857,25 @@ ZunResult GuiImpl::DrawDialogue()
     // Zun made a separate vertex structure with a D3DXVECTOR3 for the xyz, a
     // separate f32 for the w, and a D3DCOLOR for the diffuse. This kinda makes
     // no sense though - the position is a D3DXVECTOR4.
-    memcpy(&vertices[0].position,
-           &D3DXVECTOR3(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f -
-                            16.0f,
-                        384.0f, 0.0f),
-           sizeof(D3DXVECTOR3));
+    D3DXVECTOR3 dlgPos0(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f -
+                        16.0f,
+                        384.0f, 0.0f);
+    memcpy(&vertices[0].position, &dlgPos0, sizeof(D3DXVECTOR3));
 
-    memcpy(&vertices[1].position,
-           &D3DXVECTOR3(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f +
-                            256.0f + 16.0f,
-                        384.0f, 0.0f),
-           sizeof(D3DXVECTOR3));
+    D3DXVECTOR3 dlgPos1(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f +
+                        256.0f + 16.0f,
+                        384.0f, 0.0f);
+    memcpy(&vertices[1].position, &dlgPos1, sizeof(D3DXVECTOR3));
 
-    memcpy(&vertices[2].position,
-           &D3DXVECTOR3(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f -
-                            16.0f,
-                        384.0f + dialogueBoxHeight, 0.0f),
-           sizeof(D3DXVECTOR3));
+    D3DXVECTOR3 dlgPos2(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f -
+                        16.0f,
+                        384.0f + dialogueBoxHeight, 0.0f);
+    memcpy(&vertices[2].position, &dlgPos2, sizeof(D3DXVECTOR3));
 
-    memcpy(&vertices[3].position,
-           &D3DXVECTOR3(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f +
-                            256.0f + 16.0f,
-                        384.0f + dialogueBoxHeight, 0.0f),
-           sizeof(D3DXVECTOR3));
+    D3DXVECTOR3 dlgPos3(g_GameManager.arcadeRegionTopLeftPos.x + (g_GameManager.arcadeRegionSize.x - 256.0f) / 2.0f +
+                        256.0f + 16.0f,
+                        384.0f + dialogueBoxHeight, 0.0f);
+    memcpy(&vertices[3].position, &dlgPos3, sizeof(D3DXVECTOR3));
 
     vertices[0].diffuse = vertices[1].diffuse = 0xd0000000;
     vertices[2].diffuse = vertices[3].diffuse = 0x90000000;
@@ -1339,12 +1335,14 @@ void Gui::DrawGameScene()
         VertexDiffuseXyzrwh vertices[4];
         if (g_GameManager.currentPower > 0)
         {
-            memcpy(&vertices[0].position, &D3DXVECTOR3(496.0f, 186.0f, 0.1f), sizeof(D3DXVECTOR3));
-            memcpy(&vertices[1].position, &D3DXVECTOR3(g_GameManager.currentPower + 496 + 0.0f, 186.0f, 0.1f),
-                   sizeof(D3DXVECTOR3));
-            memcpy(&vertices[2].position, &D3DXVECTOR3(496.0f, 202.0f, 0.1f), sizeof(D3DXVECTOR3));
-            memcpy(&vertices[3].position, &D3DXVECTOR3(g_GameManager.currentPower + 496 + 0.0f, 202.0f, 0.1f),
-                   sizeof(D3DXVECTOR3));
+                 D3DXVECTOR3 powPos0(496.0f, 186.0f, 0.1f);
+                 D3DXVECTOR3 powPos1(g_GameManager.currentPower + 496 + 0.0f, 186.0f, 0.1f);
+                 D3DXVECTOR3 powPos2(496.0f, 202.0f, 0.1f);
+                 D3DXVECTOR3 powPos3(g_GameManager.currentPower + 496 + 0.0f, 202.0f, 0.1f);
+                 memcpy(&vertices[0].position, &powPos0, sizeof(D3DXVECTOR3));
+                 memcpy(&vertices[1].position, &powPos1, sizeof(D3DXVECTOR3));
+                 memcpy(&vertices[2].position, &powPos2, sizeof(D3DXVECTOR3));
+                 memcpy(&vertices[3].position, &powPos3, sizeof(D3DXVECTOR3));
 
             vertices[0].diffuse = vertices[2].diffuse = 0xe0e0e0ff;
             vertices[1].diffuse = vertices[3].diffuse = 0x80e0e0ff;
@@ -1380,23 +1378,22 @@ void Gui::DrawGameScene()
         }
         if (g_GameManager.currentPower < 128)
         {
-            g_AsciiManager.AddFormatText(&D3DXVECTOR3(496.0f, 186.0f, 0.0f), "%d", g_GameManager.currentPower);
+            D3DXVECTOR3 powTextPos(496.0f, 186.0f, 0.0f);
+            g_AsciiManager.AddFormatText(&powTextPos, "%d", g_GameManager.currentPower);
         }
 
         if (isDualSession)
         {
             if (g_GameManager.currentPower2 > 0)
             {
-                memcpy(&vertices[0].position, &D3DXVECTOR3(496.0f, 186.0f + dualHudYOffset, 0.1f),
-                       sizeof(D3DXVECTOR3));
-                memcpy(&vertices[1].position,
-                       &D3DXVECTOR3(g_GameManager.currentPower2 + 496 + 0.0f, 186.0f + dualHudYOffset, 0.1f),
-                       sizeof(D3DXVECTOR3));
-                memcpy(&vertices[2].position, &D3DXVECTOR3(496.0f, 202.0f + dualHudYOffset, 0.1f),
-                       sizeof(D3DXVECTOR3));
-                memcpy(&vertices[3].position,
-                       &D3DXVECTOR3(g_GameManager.currentPower2 + 496 + 0.0f, 202.0f + dualHudYOffset, 0.1f),
-                       sizeof(D3DXVECTOR3));
+                  D3DXVECTOR3 pow2Pos0(496.0f, 186.0f + dualHudYOffset, 0.1f);
+                  D3DXVECTOR3 pow2Pos1(g_GameManager.currentPower2 + 496 + 0.0f, 186.0f + dualHudYOffset, 0.1f);
+                  D3DXVECTOR3 pow2Pos2(496.0f, 202.0f + dualHudYOffset, 0.1f);
+                  D3DXVECTOR3 pow2Pos3(g_GameManager.currentPower2 + 496 + 0.0f, 202.0f + dualHudYOffset, 0.1f);
+                  memcpy(&vertices[0].position, &pow2Pos0, sizeof(D3DXVECTOR3));
+                  memcpy(&vertices[1].position, &pow2Pos1, sizeof(D3DXVECTOR3));
+                  memcpy(&vertices[2].position, &pow2Pos2, sizeof(D3DXVECTOR3));
+                  memcpy(&vertices[3].position, &pow2Pos3, sizeof(D3DXVECTOR3));
 
                 vertices[0].diffuse = vertices[2].diffuse = 0xe0e0ffff;
                 vertices[1].diffuse = vertices[3].diffuse = 0x80e0ffff;
@@ -1432,8 +1429,8 @@ void Gui::DrawGameScene()
             }
             if (g_GameManager.currentPower2 < 128)
             {
-                g_AsciiManager.AddFormatText(&D3DXVECTOR3(496.0f, 186.0f + dualHudYOffset, 0.0f), "%d",
-                                             g_GameManager.currentPower2);
+                D3DXVECTOR3 pow2TextPos(496.0f, 186.0f + dualHudYOffset, 0.0f);
+                g_AsciiManager.AddFormatText(&pow2TextPos, "%d", g_GameManager.currentPower2);
             }
         }
     }
