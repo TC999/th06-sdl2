@@ -41,6 +41,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(TH06_USE_SDL2 "使用 SDL2 作为平台后端" ON)
 option(TH06_BUILD_ORIGINAL "构建原始 D3D8/Win32 版本 (仅限 Windows)" OFF)
 option(TH06_ENABLE_PREDICTION_ROLLBACK "编译预测回滚联机代码" OFF)
+option(TH06_FORCE_32 "Force compilation as 32-bit on GNU/Clang (keeps original sizeof(void*)==4 behaviour)" ON)
 
 # ============================================================================
 # SDL2 查找
@@ -130,7 +131,7 @@ target_link_libraries(th06_sdl2_test PRIVATE
     SDL2_mixer::SDL2_mixer
 )
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang") AND TH06_FORCE_32)
     target_compile_options(th06_sdl2_test PRIVATE -m32)
     target_link_options(th06_sdl2_test PRIVATE -m32)
 endif()
@@ -246,10 +247,9 @@ set(TH06_GAME_SOURCES
     # ImGui SDL2+OpenGL2 后端
     3rdparty/imgui/imgui_impl_sdl.cpp
     3rdparty/imgui/imgui_impl_opengl2.cpp
-    # Phase 5b.2: ImGui Vulkan backend (always built; gated at runtime via IsUsingVulkan).
+    # Phase 5b.2: ImGui Vulkan backend (only built when TH06_USE_VULKAN is enabled).
     # imgui_impl_vulkan.cpp pulls vulkan.h after volk.h has set VK_NO_PROTOTYPES,
     # so it auto-switches to its own dispatch table populated via LoadFunctions().
-    3rdparty/imgui/imgui_impl_vulkan.cpp
 )
 
 # Always compile both renderers and both ImGui GL backends for runtime switching
@@ -288,8 +288,8 @@ if(MSVC)
     target_link_options(th06 PRIVATE /MAP)
 endif()
 
-# GCC/Clang: 游戏文件格式依赖32位指针大小，必须编译为32位
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+# GCC/Clang: 游戏文件格式默认依赖32位指针大小。保留向后兼容的强制32位选项
+if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang") AND TH06_FORCE_32)
     target_compile_options(th06 PRIVATE
         -m32                     # 强制32位编译 (文件格式和结构体布局依赖sizeof(void*)==4)
         -fsigned-char            # ARM默认char为unsigned; 统一为signed以匹配x86和游戏逻辑
@@ -297,12 +297,19 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang
         $<$<COMPILE_LANGUAGE:CXX>:-fpermissive>         # 允许GCC不支持的MSVC兼容语法 (额外限定名, 取右值地址等)
     )
     target_link_options(th06 PRIVATE -m32)
+else()
+    message(STATUS "TH06_FORCE_32 is OFF: not forcing -m32; building for host pointer size (${CMAKE_SIZEOF_VOID_P})")
 endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(th06 PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning> # union成员名与类型名相同 (EclManager.hpp)
     )
+endif()
+
+# Allow some permissive GNU++ behavior to compile legacy non-standard constructs
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(th06 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fpermissive>)
 endif()
 
 # 包含目录
@@ -384,7 +391,7 @@ add_custom_target(generate_i18n DEPENDS "${I18N_HPP}")
 add_dependencies(th06 generate_i18n)
 
 # 查找 OpenGL
-if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TH06_FORCE_32)
     # 32位编译: 手动指定i386 OpenGL库路径, 避免find_package找到64位版本
     find_library(OPENGL_gl_LIBRARY NAMES GL PATHS /usr/lib/i386-linux-gnu NO_DEFAULT_PATH)
     if(NOT OPENGL_gl_LIBRARY)
@@ -580,6 +587,7 @@ if(TH06_USE_VULKAN)
     # --- 6. Phase 5b: link Vulkan sources into main th06 game target so
     # `--backend=vulkan` actually creates RendererVulkan at runtime.
     target_sources(th06 PRIVATE ${TH06_VULKAN_SOURCES} ${CMAKE_SOURCE_DIR}/src/RendererVulkan.cpp)
+    target_sources(th06 PRIVATE 3rdparty/imgui/imgui_impl_vulkan.cpp)
     target_include_directories(th06 PRIVATE
         ${Vulkan_INCLUDE_DIR}
         ${TH06_VULKAN_VMA_DIR}

@@ -77,15 +77,23 @@ void GameGuiBegin(game_gui_impl /*impl*/, bool game_nav)
 
     // Phase 5b.2: pick the matching ImGui backend NewFrame. On Vulkan we never
     // initialised the GL backend, so calling its NewFrame would deref unset state.
+#if defined(TH06_USE_VULKAN)
     if (th06::IsUsingVulkan() && th06::g_Renderer) {
-        static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->NewFrameImGui();
+        reinterpret_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->NewFrameImGui();
     } else {
+#else
+    {
+#endif
 #if defined(TH06_USE_GLES)
         ImGui_ImplOpenGL3_NewFrame();
 #else
         ImGui_ImplOpenGL2_NewFrame();
 #endif
+#if defined(TH06_USE_VULKAN)
     }
+#else
+    }
+#endif
     if (!io.Fonts->IsBuilt())
         return;
     ImGui_ImplSDL2_NewFrame(s_guiWindow);
@@ -309,12 +317,16 @@ void GameGuiRender(game_gui_impl /*impl*/)
         return;
     }
     ImGui::Render();
+#if defined(TH06_USE_VULKAN)
     if (th06::IsUsingVulkan() && th06::g_Renderer) {
         // Phase 5b.2: Vulkan branch — RendererVulkan::EndFrame already opened the
         // offscreen render pass and is calling THPracGuiRender → here. Forward
         // into the renderer which records ImGui draws into the current cmd buffer.
-        static_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->RenderImGui();
+        reinterpret_cast<th06::RendererVulkan*>(th06::GetRendererVulkan())->RenderImGui();
     } else {
+#else
+    {
+#endif
 #if defined(TH06_USE_GLES)
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 #else

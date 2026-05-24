@@ -14,7 +14,9 @@
 
 #include "IRenderer.hpp"
 
+#if defined(TH06_USE_VULKAN)
 #include <volk.h>
+#endif
 #include <memory>
 #include <cstdint>
 #include <cstdio>
@@ -33,6 +35,7 @@ class VkTextureManager;
 
 namespace th06 {
 
+#if defined(TH06_USE_VULKAN)
 class RendererVulkan final : public IRenderer
 {
 public:
@@ -335,5 +338,10 @@ private:
     // colored blocks (sampling white * diffuse). See bug 2026-04-18.
     bool     textureStageDiffuseOnly_ = false;
 };
+#else
+// Forward declaration for non-Vulkan builds so other translation units can
+// reference the type without requiring Vulkan headers.
+class RendererVulkan;
+#endif
 
 }  // namespace th06

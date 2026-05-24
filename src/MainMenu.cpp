@@ -15,7 +15,7 @@
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
 #include "ChainPriorities.hpp"
-#include "Filesystem.hpp"
+#include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
 #include "GamePaths.hpp"

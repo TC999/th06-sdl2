@@ -78,3 +78,6 @@ SKILL.md
 .ai-*
 prompts/
 .prompts/
+
+# x64
+build_linux_x64/
